@@ -6,7 +6,7 @@ import ujson as json
 from PIL import Image
 
 from .core import Component
-from .result import DirectoryListResult, ListResult, Result
+from .result import DirectoryListResult, Result
 
 
 class Provider(Component):
@@ -49,9 +49,10 @@ class IIIFDirFileProvider(DirFileProvider):
         canvases = self.get_images_info(mf)
         self.download_images(canvases)
         files = os.listdir(self.images_dir)
-        return DirectoryListResult(
+        d = DirectoryListResult(
             [os.path.join(self.images_dir, x) for x in files if not x.endswith("json")], input=input, processor=self
         )
+        return Provider._process(self, d)
 
     def get_manifest(self, manifest_url):
         """Fetch manifest data from the manifest URL"""
@@ -81,7 +82,6 @@ class IIIFDirFileProvider(DirFileProvider):
                         "label": canvas.get("label", {}),
                         "images": [],
                     }
-
                     if "items" in canvas:
                         for page in canvas["items"]:
                             if "items" in page:
@@ -95,7 +95,6 @@ class IIIFDirFileProvider(DirFileProvider):
                                             }
                                             canvas_info["images"].append(image_info)
                     canvas_data.append(canvas_info)
-
             return canvas_data
         except Exception as e:
             raise Exception(f"Error extracting image information: {e}")
@@ -131,6 +130,5 @@ class IIIFDirFileProvider(DirFileProvider):
 
         # write images hash to disk
         with open(os.path.join(self.images_dir, "_info.json"), "w") as fh:
-            jstr = json.dumps(images)
-            fh.write(jstr)
+            json.dumps(images, fh)
         return images
