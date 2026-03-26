@@ -1,3 +1,4 @@
+from .ai.gemini import GeminiComponent
 from .core import Component
 from .result import ItemResult
 
@@ -14,7 +15,7 @@ class Transcriber(Component):
         return ItemResult(f"transcription of {filename}", metadata={"effort": 0}, input=input, processor=self)
 
 
-class GeminiTranscriber(Transcriber):
+class GeminiTranscriber(Transcriber, GeminiComponent):
     pass
 
 

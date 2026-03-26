@@ -3,7 +3,13 @@ import logging
 import uuid
 from typing import List, Optional
 
+from dotenv import find_dotenv, load_dotenv
+
+# Set up the environment globally
 logger = logging.getLogger("chai")
+fn = find_dotenv(usecwd=True)
+if fn:
+    load_dotenv(fn)
 
 
 def importClass(objectType):

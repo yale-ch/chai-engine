@@ -1,5 +1,7 @@
 from chai.workflow import Workflow
 
+
+
 js = {
     "id": "wf2",
     "type": "Workflow",
@@ -14,28 +16,9 @@ js = {
                     "name": "File Iterator",
                     "steps": [
                         {
-                            "id": "pii_classifier",
-                            "type": "classifier.Classifier",
-                            "name": "Has PII Classifier",
-                            "register_on": ["img_iter"],
-                        },
-                        {
-                            "type": "gate.LabelTestGate",
-                            "name": "Has PII Gate",
-                            "settings": {"component": "pii_classifier", "label": ["okay"]},
-                            "true_steps": [
-                                {
-                                    "type": "transcriber.GeminiTranscriber",
-                                    "name": "Cloud Image Transcriber",
-                                }
-                            ],
-                            "false_steps": [
-                                {
-                                    "type": "transcriber.LocalTranscriber",
-                                    "name": "Local Image Transcriber",
-                                }
-                            ],
-                        },
+                            "type": "transcriber.GeminiTranscriber",
+                            "name": "Cloud Image Transcriber",
+                        }
                     ],
                 }  # merged result is complete here
             ],
