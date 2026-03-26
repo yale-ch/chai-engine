@@ -1,4 +1,4 @@
-from chai.core import Workflow
+from chai.workflow import Workflow
 
 js = {
     "id": "wf2",
@@ -6,32 +6,32 @@ js = {
     "name": "Top level workflow",
     "steps": [
         {
-            "type": "DirFileProvider",
+            "type": "provider.DirFileProvider",
             "steps": [  # Each item gets sent through these
                 {
                     "id": "img_iter",
-                    "type": "IterateStep",
+                    "type": "iterator.Iterator",
                     "name": "File Iterator",
                     "steps": [
                         {
                             "id": "pii_classifier",
-                            "type": "Classifier",
+                            "type": "classifier.Classifier",
                             "name": "Has PII Classifier",
                             "register_on": ["img_iter"],
                         },
                         {
-                            "type": "LabelTestGate",
+                            "type": "gate.LabelTestGate",
                             "name": "Has PII Gate",
                             "settings": {"component": "pii_classifier", "label": ["okay"]},
                             "true_steps": [
                                 {
-                                    "type": "GeminiTranscriber",
+                                    "type": "transcriber.GeminiTranscriber",
                                     "name": "Cloud Image Transcriber",
                                 }
                             ],
                             "false_steps": [
                                 {
-                                    "type": "LocalTranscriber",
+                                    "type": "transcriber.LocalTranscriber",
                                     "name": "Local Image Transcriber",
                                 }
                             ],
@@ -39,11 +39,11 @@ js = {
                     ],
                 }  # merged result is complete here
             ],
-            "next_steps": [{"id": "iter_debug", "type": "DebugStep"}],  # This gets merged result from the iter
+            "next_steps": [{"id": "iter_debug", "type": "utils.DebugStep"}],  # This gets merged result from the iter
         },
         {
             "id": "dfp_debug",
-            "type": "DebugStep",  # this gets result from DFP
+            "type": "utils.DebugStep",  # this gets result from DFP
         },
     ],
 }
