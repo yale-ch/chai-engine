@@ -25,7 +25,11 @@ class DirFileProvider(Provider):
     def _process(self, input):
         if os.path.exists(input):
             files = os.listdir(input)
-            d = DirectoryListResult([os.path.join(input, x) for x in files], input=input, processor=self)
+            d = DirectoryListResult(
+                [os.path.join(input, x) for x in files],
+                input=input,
+                processor=self,
+            )
             return super()._process(d)
         else:
             raise ValueError("input file path does not exist")
@@ -48,10 +52,9 @@ class IIIFDirFileProvider(DirFileProvider):
         mf = self.get_manifest(input)
         canvases = self.get_images_info(mf)
         self.download_images(canvases)
-        files = os.listdir(self.images_dir)
-        d = DirectoryListResult(
-            [os.path.join(self.images_dir, x) for x in files if not x.endswith("json")], input=input, processor=self
-        )
+        files = [os.path.join(self.images_dir, x) for x in os.listdir(self.images_dir) if not x.endswith("json")]
+        files = [x for x in files if not os.path.isdir(x)]
+        d = DirectoryListResult(files, input=input, processor=self)
         return Provider._process(self, d)
 
     def get_manifest(self, manifest_url):
