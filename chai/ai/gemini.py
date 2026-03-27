@@ -1,22 +1,20 @@
 import io
+import logging
 import os
+import re
 import time
+from pathlib import Path
+from typing import Any, Optional, Union
 
 import ujson as json
 from google import genai
 from google.genai import types
-from pillow import Image
+from PIL import Image
 
+# from tenacity import retry
 from ..core import Component
 
-known_gemini_models = {
-    "gemini-3.1-pro-preview": {},
-    "gemini-3-flash-preview": {},
-    "gemini-3.1-flash-lite-preview": {},
-    "gemini-2.5-pro": {},
-    "gemini-2.5-flash": {},
-    "gemini-2.5-flash-lite": {},
-}
+logger = logging.getLogger("chai")
 
 
 class GeminiComponent(Component):
@@ -24,7 +22,14 @@ class GeminiComponent(Component):
         super().__init__(tree, workflow, parent)
 
         self.client = None
+
+        # treat project name as sensitive information
+        # if project is set, then use vertex, otherwise gemini API
         self.project = os.getenv("GOOGLE_CLOUD_PROJECT", "")
+        self.api_key = os.getenv("GEMINI_API_KEY", os.getenv("GOOGLE_API_KEY", ""))
+        if not self.project and not self.api_key:
+            raise ValueError("Either GEMINI_API_KEY or GOOGLE_API_KEY must be set")
+
         self.location = self.settings.get("location", "global")
         self.model = self.settings.get("model", "gemini-3.1-flash-lite-preview")
         self.temperature = self.settings.get("temperature", 0.4)
@@ -66,36 +71,220 @@ class GeminiComponent(Component):
 
     def connect_to_client(self):
         """
-        Connects to Google Cloud Platform and initializes Vertex AI and OpenAI clients.
+        Connects to Google Cloud Platform.
         Returns: None
         """
-        self.client = genai.Client(
-            vertexai=True, project=self.project, location=self.location, http_options=self.http_options
+        if self.project:
+            self.client = genai.Client(
+                vertexai=True, project=self.project, location=self.location, http_options=self.http_options
+            )
+        else:
+            self.client = genai.Client(api_key=self.api_key)
+
+    def generate_content(self, contents: Union[str, list]):
+        """Synchronous wrapper for generate_content."""
+        if not self.client:
+            raise RuntimeError("Gemini client not initialized.")
+
+        return self.client.models.generate_content(model=self.model, contents=contents, config=self.base_config)
+
+    async def generate_content_async(self, contents: Union[str, list]):
+        """Asynchronous wrapper for generate_content."""
+        if not self.client:
+            raise RuntimeError("Gemini client not initialized.")
+        return await self.client.aio.models.generate_content(
+            model=self.model, contents=contents, config=self.base_config
         )
 
-    def setup(self, prompt, schema=None):
-        self.prompt_text = prompt
-        self.prompt = types.Part.from_text(text=prompt)
+    @staticmethod
+    def extract_text(response) -> str:
+        """Safely extract text from a Gemini response, handling candidate fallbacks."""
+        try:
+            if response.text:
+                return response.text.strip()
+        except ValueError:
+            pass  # Fallback below
 
-    def setup_inputs(self, inputs):
-        self.inputs = []
-        for i in inputs:
-            self.inputs.append(self.make_input(i))
+        text = ""
+        if hasattr(response, "candidates") and response.candidates:
+            for part in response.candidates[0].content.parts:
+                if hasattr(part, "text") and part.text:
+                    text += part.text
+        return text.strip()
 
-    def make_input(self, input):
-        return types.Part.from_uri(file_uri=f"gs://{input}", mime_type="image/jpeg")
+    @staticmethod
+    def extract_json(text: str) -> Optional[Union[dict, list]]:
+        """Extract JSON from LLM response, handling control chars, markdown fences and truncation."""
 
-    def make_image_input_part(self, fn):
-        with Image.open(fn) as img:
-            # Convert to bytes
-            img_buffer = io.BytesIO()
-            img.save(img_buffer, format="PNG")
-            img_bytes = img_buffer.getvalue()
+        text = text.strip()
 
-        image_part = types.Part.from_bytes(data=img_bytes, mime_type="image/png")
-        return image_part
+        # 1. Clean control characters that might break standard JSON parsers
+        text = re.sub(r"[\x00-\x1F\x7F]", " ", text)
 
-    def run(self):
+        # 2. Strip markdown code fences if present
+        if text.startswith("```"):
+            lines = text.split("\n")
+            if len(lines) > 1:
+                lines = lines[1:]
+                if lines and lines[-1].strip().startswith("```"):
+                    lines = lines[:-1]
+                text = "\n".join(lines).strip()
+
+        # 3. Direct parse attempt
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        # 4. Try fixing trailing commas
+        cleaned_text = re.sub(r",\s*}", "}", text)
+        cleaned_text = re.sub(r",\s*]", "]", cleaned_text)
+        try:
+            return json.loads(cleaned_text)
+        except json.JSONDecodeError:
+            pass
+
+        # 5. Try extracting the outermost JSON object/array
+        match = re.search(r"\{[\s\S]*\}|\[[\s\S]*\]", text)
+        if match:
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
+
+        # 6. Truncated JSON recovery
+        repaired = GeminiComponent.try_repair_truncated_json(text)
+        if repaired is not None:
+            return repaired
+
+        logger.error(f"Failed to parse JSON from LLM response: {text[:500]}")
+        return {}
+
+    @staticmethod
+    def try_repair_truncated_json(text: str) -> Optional[Union[dict, list]]:
+        """Attempt to repair truncated JSON by closing open structures."""
+        match = re.search(r"[\{\[]", text)
+        if not match:
+            return None
+
+        fragment = text[match.start() :]
+
+        # Close any open string literal
+        in_string = False
+        escaped = False
+        for ch in fragment:
+            if escaped:
+                escaped = False
+                continue
+            if ch == "\\":
+                escaped = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+
+        if in_string:
+            fragment += '"'
+
+        # Count and close open brackets/braces
+        opens = 0
+        open_brackets = 0
+        in_str = False
+        esc = False
+        for ch in fragment:
+            if esc:
+                esc = False
+                continue
+            if ch == "\\":
+                esc = True
+                continue
+            if ch == '"':
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if ch == "{":
+                opens += 1
+            elif ch == "}":
+                opens -= 1
+            elif ch == "[":
+                open_brackets += 1
+            elif ch == "]":
+                open_brackets -= 1
+
+        fragment += "]" * max(open_brackets, 0)
+        fragment += "}" * max(opens, 0)
+
+        # Strip trailing comma before closing braces/brackets
+        fragment = re.sub(r",\s*([}\]])", r"\1", fragment)
+
+        try:
+            return json.loads(fragment)
+        except json.JSONDecodeError:
+            return None
+
+    @staticmethod
+    def get_usage(response) -> dict:
+        """Extract usage metadata (tokens) from response."""
+        meta = getattr(response, "usage_metadata", None)
+        if not meta:
+            return {}
+
+        try:
+            t_output = meta.candidates_token_count
+            t_thinking = meta.thoughts_token_count
+            t_prompt = -1
+            t_image = -1
+            for ptd in meta.prompt_tokens_details:
+                if ptd.modality.value == "TEXT":
+                    t_prompt = ptd.token_count
+                elif ptd.modality.value == "IMAGE":
+                    t_image = ptd.token_count
+            t_total = meta.total_token_count
+            return {
+                "total": t_total,
+                "prompt": t_prompt,
+                "images": t_image,
+                "thinking": t_thinking,
+                "result": t_output,
+            }
+        except Exception:
+            return {}
+
+    @staticmethod
+    def image_to_part(image_source: Union[str, Path, Image.Image, bytes], mime_type: str = "image/png") -> types.Part:
+        """Convert various image formats into a google.genai.types.Part."""
+
+        ext_map = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".webp": "image/webp",
+            ".gif": "image/gif",
+        }
+
+        if isinstance(image_source, str) and image_source.startswith("gs://"):
+            path = Path(image_source)
+            # Infer mime type from extension if standard
+            mime_type = ext_map.get(path.suffix.lower(), mime_type)
+            return types.Part.from_uri(file_uri=image_source, mime_type=mime_type)
+        elif isinstance(image_source, Image.Image):
+            buf = io.BytesIO()
+            image_source.save(buf, format=mime_type.split("/")[-1].upper() if "/" in mime_type else "PNG")
+            img_bytes = buf.getvalue()
+        elif isinstance(image_source, (str, Path)):
+            path = Path(image_source)
+            # Infer mime type from extension if standard
+            mime_type = ext_map.get(path.suffix.lower(), mime_type)
+            with open(path, "rb") as f:
+                img_bytes = f.read()
+        elif isinstance(image_source, bytes):
+            img_bytes = image_source
+        else:
+            raise ValueError(f"Unsupported image source type: {type(image_source)}")
+
+        return types.Part.from_bytes(data=img_bytes, mime_type=mime_type)
+
+    def _process(self):
         client = self.client
         if client is None:
             self.connect_to_client()
@@ -114,57 +303,17 @@ class GeminiComponent(Component):
 
         contents = [types.Content(role="user", parts=[*self.inputs, self.prompt])]
         start = time.time()
-        resp = client.models.generate_content(model=self.model, contents=contents, config=self.base_config)
+        resp = self.generate_content(contents=contents)
         duration = time.time() - start
 
         if hasattr(resp, "parsed") and resp.parsed:
             result = resp.parsed.dict()
         else:
-            try:
-                txt = resp.candidates[0].content.parts[0].text
-                result = {}
-            except Exception:
-                result = {"type": "ERROR", "cause": "Failed to retrieve response", "text": ""}
-                txt = ""
-                self.results = resp
-                return
+            txt = self.extract_text(resp)
+            result = self.extract_json(txt)
 
-            txt = txt.strip()
-            if "```json" in txt:
-                txt = txt.split("```json", 1)[1]
-                txt = txt.rsplit("```", 1)[0]
-                txt = txt.strip()
-                result = json.loads(txt)
-            elif not txt:
-                result = {"type": "ERROR", "cause": "No text returned", "text": ""}
-                self.results = resp
-                return
-            elif (txt[0] == "{" and txt[-1] == "}") or (txt[0] == "[" and txt[-1] == "]"):
-                result = json.loads(txt)
-            elif not result:
-                result = {"type": "TEXT", "text": txt}
+        toks = self.get_usage(resp)
 
-        try:
-            umd = resp.usage_metadata
-            t_output = umd.candidates_token_count
-            t_thinking = umd.thoughts_token_count
-            t_prompt = -1
-            t_image = -1
-            for ptd in umd.prompt_tokens_details:
-                if ptd.modality.value == "TEXT":
-                    t_prompt = ptd.token_count
-                elif ptd.modality.value == "IMAGE":
-                    t_image = ptd.token_count
-            t_total = umd.total_token_count
-            toks = {
-                "total": t_total,
-                "prompt": t_prompt,
-                "images": t_image,
-                "thinking": t_thinking,
-                "result": t_output,
-            }
-        except Exception:
-            toks = {}
         try:
             inputs = [x.file_data.file_uri for x in self.inputs]
         except Exception:
@@ -176,7 +325,6 @@ class GeminiComponent(Component):
 
         result_js = {
             "step": self.name,
-            "description": self.description,
             "model": self.model,
             "prompt": self.prompt.text,
             "config": cfd,
