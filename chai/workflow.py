@@ -1,3 +1,7 @@
+import os
+
+import ujson as json
+
 from .core import Component
 from .result import ListResult, Result
 
@@ -10,6 +14,23 @@ class Workflow(Component):
             workflow = self
         self.registry_ids = {}
         self.id_counter = -1
+
+        # read in defaults from data/
+
+        js = {}
+        try:
+            if "settings" in tree and "defaults_path" in tree["settings"]:
+                dfp = tree["settings"]["defaults_path"]
+            else:
+                dfp = os.path.join(os.path.dirname(__file__), "data")
+            if not dfp.endswith(".json"):
+                dfp = os.path.join(dfp, "prompts.json")
+            with open(dfp) as fh:
+                js = json.load(fh)
+        except Exception:
+            pass
+        self.default_prompts = js
+
         super().__init__(tree, workflow)
 
     def get_component_by_id(self, cid):

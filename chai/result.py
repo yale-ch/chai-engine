@@ -1,4 +1,5 @@
 import uuid
+from pathlib import Path
 from typing import Optional
 
 from .core import BaseThing
@@ -16,13 +17,13 @@ class Result(BaseThing):
         self, value=None, input=None, processor=None, register_on=None, workflow=None, metadata={}, extra={}
     ):
         self.id = str(uuid.uuid4())
-        self.set_value(value)
         self.input = input or None
         self.workflow = workflow or None
         self.processor = processor or None
         self.metadata = metadata or {}
         self.extra = extra or {}
         self.derivative_results = {}
+        self.set_value(value)
         if register_on is not None:
             self.input = register_on
             if processor is None:
@@ -139,7 +140,30 @@ class FileItemResult(ItemResult):
 
     @value.setter
     def value(self, value):
+        extensions = {
+            ".jpg": "IMAGE",
+            ".png": "IMAGE",
+            ".tif": "IMAGE",
+            ".tiff": "IMAGE",
+            ".gif": "IMAGE",
+            ".webp": "IMAGE",
+            ".jpeg": "IMAGE",
+            ".txt": "TEXT",
+            ".md": "TEXT",
+            ".html": "TEXT",
+            ".mp3": "AUDIO",
+            ".wav": "AUDIO",
+            ".json": "DATA",
+            ".xml": "DATA",
+        }
+
         self.file_name = value
+        self.file_path = Path(value)
+        # Guess file type
+        if "type" not in self.metadata:
+            t = extensions.get(self.file_path.suffix.lower(), "")
+            if t:
+                self.metadata["type"] = t
 
     def __repr__(self):
         return f"<FileItemResult('{self.file_name}')>"

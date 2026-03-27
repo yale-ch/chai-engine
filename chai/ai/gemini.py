@@ -4,7 +4,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Optional, Union
 
 import ujson as json
 from google import genai
@@ -13,6 +13,7 @@ from PIL import Image
 
 # from tenacity import retry
 from ..core import Component
+from ..result import FileItemResult, ItemResult, Result
 
 logger = logging.getLogger("chai")
 
@@ -35,7 +36,8 @@ class GeminiComponent(Component):
         self.temperature = self.settings.get("temperature", 0.4)
         self.top_p = self.settings.get("top_p", 0.9)
         self.max_output_tokens = self.settings.get("max_output_tokens", 8192)
-        self.prompt = self.settings.get("prompt", "")
+        self.prompt_text = self.settings.get("prompt", "")
+        self.expects = self.settings.get("expected_output", "json")
 
         self.safety_settings = [
             types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="OFF"),
@@ -54,6 +56,8 @@ class GeminiComponent(Component):
         self.tools = [types.Tool(google_search=types.GoogleSearch())]
         self.retry_options = types.HttpRetryOptions(attempts=3)
         self.http_options = types.HttpOptions(api_version="v1")
+
+        self.substitutions = {"ADDITIONAL_CONTEXT": ""}
         # timeout = milliseconds
         # retry_options = self.retry_options
         # base_config.tools = self.tools
@@ -251,7 +255,7 @@ class GeminiComponent(Component):
             return {}
 
     @staticmethod
-    def image_to_part(image_source: Union[str, Path, Image.Image, bytes], mime_type: str = "image/png") -> types.Part:
+    def image_to_part(image_source, mime_type: str = "image/png") -> types.Part:
         """Convert various image formats into a google.genai.types.Part."""
 
         ext_map = {
@@ -262,7 +266,11 @@ class GeminiComponent(Component):
             ".gif": "image/gif",
         }
 
-        if isinstance(image_source, str) and image_source.startswith("gs://"):
+        if isinstance(image_source, FileItemResult):
+            fn = Path(image_source.file_name)
+            mime_type = ext_map.get(fn.suffix.lower(), mime_type)
+            img_bytes = image_source.value
+        elif isinstance(image_source, str) and image_source.startswith("gs://"):
             path = Path(image_source)
             # Infer mime type from extension if standard
             mime_type = ext_map.get(path.suffix.lower(), mime_type)
@@ -284,60 +292,82 @@ class GeminiComponent(Component):
 
         return types.Part.from_bytes(data=img_bytes, mime_type=mime_type)
 
-    def _process(self):
+    def build_contents(self, input):
+        """Baseline processor for inputs to send to Gemini"""
+
+        ### Process input into the API call
+
+        inputs = []
+        format_vars = {"step_name": self.name}
+        format_vars.update(self.substitutions)
+        prompt_text = self.prompt_text
+        if isinstance(input, ItemResult):
+            input = [input]
+
+        for i, item in enumerate(input):
+            if isinstance(item, Result):
+                typ = item.metadata.get("type", "")
+                # DATA, TEXT, IMAGE, AUDIO
+                if typ in ["DATA", "TEXT"]:
+                    # embed if slot, else attach
+                    if f"{{text_input_{i}}}" in prompt_text:
+                        format_vars[f"text_input_{i}"] = item.value
+                    else:
+                        p = types.Part.from_text(text=item.value)
+                        inputs.append(p)
+                elif typ in ["IMAGE", "AUDIO", "VIDEO", "BINARY"]:
+                    # attach
+                    if typ == "IMAGE":
+                        p = self.image_to_part(item)
+                        inputs.append(p)
+                    else:
+                        raise NotImplementedError(f"Unsupported type {typ} for gemini: {item}")
+                else:
+                    raise NotImplementedError(f"Unsupported type {typ} for gemini: {item}")
+
+        # if type(input[0]) is str:
+        #     format_vars["first_input"] = self.inputs[0]
+        #     format_vars["last_input"] = self.inputs[-1]
+        # elif isinstance(input[0], types.Part):
+        #     format_vars["first_input"] = self.inputs[0].file_data.file_uri.rsplit("/", 1)[-1]
+        #     format_vars["last_input"] = self.inputs[-1].file_data.file_uri.rsplit("/", 1)[-1]
+
+        try:
+            p_text = prompt_text.format(**format_vars)
+        except KeyError as e:
+            print(f"Missing substitution in prompt for {self}: {e}")
+
+        if not p_text:
+            raise ValueError(f"Prompt text in {self} is empty")
+
+        prompt = types.Part.from_text(text=p_text)
+        contents = [types.Content(role="user", parts=[*inputs, prompt])]
+        return contents
+
+    def _process(self, input):
         client = self.client
         if client is None:
             self.connect_to_client()
 
-        format_vars = {"input_length": len(self.inputs), "step_name": self.name}
-        if self.inputs:
-            if type(self.inputs[0]) is str:
-                format_vars["first_input"] = self.inputs[0]
-                format_vars["last_input"] = self.inputs[-1]
-            elif isinstance(self.inputs[0], types.Part):
-                format_vars["first_input"] = self.inputs[0].file_data.file_uri.rsplit("/", 1)[-1]
-                format_vars["last_input"] = self.inputs[-1].file_data.file_uri.rsplit("/", 1)[-1]
+        contents = self.build_contents(input)
 
-        format_vars.update(self.substitutions)
-        self.prompt.text = self.prompt_text.format(**format_vars)
-
-        contents = [types.Content(role="user", parts=[*self.inputs, self.prompt])]
         start = time.time()
         resp = self.generate_content(contents=contents)
         duration = time.time() - start
 
+        data_type = "DATA"
         if hasattr(resp, "parsed") and resp.parsed:
             result = resp.parsed.dict()
         else:
             txt = self.extract_text(resp)
-            result = self.extract_json(txt)
+            if self.expects == "json":
+                result = self.extract_json(txt)
+            else:
+                result = txt
+                data_type = "TEXT"
 
         toks = self.get_usage(resp)
 
-        try:
-            inputs = [x.file_data.file_uri for x in self.inputs]
-        except Exception:
-            inputs = []
-
-        cfd = self.base_config.dict()
-        del cfd["response_schema"]
-        del cfd["safety_settings"]
-
-        result_js = {
-            "step": self.name,
-            "model": self.model,
-            "prompt": self.prompt.text,
-            "config": cfd,
-            "inputs": inputs,
-            "timestamp": time.time(),
-            "duration": duration,
-            "tokens": toks,
-            "result": result,
-        }
-        try:
-            result_js["schema"] = (self.base_config.response_schema.schema(),)
-        except Exception:
-            result_js["schema"] = None
-
-        self.results = result_js
-        return result_js
+        metadata = {"token_usage": toks, "duration": duration, "type": data_type}
+        r = ItemResult(result, metadata=metadata)
+        return r
