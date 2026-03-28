@@ -1,4 +1,5 @@
 from .ai.gemini import GeminiComponent
+from .ai.lm_studio import LMStudioComponent
 from .core import Component
 from .result import ItemResult
 
@@ -27,5 +28,13 @@ class GeminiTranscriber(Transcriber, GeminiComponent):
         return GeminiComponent._process(self, input)
 
 
-class LocalTranscriber(Transcriber):
-    pass
+class LMSTranscriber(Transcriber, LMStudioComponent):
+    def __init__(self, tree, workflow, parent=None):
+        LMStudioComponent.__init__(self, tree, workflow, parent)
+
+        if not self.prompt_text:
+            self.prompt_text = self.workflow.default_prompts.get("transcription", "")
+        self.expects = "text"
+
+    def _process(self, input):
+        return LMStudioComponent._process(self, input)

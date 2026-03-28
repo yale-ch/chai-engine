@@ -1,7 +1,5 @@
 from chai.workflow import Workflow
 
-
-
 js = {
     "id": "wf2",
     "type": "Workflow",
@@ -16,7 +14,7 @@ js = {
                     "name": "File Iterator",
                     "steps": [
                         {
-                            "type": "transcriber.GeminiTranscriber",
+                            "type": "transcriber.LMSTranscriber",
                             "name": "Cloud Image Transcriber",
                         }
                     ],
