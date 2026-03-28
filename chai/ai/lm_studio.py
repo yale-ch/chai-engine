@@ -28,7 +28,7 @@ class LMStudioComponent(Component):
         self.model = self.settings.get("model", "qwen/qwen3.5-9b")
         self.temperature = self.settings.get("temperature", 0.4)
         self.top_p = self.settings.get("top_p", 0.9)
-        self.max_output_tokens = self.settings.get("max_output_tokens", 4096)
+        self.max_output_tokens = self.settings.get("max_output_tokens", 20000)
         self.prompt_text = self.settings.get("prompt", "")
         self.expects = self.settings.get("expected_output", "json")
         self.substitutions = {"ADDITIONAL_CONTEXT": ""}
@@ -143,6 +143,7 @@ class LMStudioComponent(Component):
         duration = time.time() - start
 
         data_type = "DATA"
+        # LM Studio sets .parsed to .content even if not .structured
         if hasattr(resp, "structured") and resp.structured:
             result = resp.parsed
         else:
