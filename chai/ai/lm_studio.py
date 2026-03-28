@@ -127,6 +127,7 @@ class LMStudioComponent(Component):
 
     def extract_text(self, resp):
         text = resp.content
+        print(text)
         if "\n</think>\n" in text:
             thinking, text = text.split("\n</think>\n")
         return text.strip()

@@ -16,6 +16,7 @@ js = {
                         {
                             "type": "transcriber.LMSTranscriber",
                             "name": "Cloud Image Transcriber",
+                            "settings": {"model": "qwen/qwen3.5-35b-a3b"},
                         }
                     ],
                 }  # merged result is complete here
