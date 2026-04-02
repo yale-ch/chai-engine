@@ -1,5 +1,6 @@
 from .ai.gemini import GeminiComponent
 from .ai.lm_studio import LMStudioComponent
+from .ai.ollama import OllamaComponent
 from .core import Component
 from .result import ItemResult
 
@@ -38,3 +39,15 @@ class LMSTranscriber(Transcriber, LMStudioComponent):
 
     def _process(self, input):
         return LMStudioComponent._process(self, input)
+
+
+class OllamaTranscriber(Transcriber, OllamaComponent):
+    def __init__(self, tree, workflow, parent=None):
+        OllamaComponent.__init__(self, tree, workflow, parent)
+
+        if not self.prompt_text:
+            self.prompt_text = self.workflow.default_prompts.get("transcription", "")
+        self.expects = "text"
+
+    def _process(self, input):
+        return OllamaComponent._process(self, input)
