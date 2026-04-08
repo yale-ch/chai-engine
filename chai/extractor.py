@@ -4,6 +4,7 @@ from collections import Counter
 from .ai.gemini import GeminiComponent
 from .ai.lm_studio import LMStudioComponent
 from .ai.ollama import OllamaComponent
+from .ai.transformers import TransformersComponent
 from .core import Component
 from .result import ItemResult, Result
 
@@ -60,5 +61,12 @@ class OllamaExtractor(Extractor, OllamaComponent):
         return OllamaComponent._process(self, input)
 
 
-class NameExtractor(Extractor):
-    pass
+class NameExtractor(Extractor, TransformersComponent):
+    def __init__(self, tree, workflow, parent=None):
+        TransformersComponent.__init__(self, tree, workflow, parent)
+        if not self.prompt_text:
+            self.prompt_text = self.workflow.default_prompts.get("extraction", "")
+        self.expects = "text"
+
+    def _process(self, input):
+        return TransformersComponent._process(self, input)

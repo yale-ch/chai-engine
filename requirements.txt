@@ -3,3 +3,4 @@ ujson
 Pillow
 requests
 ultralytics
+transformers

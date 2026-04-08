@@ -4,7 +4,7 @@ import time
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..core import Component
-from ..result import ItemResult
+from ..result import ItemResult, Result
 from .ai_utils import extract_json, extract_yaml
 
 logger = logging.getLogger("chai")
@@ -46,6 +46,41 @@ class TransformersComponent(Component):
             "thinking": 0,
             "images": 0,
         }
+
+    def build_contents(self, input):
+        """Baseline processor for inputs to send to a transformers model"""
+
+        ### Process input into the API call
+
+        format_vars = {"step_name": self.name}
+        format_vars.update(self.substitutions)
+        prompt_text = self.prompt_text
+        if isinstance(input, ItemResult):
+            input = [input]
+
+        for i, item in enumerate(input):
+            if isinstance(item, Result):
+                typ = item.metadata.get("type", "")
+                # DATA, TEXT, IMAGE, AUDIO
+                if typ in ["DATA", "TEXT"]:
+                    # embed if slot, else attach
+                    if f"{{text_input_{i}}}" in prompt_text:
+                        format_vars[f"text_input_{i}"] = item.value
+                    else:
+                        raise ValueError(
+                            f"Number of input slots in prompt doesn't match inputs in results for {self}"
+                        )
+                else:
+                    raise NotImplementedError(f"Unsupported type {typ} for gemini: {item}")
+        try:
+            p_text = prompt_text.format(**format_vars)
+        except KeyError as e:
+            print(f"Missing substitution in prompt for {self}: {e}")
+
+        if not p_text:
+            raise ValueError(f"Prompt text in {self} is empty")
+
+        return p_text
 
     def _process(self, input):
         contents = self.build_contents(input)
