@@ -2,3 +2,4 @@ tenacity
 ujson
 Pillow
 requests
+ultralytics

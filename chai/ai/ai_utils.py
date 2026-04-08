@@ -3,8 +3,16 @@ import re
 from typing import Optional, Union
 
 import ujson as json
+import yaml
 
 logger = logging.getLogger("chai")
+
+
+def extract_yaml(text: str):
+    try:
+        return yaml.safe_load(text)
+    except Exception:
+        return None
 
 
 def extract_json(text: str) -> Optional[Union[dict, list]]:

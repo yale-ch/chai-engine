@@ -58,3 +58,7 @@ class OllamaExtractor(Extractor, OllamaComponent):
 
     def _process(self, input):
         return OllamaComponent._process(self, input)
+
+
+class NameExtractor(Extractor):
+    pass

@@ -36,6 +36,10 @@ class Result(BaseThing):
     def set_value(self, value):
         self.value = value
 
+    def to_json(self):
+        """Return a JSON representation of the result, including metadata etc."""
+        return {}
+
     def register_result(self, component, result):
         # register the result against the component
         if component not in self.derivative_results:

@@ -5,7 +5,7 @@ class Storage(Component):
     """Take the input and store it somewhere"""
 
     def build_json(self, input: Result):
-        return {}
+        return input.to_json()
 
     def _process(self, input: Result) -> Result:
         # Do persistence here
