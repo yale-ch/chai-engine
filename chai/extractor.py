@@ -66,7 +66,6 @@ class NameExtractor(Extractor, TransformersComponent):
         TransformersComponent.__init__(self, tree, workflow, parent)
         if not self.prompt_text:
             self.prompt_text = self.workflow.default_prompts.get("extraction", "")
-        self.expects = "text"
 
     def _process(self, input):
         return TransformersComponent._process(self, input)

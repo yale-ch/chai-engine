@@ -3,4 +3,10 @@ ujson
 Pillow
 requests
 ultralytics
-transformers
+transformers>=5.5.0
+python-dotenv
+google
+google_genai
+ollama
+lmstudio
+accelerate>=1.13.0

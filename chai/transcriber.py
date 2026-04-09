@@ -8,6 +8,12 @@ from .result import ItemResult
 class Transcriber(Component):
     """Takes an image or audio and extracts the text from the binary content"""
 
+    def __init__(self, tree, workflow, parent=None):
+        # Component.__init__ will already be called from the engine
+        if not self.prompt_text:
+            self.prompt_text = self.workflow.default_prompts.get("transcription", "")
+        self.expects = "text"
+
     def _process(self, input):
         # Could be a file ref, or extracted pixels
         try:
@@ -20,10 +26,7 @@ class Transcriber(Component):
 class GeminiTranscriber(Transcriber, GeminiComponent):
     def __init__(self, tree, workflow, parent=None):
         GeminiComponent.__init__(self, tree, workflow, parent)
-
-        if not self.prompt_text:
-            self.prompt_text = self.workflow.default_prompts.get("transcription", "")
-        self.expects = "text"
+        Transcriber.__init__(self, tree, workflow, parent)
 
     def _process(self, input):
         return GeminiComponent._process(self, input)
@@ -32,10 +35,7 @@ class GeminiTranscriber(Transcriber, GeminiComponent):
 class LMSTranscriber(Transcriber, LMStudioComponent):
     def __init__(self, tree, workflow, parent=None):
         LMStudioComponent.__init__(self, tree, workflow, parent)
-
-        if not self.prompt_text:
-            self.prompt_text = self.workflow.default_prompts.get("transcription", "")
-        self.expects = "text"
+        Transcriber.__init__(self, tree, workflow, parent)
 
     def _process(self, input):
         return LMStudioComponent._process(self, input)
@@ -44,10 +44,7 @@ class LMSTranscriber(Transcriber, LMStudioComponent):
 class OllamaTranscriber(Transcriber, OllamaComponent):
     def __init__(self, tree, workflow, parent=None):
         OllamaComponent.__init__(self, tree, workflow, parent)
-
-        if not self.prompt_text:
-            self.prompt_text = self.workflow.default_prompts.get("transcription", "")
-        self.expects = "text"
+        Transcriber.__init__(self, tree, workflow, parent)
 
     def _process(self, input):
         return OllamaComponent._process(self, input)

@@ -20,6 +20,8 @@ class TransformersComponent(Component):
         self.model = AutoModelForCausalLM.from_pretrained(model, torch_dtype="auto", device_map="auto")
         self.prompt_text = self.settings.get("prompt", "")
         self.max_new_tokens = self.settings.get("max_new_tokens", 2048)
+        self.expects = self.settings.get("expected_output", "json")
+        self.substitutions = {"ADDITIONAL_CONTEXT": ""}
 
     def generate_content(self, contents: str):
         messages = [{"role": "user", "content": contents}]
@@ -52,6 +54,8 @@ class TransformersComponent(Component):
 
         ### Process input into the API call
 
+        print(input)
+
         format_vars = {"step_name": self.name}
         format_vars.update(self.substitutions)
         prompt_text = self.prompt_text
@@ -61,6 +65,7 @@ class TransformersComponent(Component):
         for i, item in enumerate(input):
             if isinstance(item, Result):
                 typ = item.metadata.get("type", "")
+                print(f"Saw type: {typ}")
                 # DATA, TEXT, IMAGE, AUDIO
                 if typ in ["DATA", "TEXT"]:
                     # embed if slot, else attach
@@ -71,11 +76,11 @@ class TransformersComponent(Component):
                             f"Number of input slots in prompt doesn't match inputs in results for {self}"
                         )
                 else:
-                    raise NotImplementedError(f"Unsupported type {typ} for gemini: {item}")
+                    raise NotImplementedError(f"Unsupported type {typ} for transformers: {item}")
         try:
             p_text = prompt_text.format(**format_vars)
         except KeyError as e:
-            print(f"Missing substitution in prompt for {self}: {e}")
+            print(f"Missing substitution in prompt for {self}: {e}\n{prompt_text}\n{format_vars}")
 
         if not p_text:
             raise ValueError(f"Prompt text in {self} is empty")
