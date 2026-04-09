@@ -25,4 +25,4 @@ js = {
 wf = Workflow(js)
 inp = ItemResult("Sanderson, Robert D 1976-", metadata={"type": "TEXT"})
 res = wf.run(inp)
-res.view()
+# res.view()

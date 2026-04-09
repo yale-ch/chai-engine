@@ -36,7 +36,7 @@ class Result(BaseThing):
     def set_value(self, value):
         self.value = value
 
-    def to_json(self):
+    def to_json(self, recurse=False):
         """Return a JSON representation of the result, including metadata etc."""
         js = {
             "id": self.id,
@@ -49,15 +49,22 @@ class Result(BaseThing):
             "extraInfo": self.extra,
             "input": self.input.id if isinstance(self.input, Result) else self.input,
         }
+
         if type(self.value) is list:
             js["value"] = []
             for j in self.value:
                 if isinstance(j, Result):
-                    js["value"].append(j.to_json())
+                    if recurse:
+                        js["value"].append(j.to_json(recurse))
+                    else:
+                        js["value"].append(j.id)
                 else:
                     js["value"].append(j)
         elif isinstance(self.value, Result):
-            js["value"] = self.value.to_json()
+            if recurse:
+                js["value"] = self.value.to_json(recurse)
+            else:
+                js["value"] = self.value.id
         else:
             js["value"] = self.value
 
