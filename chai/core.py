@@ -75,8 +75,19 @@ class Component(BaseThing):
         self.workflow = workflow
         self.id = tree.get("id", self.workflow.get_new_id() if self.workflow else str(uuid.uuid4()))
 
+        base = tree.get("base", "")
+
         if self.workflow is not None:
             self.workflow.register_component(self)
+            if base:
+                # merge the library's configuration with tree
+                base_config = self.workflow.library.get(base, {})
+                if base_config:
+                    for k, v in tree.items():
+                        base_config[k] = v
+                    tree = base_config
+        elif base:
+            raise ValueError("Cannot use a library based configuration for or without a Workflow")
 
         self.parent = parent or None
         self.name = tree.get("name", f"{self.__class__.__name__}/{self.id}")

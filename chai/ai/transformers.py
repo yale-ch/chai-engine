@@ -14,10 +14,13 @@ class TransformersComponent(Component):
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)
         model = self.settings.get("model", None)
+        twe = self.settings.get("tie_word_embeddings", True)
         if model is None:
             raise ValueError(f"model setting not found for {self}")
         self.tokenizer = AutoTokenizer.from_pretrained(model)
-        self.model = AutoModelForCausalLM.from_pretrained(model, torch_dtype="auto", device_map="auto")
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model, tie_word_embeddings=twe, torch_dtype="auto", device_map="auto"
+        )
         self.prompt_text = self.settings.get("prompt", "")
         self.max_new_tokens = self.settings.get("max_new_tokens", 2048)
         self.expects = self.settings.get("expected_output", "json")

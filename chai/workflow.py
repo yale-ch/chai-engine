@@ -25,11 +25,27 @@ class Workflow(Component):
                 dfp = os.path.join(os.path.dirname(__file__), "data")
             if not dfp.endswith(".json"):
                 dfp = os.path.join(dfp, "prompts.json")
-            with open(dfp) as fh:
-                js = json.load(fh)
+            if os.path.exists(dfp):
+                with open(dfp) as fh:
+                    js = json.load(fh)
         except Exception:
             pass
         self.default_prompts = js
+
+        lib = {}
+        try:
+            if "settings" in tree and "library_path" in tree["settings"]:
+                dfp = tree["settings"]["library_path"]
+            else:
+                dfp = os.path.join(os.path.dirname(__file__), "data")
+            if not dfp.endswith(".json"):
+                dfp = os.path.join(dfp, "library.json")
+            if os.path.exists(dfp):
+                with open(dfp) as fh:
+                    lib = json.load(fh)
+        except Exception:
+            pass
+        self.library = lib
 
         super().__init__(tree, workflow)
 
