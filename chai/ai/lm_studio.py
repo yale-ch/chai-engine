@@ -13,13 +13,6 @@ from .ai_utils import extract_json
 
 logger = logging.getLogger("chai")
 
-# image_path = "/Users/rs2668/Development/llm/chai-engine/downloads/wf2_1/image_0001.jpg"
-# imgh = lms.prepare_image(image_path)
-# model = lms.llm("qwen/qwen3.5-35b-a3b")
-# chat = lms.Chat()
-# msg = chat.add_user_message("Carefully transcribe each line of text in this image. Only return the transcription. Do not include any comments.", images=[imgh])
-# pred = model.respond(chat, config)
-
 
 class LMStudioComponent(Component):
     def __init__(self, tree, workflow, parent=None):

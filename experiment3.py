@@ -9,6 +9,7 @@ js = {
     "name": "Top level workflow",
     "steps": [
         {
+            "id": "wf2_nx",
             "type": "extractor.NameExtractor",
             "settings": {
                 "model": "small-models-for-glam/Qwen3.5-0.8B-SFT-name-parser-yaml",
@@ -16,10 +17,8 @@ js = {
                 "prompt": "Parse this person name:\n\n{text_input_0}",
                 "expected_output": "yaml",
             },
-            "next_steps": [
-                {"type": "extractor.JsonXpathExtractor", "settings": {"xpath": "/first_name"}},
-            ],
         },
+        {"id": "wf2_xp", "type": "extractor.JsonXpathExtractor", "settings": {"xpath": "/first_name"}},
     ],
 }
 

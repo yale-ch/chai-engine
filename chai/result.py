@@ -38,7 +38,30 @@ class Result(BaseThing):
 
     def to_json(self):
         """Return a JSON representation of the result, including metadata etc."""
-        return {}
+        js = {
+            "id": self.id,
+            "type": self.__class__.__name__,
+            "workflowId": self.workflow.id
+            if self.workflow
+            else (self.processor.workflow.id if self.processor else None),
+            "processorId": self.processor.id if self.processor else None,
+            "metadata": self.metadata,
+            "extraInfo": self.extra,
+            "input": self.input.id if isinstance(self.input, Result) else self.input,
+        }
+        if type(self.value) is list:
+            js["value"] = []
+            for j in self.value:
+                if isinstance(j, Result):
+                    js["value"].append(j.to_json())
+                else:
+                    js["value"].append(j)
+        elif isinstance(self.value, Result):
+            js["value"] = self.value.to_json()
+        else:
+            js["value"] = self.value
+
+        return js
 
     def register_result(self, component, result):
         # register the result against the component

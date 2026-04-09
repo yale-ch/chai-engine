@@ -66,11 +66,15 @@ class Workflow(Component):
 
     def run(self, input=None) -> Result:
         res = ListResult([], processor=self)
+        if input is not None:
+            res.input = input
         for s in self.steps:
             if s.input is not None:
-                res.append(s.run())
+                input = s.run()
+                res.append(input)
             elif input is not None:
-                res.append(s.process(input))
+                input = s.process(input)
+                res.append(input)
             else:
                 raise ValueError("No input value provided")
         return res
