@@ -65,7 +65,6 @@ class TransformersComponent(Component):
         for i, item in enumerate(input):
             if isinstance(item, Result):
                 typ = item.metadata.get("type", "")
-                print(f"Saw type: {typ}")
                 # DATA, TEXT, IMAGE, AUDIO
                 if typ in ["DATA", "TEXT"]:
                     # embed if slot, else attach

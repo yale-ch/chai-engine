@@ -6,6 +6,7 @@ from .ai.lm_studio import LMStudioComponent
 from .ai.ollama import OllamaComponent
 from .ai.transformers import TransformersComponent
 from .core import Component
+from .data_utils import extract_xpath
 from .result import ItemResult, Result
 
 
@@ -69,3 +70,15 @@ class NameExtractor(Extractor, TransformersComponent):
 
     def _process(self, input):
         return TransformersComponent._process(self, input)
+
+
+class JsonXpathExtractor(Extractor):
+    def _process(self, input):
+        """Take JSON from input and use an XPath in settings to get a sub-value"""
+
+        js = input.value
+        xp = self.settings.get("xpath", None)
+        if not xp:
+            raise ValueError(f"Missing 'xpath' setting in {self}")
+        val = extract_xpath(js, xp)
+        return ItemResult(val)

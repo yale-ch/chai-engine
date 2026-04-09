@@ -44,7 +44,7 @@ class BaseThing(object):
     input = None
 
 
-from .result import ListResult, Result
+from .result import ListResult, Result  # noqa -- Prevent circular import
 
 
 class Component(BaseThing):

@@ -12,7 +12,10 @@ js = {
                 "prompt": "Parse this person name:\n\n{text_input_0}",
                 "expected_output": "yaml",
             },
-        }
+            "next_steps": [
+                {"type": "extractor.JsonXpathExtractor", "settings": {"xpath": "/first_name"}},
+            ],
+        },
     ],
 }
 
