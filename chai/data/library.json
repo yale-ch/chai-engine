@@ -35,5 +35,11 @@
       }
     ],
     "next_steps": [{ "id": "iter_debug", "type": "utils.DebugStep" }]
+  },
+  "FileSystemStorage": {
+    "type": "storage.FileSystemStorage",
+    "settings": {
+      "directory": "results"
+    }
   }
 }
