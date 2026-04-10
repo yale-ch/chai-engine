@@ -18,9 +18,9 @@ js = {
                 "expected_output": "yaml",
             },
         },
-        {"type": "storage.FileSystemStorage", "base": "FileSystemStorage"},
+        {"base": "FileSystemStorage"},
         {"id": "wf2_xp", "type": "extractor.JsonXpathExtractor", "settings": {"xpath": "/first_name"}},
-        {"type": "storage.FileSystemStorage", "base": "FileSystemStorage"},
+        {"base": "FileSystemStorage"},
     ],
 }
 

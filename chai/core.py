@@ -58,15 +58,31 @@ class Component(BaseThing):
     register_on: list = []
     config: dict = {}
 
-    def _make_step(self, s, wf):
-        t = s["type"]
+    def _make_step(self, tree, wf):
+        base = tree.get("base", "")
+        if base:
+            if not self.workflow:
+                raise ValueError("Cannot use a library based configuration for or without a Workflow")
+            # merge the library's configuration with tree
+            base_config = self.workflow.library.get(base, {})
+            if base_config:
+                for k, v in tree.items():
+                    if k == "settings":
+                        # merge new settings
+                        sets = base_config.get("settings", {})
+                        sets.update(v)
+                        base_config[k] = sets
+                    else:
+                        base_config[k] = v
+                tree = base_config
 
+        t = tree["type"]
         cl = importClass(t)
 
         if cl is None:
             raise ValueError(t)
         else:
-            inst = cl(s, wf, self)
+            inst = cl(tree, wf, self)
             return inst
 
     def __init__(self, tree, workflow, parent=None):
@@ -75,19 +91,8 @@ class Component(BaseThing):
         self.workflow = workflow
         self.id = tree.get("id", self.workflow.get_new_id() if self.workflow else str(uuid.uuid4()))
 
-        base = tree.get("base", "")
-
         if self.workflow is not None:
             self.workflow.register_component(self)
-            if base:
-                # merge the library's configuration with tree
-                base_config = self.workflow.library.get(base, {})
-                if base_config:
-                    for k, v in tree.items():
-                        base_config[k] = v
-                    tree = base_config
-        elif base:
-            raise ValueError("Cannot use a library based configuration for or without a Workflow")
 
         self.parent = parent or None
         self.name = tree.get("name", f"{self.__class__.__name__}/{self.id}")
