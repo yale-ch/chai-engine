@@ -1,4 +1,16 @@
+from io import BytesIO
+
 from PIL import Image, ImageOps
+
+
+def image_from_bytes(data):
+    return Image.open(BytesIO(data))
+
+
+def bytes_from_image(img):
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def exif_rotate(img):

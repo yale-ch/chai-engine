@@ -38,11 +38,16 @@ class GeminiComponent(Component):
         self.prompt_text = self.settings.get("prompt", "")
         self.expects = self.settings.get("expected_output", "json")
 
+        hate = self.settings.get("hate_speech_safety", "OFF")
+        danger = self.settings.get("dangerous_content_safety", "OFF")
+        sex = self.settings.get("sexually_explicit_safety", "OFF")
+        harass = self.settings.get("harassment_safety", "OFF")
+
         self.safety_settings = [
-            types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="OFF"),
-            types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="OFF"),
-            types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="OFF"),
-            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="OFF"),
+            types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold=hate),
+            types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold=danger),
+            types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold=sex),
+            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold=harass),
         ]
 
         self.base_config = types.GenerateContentConfig(
@@ -51,6 +56,17 @@ class GeminiComponent(Component):
             max_output_tokens=self.max_output_tokens,
             safety_settings=self.safety_settings,
         )
+
+        self.tools = []
+        tls = self.settings.get("tools", [])
+        if "search" in tls:
+            self.tools.append(types.Tool(google_search=types.GoogleSearch()))
+        if "url" in tls:
+            self.tools.append({"url_context": {}})
+        if "code" in tls:
+            self.tools.append(types.Tool(code_execution=types.ToolCodeExecution))
+        if "maps" in tls:
+            self.tools.append(types.Tool(google_maps=types.GoogleMaps()))
 
         self.tools = [types.Tool(google_search=types.GoogleSearch())]
         self.retry_options = types.HttpRetryOptions(attempts=3)

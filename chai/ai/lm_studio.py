@@ -8,6 +8,7 @@ from PIL import Image
 
 # from tenacity import retry
 from ..core import Component
+from ..image_operations import bytes_from_image, image_from_bytes, scale
 from ..result import FileItemResult, ItemResult, Result
 from .ai_utils import extract_json
 
@@ -21,7 +22,7 @@ class LMStudioComponent(Component):
         self.model = self.settings.get("model", "qwen/qwen3.5-9b")
         self.temperature = self.settings.get("temperature", 0.4)
         self.top_p = self.settings.get("top_p", 0.9)
-        self.max_output_tokens = self.settings.get("max_output_tokens", 20000)
+        self.max_output_tokens = self.settings.get("max_output_tokens", 32000)
         self.prompt_text = self.settings.get("prompt", "")
         self.expects = self.settings.get("expected_output", "json")
         self.substitutions = {"ADDITIONAL_CONTEXT": ""}
@@ -75,6 +76,12 @@ class LMStudioComponent(Component):
         else:
             raise ValueError(f"Unsupported image source type: {type(image_source)}")
 
+        max_size = self.settings.get("max_image_size", 0)
+        if max_size:
+            i2 = image_from_bytes(img_bytes)
+            i3 = scale(i2, max_size)
+            img_bytes = bytes_from_image(i3)
+
         imgh = self.client.files.prepare_image(img_bytes)
         return imgh
 
@@ -107,6 +114,16 @@ class LMStudioComponent(Component):
                     inputs.append(p)
                 else:
                     raise NotImplementedError(f"Unsupported type {typ} for lm_studio: {item}")
+
+        format_vars["input_length"] = len(inputs)
+        if isinstance(input[0], FileItemResult):
+            format_vars["first_input"] = input[0].file_path.name
+        else:
+            format_vars["first_input"] = ""
+        if isinstance(input[-1], FileItemResult):
+            format_vars["last_input"] = input[-1].file_path.name
+        else:
+            format_vars["last_input"] = ""
 
         try:
             p_text = prompt_text.format(**format_vars)

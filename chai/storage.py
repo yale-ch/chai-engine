@@ -1,4 +1,5 @@
 import os
+import sqlite3
 
 import ujson as json
 
@@ -55,4 +56,99 @@ class PostgresStorage(Storage):
 
 
 class SqliteStorage(Storage):
-    pass
+    """Store results in a SQLite database"""
+
+    def __init__(self, tree, workflow, parent=None):
+        super().__init__(tree, workflow, parent)
+        if "database" not in self.settings:
+            self.settings["database"] = "results.db"
+        self.conn = None
+
+    def _get_connection(self):
+        if self.conn is None:
+            self.conn = sqlite3.connect(self.settings["database"])
+            self._init_db()
+        return self.conn
+
+    def _init_db(self):
+        """Initialize the database schema"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS results (
+                id TEXT PRIMARY KEY,
+                processor_id TEXT,
+                workflow_id TEXT,
+                value_json TEXT,
+                metadata_json TEXT,
+                extra_json TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS derivatives (
+                id TEXT PRIMARY KEY,
+                source_id TEXT,
+                component_id TEXT,
+                result_json TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_results_processor ON results(processor_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_results_workflow ON results(workflow_id)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_derivatives_source ON derivatives(source_id)
+        """)
+        conn.commit()
+
+    def _process(self, input: Result) -> Result:
+        """Store the result in SQLite"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        # Build JSON representations
+        value_json = json.dumps(input.value) if input.value else None
+        metadata_json = json.dumps(input.metadata) if input.metadata else None
+        extra_json = json.dumps(input.extra) if input.extra else None
+
+        # Insert result
+        cursor.execute(
+            """
+            INSERT OR REPLACE INTO results
+            (id, processor_id, workflow_id, value_json, metadata_json, extra_json)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """,
+            (
+                input.id,
+                input.processor.id if input.processor else None,
+                input.workflow.id if input.workflow else None,
+                value_json,
+                metadata_json,
+                extra_json,
+            ),
+        )
+
+        # Store derivatives
+        for component, results in input.derivative_results.items():
+            for result in results:
+                result_json = json.dumps(result.to_json())
+                cursor.execute(
+                    """
+                    INSERT OR REPLACE INTO derivatives
+                    (id, source_id, component_id, result_json)
+                    VALUES (?, ?, ?, ?)
+                """,
+                    (result.id, input.id, component.id, result_json),
+                )
+
+        conn.commit()
+        return input
+
+    def __del__(self):
+        """Close connection on cleanup"""
+        if self.conn is not None:
+            self.conn.close()

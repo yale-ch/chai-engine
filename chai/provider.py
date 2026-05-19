@@ -18,6 +18,13 @@ class Provider(Component):
         else:
             raise ValueError("No input value set")
 
+    def _process(self, input):
+        if not self.steps:
+            # Don't iterate
+            return input
+        else:
+            return super()._process(input)
+
 
 class DirFileProvider(Provider):
     """Take a director name and return a ListResult of ItemResults for each file"""

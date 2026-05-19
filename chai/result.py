@@ -1,3 +1,4 @@
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -21,6 +22,8 @@ class Result(BaseThing):
         self.workflow = workflow or None
         self.processor = processor or None
         self.metadata = metadata or {}
+        if "timestamp" not in metadata:
+            self.metadata["timestamp"] = time.time()
         self.extra = extra or {}
         self.derivative_results = {}
         self.set_value(value)
@@ -157,12 +160,19 @@ class ListResult(Result):
     def __repr__(self):
         return f"<{self.__class__.__name__}({len(self.value)} items)>"
 
+    def __getitem__(self, idx):
+        if isinstance(self.value[idx], Result):
+            return self.value[idx]
+        else:
+            return self.valueClass(self.value[idx])
+
 
 class FileItemResult(ItemResult):
     """A result that mirrors an on-disk file"""
 
     file_bytes = b""
     file_name = ""
+    file_path = None
 
     @property
     def value(self):
