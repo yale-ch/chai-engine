@@ -5,10 +5,8 @@ js = {
     "type": "Workflow",
     "name": "Top level workflow",
     "steps": [
-        {
-            "type": "provider.IIIFDirFileProvider",
-        },
-        {"type": "segmenter.LMSSegmenter", "settings": {"max_image_size": 768}},
+        {"type": "provider.IIIFDirFileProvider"},
+        {"type": "segmenter.LMSSegmenter", "settings": {"max_image_size": 1024}},
     ],
 }
 

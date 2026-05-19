@@ -1,3 +1,4 @@
+from .ai import create_ai_component
 from .ai.gemini import GeminiComponent
 from .ai.lm_studio import LMStudioComponent
 from .ai.ollama import OllamaComponent
@@ -10,7 +11,7 @@ class Transcriber(Component):
 
     def __init__(self, tree, workflow, parent=None):
         # Component.__init__ will already be called from the engine
-        if not self.prompt_text:
+        if not getattr(self, "prompt_text", None):
             self.prompt_text = self.workflow.default_prompts.get("transcription", "")
         self.expects = "text"
 
@@ -23,28 +24,6 @@ class Transcriber(Component):
         return ItemResult(f"transcription of {filename}", metadata={"effort": 0}, input=input, processor=self)
 
 
-class GeminiTranscriber(Transcriber, GeminiComponent):
-    def __init__(self, tree, workflow, parent=None):
-        GeminiComponent.__init__(self, tree, workflow, parent)
-        Transcriber.__init__(self, tree, workflow, parent)
-
-    def _process(self, input):
-        return GeminiComponent._process(self, input)
-
-
-class LMSTranscriber(Transcriber, LMStudioComponent):
-    def __init__(self, tree, workflow, parent=None):
-        LMStudioComponent.__init__(self, tree, workflow, parent)
-        Transcriber.__init__(self, tree, workflow, parent)
-
-    def _process(self, input):
-        return LMStudioComponent._process(self, input)
-
-
-class OllamaTranscriber(Transcriber, OllamaComponent):
-    def __init__(self, tree, workflow, parent=None):
-        OllamaComponent.__init__(self, tree, workflow, parent)
-        Transcriber.__init__(self, tree, workflow, parent)
-
-    def _process(self, input):
-        return OllamaComponent._process(self, input)
+GeminiTranscriber = create_ai_component("GeminiTranscriber", Transcriber, GeminiComponent)
+LMSTranscriber = create_ai_component("LMSTranscriber", Transcriber, LMStudioComponent)
+OllamaTranscriber = create_ai_component("OllamaTranscriber", Transcriber, OllamaComponent)

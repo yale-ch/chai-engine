@@ -1,3 +1,4 @@
+from .ai import create_ai_component
 from .ai.gemini import GeminiComponent
 from .ai.lm_studio import LMStudioComponent
 from .ai.ollama import OllamaComponent
@@ -10,7 +11,7 @@ class Segmenter(Component):
 
     def __init__(self, tree, workflow, parent=None):
         # Component.__init__ will already be called from the engine
-        if not self.prompt_text:
+        if not getattr(self, "prompt_text", None):
             self.prompt_text = self.workflow.default_prompts.get("segmentation", "")
         self.expects = "data"
 
@@ -23,19 +24,6 @@ class Segmenter(Component):
         return ItemResult(f"segmentation of {filename}", metadata={"effort": 0}, input=input, processor=self)
 
 
-class GeminiSegmenter(Segmenter, GeminiComponent):
-    def __init__(self, tree, workflow, parent=None):
-        GeminiComponent.__init__(self, tree, workflow, parent)
-        Segmenter.__init__(self, tree, workflow, parent)
-
-    def _process(self, input):
-        return GeminiComponent._process(self, input)
-
-
-class LMSSegmenter(Segmenter, LMStudioComponent):
-    def __init__(self, tree, workflow, parent=None):
-        LMStudioComponent.__init__(self, tree, workflow, parent)
-        Segmenter.__init__(self, tree, workflow, parent)
-
-    def _process(self, input):
-        return LMStudioComponent._process(self, input)
+GeminiSegmenter = create_ai_component("GeminiSegmenter", Segmenter, GeminiComponent)
+LMSSegmenter = create_ai_component("LMSSegmenter", Segmenter, LMStudioComponent)
+OllamaSegmenter = create_ai_component("OllamaSegmenter", Segmenter, OllamaComponent)
