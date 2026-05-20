@@ -10,7 +10,7 @@ js = {
     "steps": [
         {
             "id": "wf2_nx",
-            "type": "extractor.NameExtractor",
+            "type": "extractor.TransformersExtractor",
             "settings": {
                 "model": "small-models-for-glam/Qwen3.5-0.8B-SFT-name-parser-yaml",
                 "tie_word_embeddings": False,

@@ -14,7 +14,7 @@ js = {
                     "name": "File Iterator",
                     "steps": [
                         {
-                            "type": "transcriber.LMSTranscriber",
+                            "type": "transcriber.LMStudioTranscriber",
                             "name": "Cloud Image Transcriber",
                             "settings": {"model": "qwen/qwen3.5-35b-a3b"},
                         }

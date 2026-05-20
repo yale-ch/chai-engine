@@ -1,7 +1,4 @@
-from .ai import create_ai_component
-from .ai.gemini import GeminiComponent
-from .ai.lm_studio import LMStudioComponent
-from .ai.ollama import OllamaComponent
+from .ai import create_all_components
 from .core import Component
 from .result import ItemResult
 
@@ -24,6 +21,4 @@ class Segmenter(Component):
         return ItemResult(f"segmentation of {filename}", metadata={"effort": 0}, input=input, processor=self)
 
 
-GeminiSegmenter = create_ai_component("GeminiSegmenter", Segmenter, GeminiComponent)
-LMSSegmenter = create_ai_component("LMSSegmenter", Segmenter, LMStudioComponent)
-OllamaSegmenter = create_ai_component("OllamaSegmenter", Segmenter, OllamaComponent)
+globals().update(create_all_components(Segmenter))

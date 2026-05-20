@@ -1,7 +1,4 @@
-from .ai import create_ai_component
-from .ai.gemini import GeminiComponent
-from .ai.lm_studio import LMStudioComponent
-from .ai.ollama import OllamaComponent
+from .ai import create_all_components
 from .core import Component
 from .result import ItemResult
 
@@ -24,6 +21,4 @@ class Transcriber(Component):
         return ItemResult(f"transcription of {filename}", metadata={"effort": 0}, input=input, processor=self)
 
 
-GeminiTranscriber = create_ai_component("GeminiTranscriber", Transcriber, GeminiComponent)
-LMSTranscriber = create_ai_component("LMSTranscriber", Transcriber, LMStudioComponent)
-OllamaTranscriber = create_ai_component("OllamaTranscriber", Transcriber, OllamaComponent)
+globals().update(create_all_components(Transcriber))

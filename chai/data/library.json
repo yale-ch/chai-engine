@@ -25,7 +25,7 @@
             ],
             "false_steps": [
               {
-                "type": "transcriber.LMSTranscriber",
+                "type": "transcriber.LMStudioTranscriber",
                 "name": "Local Image Transcriber",
                 "settings": { "model": "qwen/qwen3.5-9b" }
               }

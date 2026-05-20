@@ -31,7 +31,7 @@ js = {
                             ],
                             "false_steps": [
                                 {
-                                    "type": "transcriber.LMSTranscriber",
+                                    "type": "transcriber.LMStudioTranscriber",
                                     "name": "Local Image Transcriber",
                                 }
                             ],
