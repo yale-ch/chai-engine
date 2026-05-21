@@ -41,6 +41,32 @@ class DirFileProvider(Provider):
             raise ValueError("input file path does not exist")
 
 
+class FileListProvider(Provider):
+    """Take an explicit list of file paths and return a ``DirectoryListResult``.
+
+    Useful when you want to drive a workflow against a hand-picked subset of
+    files rather than every entry in a directory. Accepts either a single
+    path (treated as a one-item list) or a list/tuple of paths.
+    """
+
+    def _process(self, input):
+        if isinstance(input, str):
+            paths = [input]
+        elif isinstance(input, (list, tuple)):
+            paths = list(input)
+        else:
+            raise ValueError(
+                f"FileListProvider expected a list/tuple of paths or a single path, got {type(input)!r}"
+            )
+
+        missing = [p for p in paths if not os.path.exists(p)]
+        if missing:
+            raise ValueError(f"Input files do not exist: {missing}")
+
+        d = DirectoryListResult(paths, input=input, processor=self)
+        return super()._process(d)
+
+
 class IIIFDirFileProvider(DirFileProvider):
     def __init__(self, tree, workflow, parent):
         super().__init__(tree, workflow, parent)
