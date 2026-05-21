@@ -11,5 +11,5 @@ js = {
 }
 
 wf = Workflow(js)
-res = wf.run("https://collections.library.yale.edu/manifests/16694456")
-res.view()
+# res = wf.run("https://collections.library.yale.edu/manifests/16694456")
+# res.view()

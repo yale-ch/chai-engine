@@ -3,7 +3,9 @@ from .lm_studio import LMStudioComponent
 from .ollama import OllamaComponent
 from .transformers import TransformersComponent
 
-__all__ = [GeminiComponent, LMStudioComponent, OllamaComponent, TransformersComponent]
+__all__ = [GeminiComponent, LMStudioComponent, OllamaComponent]
+
+__more_than_all__ = [TransformersComponent]
 
 
 def create_all_components(base_class: type) -> dict:

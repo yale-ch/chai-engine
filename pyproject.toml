@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chai-engine"
+version = "0.1.0"
+description = "A component-based processing engine for LLM workflows"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache License 2.0" }
+authors = [
+    { name = "Chai Engine Contributors" }
+]
+dependencies = [
+    "accelerate>=1.13.0",
+    "google",
+    "google-genai",
+    "lmstudio",
+    "lxml",
+    "ollama",
+    "Pillow",
+    "python-dotenv",
+    "requests",
+    "tenacity",
+    "transformers>=5.5.0",
+    "ujson",
+    "ultralytics",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black",
+    "flake8",
+]
+
+[tool.setuptools.packages.find]
+include = ["chai*"]

@@ -15,7 +15,7 @@
         "steps": [
           {
             "id": "pii_classifier",
-            "type": "classifier.Classifier",
+            "type": "classifier.MockClassifier",
             "name": "Has PII Classifier",
             "register_on": ["img_iter"]
           },
