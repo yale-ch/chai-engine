@@ -88,8 +88,13 @@ class Component(BaseThing):
     def __init__(self, tree, workflow, parent=None):
         # Walk tree and built components
 
+        if self.workflow is not None or self.id != "":
+            # Already initialized
+            return
         self.workflow = workflow
         self.id = tree.get("id", self.workflow.get_new_id() if self.workflow else str(uuid.uuid4()))
+
+        print(f"Called component init on {self.id}")
 
         if self.workflow is not None:
             self.workflow.register_component(self)

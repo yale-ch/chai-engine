@@ -7,9 +7,21 @@ from .result import FileItemResult, LabelListResult
 class Classifier(Component):
     """Takes an input and runs a classification on it to return one or more labels"""
 
+    def __init__(self, tree, workflow, parent=None):
+        super().__init__(tree, workflow, parent)
+        if not getattr(self, "prompt_text", None):
+            self.prompt_text = self.workflow.default_prompts.get("classification", "")
+        self.expects = "text"
+
     def _process(self, input):
         # Will assign one or more labels to the input
-        return LabelListResult([], input=input, processor=self)
+        # return LabelListResult([], input=input, processor=self)
+        raise NotImplementedError()
+
+
+class MockClassifier(Classifier):
+    def _process(self, input):
+        return LabelListResult(["MOCK"], input=input, processor=self)
 
 
 class SampleClassifier(Classifier):

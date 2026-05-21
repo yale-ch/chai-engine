@@ -20,7 +20,6 @@ class Provider(Component):
 
     def _process(self, input):
         if not self.steps:
-            # Don't iterate
             return input
         else:
             return super()._process(input)

@@ -1,4 +1,10 @@
 {
+  "TestWorkflow": {
+    "id": "_test_workflow",
+    "type": "workflow.Workflow",
+    "name": "Empty workflow for testing",
+    "steps": []
+  },
   "PII_Transcriber": {
     "type": "provider.DirFileProvider",
     "steps": [

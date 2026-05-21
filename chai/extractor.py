@@ -11,9 +11,13 @@ class Extractor(Component):
     """Takes content and extracts structured data from it"""
 
     def __init__(self, tree, workflow, parent=None):
+        super().__init__(tree, workflow, parent)
         if not getattr(self, "prompt_text", None):
             self.prompt_text = self.workflow.default_prompts.get("extraction", "")
         self.expects = "json"
+
+    def _process(self, input):
+        raise NotImplementedError()
 
 
 globals().update(create_all_components(Extractor))
