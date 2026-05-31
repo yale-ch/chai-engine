@@ -1,5 +1,5 @@
 {
-  "TestWorkflow": {
+  "MockWorkflow": {
     "id": "_test_workflow",
     "type": "workflow.Workflow",
     "name": "Empty workflow for testing",

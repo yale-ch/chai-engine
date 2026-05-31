@@ -140,14 +140,18 @@ class Component(BaseThing):
         merged = self.outputResultClass([], input=input, processor=self)
         for step in self.steps:
             res = step.process(input)
-            merged.append(res)
+            if res is not None:
+                merged.append(res)
         return merged
 
     def process(self, input) -> Result:
         new_result = self._process(input)
 
-        # Ensure the result always knows its input
-        if isinstance(input, Result):
+        if new_result is None:
+            # debug or other no-op step
+            return None
+        elif isinstance(input, Result):
+            # Ensure the result always knows its input
             if new_result.input is None:
                 new_result.input = input
             # ... And which component created it
@@ -174,7 +178,8 @@ class Component(BaseThing):
             merged = ListResult([], input=input, processor=self)
             for step in self.next_steps:
                 x = step.process(input)
-                merged.append(x)
+                if x is not None:
+                    merged.append(x)
             return merged
         else:
             return input

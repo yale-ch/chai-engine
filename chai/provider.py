@@ -6,7 +6,7 @@ import ujson as json
 from PIL import Image
 
 from .core import Component
-from .result import DirectoryListResult, Result
+from .result import DirectoryListResult, ListResult, Result
 
 
 class Provider(Component):
@@ -23,6 +23,13 @@ class Provider(Component):
             return input
         else:
             return super()._process(input)
+
+
+class MockProvider(Provider):
+    """A mock provider that returns a fixed result"""
+
+    def _process(self, input):
+        return super()._process(ListResult(["a", "b", "c", "d"]))
 
 
 class DirFileProvider(Provider):
