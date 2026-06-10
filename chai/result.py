@@ -123,10 +123,11 @@ class ResultIter(object):
     def __next__(self):
         if self.count == len(self.result.value):
             raise StopIteration()
-        elif self.valueClass is not None:
-            val = self.valueClass(self.result.value[self.count])
-        else:
-            val = self.result.value[self.count]
+        val = self.result.value[self.count]
+        # Match ListResult.__getitem__: pass existing Results through untouched
+        # (re-wrapping them would hide their metadata), only wrap raw values.
+        if not isinstance(val, Result) and self.valueClass is not None:
+            val = self.valueClass(val)
         self.count += 1
         return val
 

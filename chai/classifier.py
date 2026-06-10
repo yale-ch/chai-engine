@@ -1,7 +1,9 @@
+import re
 from random import randint
 
 from .core import Component
 from .result import FileItemResult, LabelListResult
+from .utils import text_from_input
 
 
 class Classifier(Component):
@@ -19,9 +21,40 @@ class Classifier(Component):
         raise NotImplementedError()
 
 
-class MockClassifier(Classifier):
+class KeywordClassifier(Classifier):
+    """Labels text by keyword (or regex) matches -- no model required.
+
+    Settings:
+        - labels:         dict of {label: [patterns]} (a bare string or list is
+                          also accepted per label) (required)
+        - regex:          if true, patterns are regular expressions (default false)
+        - case_sensitive: default false
+    """
+
+    def __init__(self, tree, workflow, parent=None):
+        super().__init__(tree, workflow, parent)
+        raw = self.settings.get("labels")
+        if not isinstance(raw, dict) or not raw:
+            raise ValueError(f"KeywordClassifier ({self!r}) needs the `labels` setting: {{label: [patterns]}}")
+        self.use_regex = bool(self.settings.get("regex", False))
+        self.case_sensitive = bool(self.settings.get("case_sensitive", False))
+        flags = 0 if self.case_sensitive else re.IGNORECASE
+        self.label_patterns = {}
+        for label, patterns in raw.items():
+            if isinstance(patterns, str):
+                patterns = [patterns]
+            self.label_patterns[label] = [
+                re.compile(p if self.use_regex else re.escape(p), flags) for p in patterns
+            ]
+
     def _process(self, input):
-        return LabelListResult(["MOCK"], input=input, processor=self)
+        text = text_from_input(input)
+        labels = [
+            label
+            for label, patterns in self.label_patterns.items()
+            if any(p.search(text) for p in patterns)
+        ]
+        return LabelListResult(labels, input=input, processor=self)
 
 
 class SampleClassifier(Classifier):

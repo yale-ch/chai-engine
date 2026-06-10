@@ -1,8 +1,10 @@
 import io
+import re
 
 from .ai import create_all_components
 from .core import Component
-from .result import FileItemResult, ItemResult, ListResult
+from .result import FileItemResult, ListResult
+from .utils import text_from_input
 
 
 class Segmenter(Component):
@@ -21,22 +23,46 @@ class Segmenter(Component):
 globals().update(create_all_components(Segmenter))
 
 
-class MockSegmenter(Segmenter):
-    def _process(self, input):
-        # Could be a file ref, or extracted pixels
-        try:
-            filename = input.file_name
-        except Exception:
-            filename = repr(input)
-        return ItemResult(f"segmentation of {filename}", metadata={"effort": 0}, input=input, processor=self)
+class TextSegmenter(Segmenter):
+    """Splits text into segments deterministically -- no model required.
 
+    Settings:
+        - mode:    paragraph (default) | line | sentence | word | regex
+        - pattern: split regex, used when mode is 'regex'
+    """
 
-class WordSegmenter(Segmenter):
+    _MODES = {
+        "paragraph": r"\n\s*\n",
+        "line": r"\n",
+        "sentence": r"(?<=[.!?])\s+",
+        "word": r"\s+",
+    }
+
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)
+        mode = self.settings.get("mode", "paragraph")
+        if mode == "regex":
+            pattern = self.settings.get("pattern")
+            if not pattern:
+                raise ValueError(f"TextSegmenter ({self!r}) needs the `pattern` setting when mode is 'regex'")
+        elif mode in self._MODES:
+            pattern = self._MODES[mode]
+        else:
+            raise ValueError(f"TextSegmenter ({self!r}) unknown mode {mode!r}")
+        self.splitter = re.compile(pattern)
 
     def _process(self, input):
-        return ListResult(input.split())
+        segments = [s.strip() for s in self.splitter.split(text_from_input(input))]
+        segments = [s for s in segments if s]
+        return ListResult(segments, input=input, processor=self)
+
+
+class WordSegmenter(TextSegmenter):
+    """Splits text into words (TextSegmenter in 'word' mode)."""
+
+    def __init__(self, tree, workflow, parent=None):
+        tree.setdefault("settings", {})["mode"] = "word"
+        super().__init__(tree, workflow, parent)
 
 
 class YoloSegmenter(Segmenter):

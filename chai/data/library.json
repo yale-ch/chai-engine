@@ -1,8 +1,8 @@
 {
-  "MockWorkflow": {
+  "EmptyWorkflow": {
     "id": "_test_workflow",
     "type": "workflow.Workflow",
-    "name": "Empty workflow for testing",
+    "name": "Empty workflow",
     "steps": []
   },
   "PII_Transcriber": {
@@ -15,14 +15,21 @@
         "steps": [
           {
             "id": "pii_classifier",
-            "type": "classifier.MockClassifier",
-            "name": "Has PII Classifier",
-            "register_on": ["img_iter"]
+            "type": "classifier.FileTypeClassifier",
+            "name": "Acceptable File Classifier",
+            "register_on": [
+              "img_iter"
+            ]
           },
           {
             "type": "gate.LabelTestGate",
-            "name": "Has PII Gate",
-            "settings": { "component": "pii_classifier", "label": ["okay"] },
+            "name": "Accepted File Gate",
+            "settings": {
+              "component": "pii_classifier",
+              "label": [
+                "accepted"
+              ]
+            },
             "true_steps": [
               {
                 "type": "transcriber.GeminiTranscriber",
@@ -33,14 +40,21 @@
               {
                 "type": "transcriber.LMStudioTranscriber",
                 "name": "Local Image Transcriber",
-                "settings": { "model": "qwen/qwen3.5-9b" }
+                "settings": {
+                  "model": "qwen/qwen3.5-9b"
+                }
               }
             ]
           }
         ]
       }
     ],
-    "next_steps": [{ "id": "iter_debug", "type": "utils.DebugStep" }]
+    "next_steps": [
+      {
+        "id": "iter_debug",
+        "type": "utils.DebugStep"
+      }
+    ]
   },
   "FileSystemStorage": {
     "type": "storage.FileSystemStorage",
@@ -52,7 +66,10 @@
     "id": "yolo_detect",
     "type": "segmenter.YoloSegmenter",
     "name": "YOLO Detect + Annotated Preview",
-    "settings": { "model": "yolo11n.pt", "confidence": 0.25 },
+    "settings": {
+      "model": "yolo11n.pt",
+      "confidence": 0.25
+    },
     "next_steps": [
       {
         "id": "yolo_annotate",

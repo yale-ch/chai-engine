@@ -25,11 +25,31 @@ class Provider(Component):
             return super()._process(input)
 
 
-class MockProvider(Provider):
-    """A mock provider that returns a fixed result"""
+class StaticProvider(Provider):
+    """Provides a fixed, configured value -- handy for driving a workflow from
+    its config rather than runtime input.
+
+    Settings:
+        - values: list of values to emit as a ListResult (required, unless
+                  `value` is set for a single item)
+        - value:  a single value to emit in a one-item ListResult
+    """
+
+    def __init__(self, tree, workflow, parent=None):
+        super().__init__(tree, workflow, parent)
+        if "values" in self.settings:
+            self.values = list(self.settings["values"])
+        elif "value" in self.settings:
+            self.values = [self.settings["value"]]
+        else:
+            raise ValueError(f"StaticProvider ({self!r}) needs the `values` (or `value`) setting")
+
+    def run(self):
+        # A StaticProvider IS its input; it doesn't need one configured.
+        return self.process(self.input)
 
     def _process(self, input):
-        return super()._process(ListResult(["a", "b", "c", "d"]))
+        return super()._process(ListResult(self.values, input=input, processor=self))
 
 
 class IntListProvider(Provider):

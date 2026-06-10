@@ -36,8 +36,8 @@ python experiment.py
 
 - **`Provider`**: Generates a `Result` from raw input (e.g., `DirFileProvider` reads files from a directory).
 - **`Iterator`**: Calls further components for each entry in a `Result` to make a new result.
-- **`Classifier`**: Assigns one or more labels to input (e.g., `SampleClassifier`, `HumanClassifier`).
-- **`Gate`**: Acts as a gating mechanism with `true_steps` and `false_steps` based on a test (e.g., `LabelTestGate` tests for specific labels).
+- **`Classifier`**: Assigns one or more labels to input (e.g., `KeywordClassifier`, `FileTypeClassifier`, `YoloClassifier`).
+- **`Gate`**: Acts as a gating mechanism with `true_steps` and `false_steps` based on a test. `ConditionGate` evaluates a component-agnostic JSON condition (see `chai/conditions.py`); `ValueTestGate`, `MetadataTestGate`, `ThresholdGate`, and `FileTypeGate` are convenience subclasses; `LabelTestGate` tests labels registered by a classifier.
 - **`Transcriber`**: Extracts text from images or audio.
 - **`Describer`**: Generates text to describe content.
 - **`Extractor`**: Extracts structured data from content.
@@ -84,7 +84,8 @@ Workflows are defined as JSON trees with `steps` and `next_steps`:
 - `chai/workflow.py`: `Workflow` class for managing component registries.
 - `chai/result.py`: Result class hierarchy (`Result`, `ItemResult`, `ListResult`, `FileItemResult`, `DirectoryListResult`).
 - `chai/provider.py`: Provider components for generating results from raw input.
-- `chai/gate.py`: `Gate` and `LabelTestGate` for conditional branching.
+- `chai/gate.py`: `Gate`, `ConditionGate` (+ convenience gates), and `LabelTestGate` for conditional branching.
+- `chai/conditions.py`: JSON condition language (`source`/`op`/`value` with `all`/`any`/`not`) evaluated against any `Result` -- shared by the gates.
 - `chai/annotator.py`: `Annotator` components plus `annotate_image_bytes`/`collect_detections` helpers (also used by chai-workflow-builder for run previews).
 - `chai/ai/gemini.py`, `chai/ai/lm_studio.py`, `chai/ai/ollama.py`: AI component implementations.
 - `chai/transcriber.py`: Transcriber components with AI mixins.
@@ -100,8 +101,13 @@ Workflows are defined as JSON trees with `steps` and `next_steps`:
 ### Running Tests
 
 ```bash
-# Run experiment.py as a test case
-python experiment.py
+# Run the unit tests
+python -m unittest discover -s tests
 
-# For individual components, create a test script that imports and instantiates them
+# Run experiment.py as a live test case
+python experiment.py
 ```
+
+All components are real (no mocks): deterministic ones (`KeywordClassifier`,
+`TextSegmenter`, `StaticProvider`, `TextFileTranscriber`, `FileInfoDescriber`,
+`GlossaryTranslator`) run without models or API keys.
