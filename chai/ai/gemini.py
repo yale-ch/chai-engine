@@ -79,7 +79,8 @@ class GeminiComponent(Component):
 
         if "2.5" in self.model:
             # Default to turning off thinking, as it can go wild and ignore the budget
-            self.thinking_config = types.ThinkingConfig(thinking_budget=parent.ai_config.get("thinking_budget", 0))
+            parent_ai = getattr(parent, "ai_config", None) or {}
+            self.thinking_config = types.ThinkingConfig(thinking_budget=parent_ai.get("thinking_budget", 0))
             self.base_config.thinking_config = self.thinking_config
 
         self.connect_to_client()
