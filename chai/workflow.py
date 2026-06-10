@@ -76,6 +76,8 @@ class Workflow(Component):
                 if input is not None:
                     res.append(input)
             else:
+                if input is None:
+                    raise ValueError("No input value provided")
                 input = s.process(input)
                 if input is not None:
                     res.append(input)

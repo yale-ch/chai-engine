@@ -1,0 +1,236 @@
+"""Annotators render Results as human-reviewable artifacts.
+
+Where most components transform data for the *next* component, an Annotator
+produces something for a *person*: the original image with detection boxes
+burned in, or source text with extracted values highlighted. They are intended
+as ``next_steps`` of detection/extraction components so a test run can be
+inspected visually rather than as raw JSON.
+"""
+
+import json
+
+from .core import Component
+from .result import FileItemResult, ItemResult, Result
+
+
+def collect_detections(result):
+    """Walk a Result tree and gather detection dicts (bbox/label/confidence).
+
+    YoloSegmenter emits one child result per box with ``bbox``, ``yolo_class``
+    and ``confidence`` in its metadata; this flattens those (or any result
+    carrying a ``bbox``) into plain dicts that annotate_image_bytes accepts.
+    """
+    detections = []
+
+    def walk(r):
+        if not isinstance(r, Result):
+            return
+        md = r.metadata or {}
+        if "bbox" in md:
+            detections.append(
+                {
+                    "bbox": [float(v) for v in md["bbox"]],
+                    "label": md.get("yolo_class", md.get("label", "")),
+                    "confidence": md.get("confidence"),
+                }
+            )
+        # Don't trigger FileItemResult's lazy file read by touching .value
+        if not isinstance(r, FileItemResult) and type(r.value) is list:
+            for v in r.value:
+                walk(v)
+
+    walk(result)
+    return detections
+
+
+def find_source_image(result):
+    """Walk up the input chain to the nearest on-disk/in-memory IMAGE result."""
+    r = result
+    while isinstance(r, Result):
+        if isinstance(r, FileItemResult) and r.metadata.get("type") == "IMAGE":
+            return r
+        r = r.input
+    return None
+
+
+def annotate_image_bytes(image_bytes, detections, thickness=2, with_labels=True, with_confidence=True):
+    """Draw *detections* onto *image_bytes* with supervision; return PNG bytes."""
+    import numpy as np
+    import supervision as sv
+
+    from .image_operations import bytes_from_image, image_from_bytes
+
+    img = image_from_bytes(image_bytes).convert("RGB")
+    if not detections:
+        return bytes_from_image(img)
+
+    class_names = sorted({d["label"] for d in detections})
+    name_to_id = {name: i for i, name in enumerate(class_names)}
+    sv_detections = sv.Detections(
+        xyxy=np.array([d["bbox"] for d in detections], dtype=float),
+        confidence=np.array([d.get("confidence") or 0.0 for d in detections], dtype=float),
+        class_id=np.array([name_to_id[d["label"]] for d in detections], dtype=int),
+    )
+
+    scene = np.asarray(img)
+    scene = sv.BoxAnnotator(thickness=thickness).annotate(scene=scene.copy(), detections=sv_detections)
+    if with_labels:
+        labels = []
+        for d in detections:
+            label = d["label"] or "?"
+            if with_confidence and d.get("confidence") is not None:
+                label = f"{label} {d['confidence']:.2f}"
+            labels.append(label)
+        scene = sv.LabelAnnotator().annotate(scene=scene, detections=sv_detections, labels=labels)
+
+    from PIL import Image
+
+    return bytes_from_image(Image.fromarray(scene))
+
+
+class Annotator(Component):
+    """Renders the input as a human-reviewable artifact (annotated image or text)"""
+
+    def __init__(self, tree, workflow, parent=None):
+        super().__init__(tree, workflow, parent)
+        self.expects = "data"
+
+    def _process(self, input):
+        raise NotImplementedError()
+
+
+class ImageBoxAnnotator(Annotator):
+    """Draws detection bounding boxes onto the source image using supervision.
+
+    Wire this as a next_step of ``segmenter.YoloSegmenter``: it collects the
+    bbox/yolo_class/confidence metadata from the detection results, walks up
+    the input chain to the original image, and emits a new IMAGE
+    FileItemResult with the boxes and labels burned in.
+
+    Settings:
+        - labels:     if true (default), draw class labels on each box
+        - confidence: if true (default), append confidence scores to labels
+        - thickness:  box line thickness in pixels (default 2)
+        - output:     optional file path to also write the annotated PNG
+    """
+
+    def _process(self, input):
+        detections = collect_detections(input)
+        source = find_source_image(input)
+        if source is None:
+            raise ValueError(f"{self} could not find a source IMAGE result in the input chain of {input}")
+
+        png = annotate_image_bytes(
+            source.value,
+            detections,
+            thickness=int(self.settings.get("thickness", 2)),
+            with_labels=bool(self.settings.get("labels", True)),
+            with_confidence=bool(self.settings.get("confidence", True)),
+        )
+
+        out_name = self.settings.get("output", f"{source.file_path.stem}_annotated.png")
+        annotated = FileItemResult(
+            out_name,
+            input=input,
+            processor=self,
+            metadata={
+                "type": "IMAGE",
+                "annotated": True,
+                "source": source.file_name,
+                "detections": detections,
+            },
+        )
+        annotated.file_bytes = png
+        if self.settings.get("output"):
+            with open(self.settings["output"], "wb") as fh:
+                fh.write(png)
+        return annotated
+
+
+class TextHighlightAnnotator(Annotator):
+    """Highlights extracted values in their source text.
+
+    Wire this as a next_step of an Extractor (or Classifier): it walks up the
+    input chain to the nearest plain-text result (e.g. a transcription), then
+    wraps every extracted value it can find verbatim in the text with a
+    labelled highlight. Output is an ``annotated: true`` TEXT result whose
+    value is HTML ``<mark>`` markup (or ``**bold**`` markdown).
+
+    Settings:
+        - format: 'html' (default) or 'markdown'
+        - fields: optional list of JSON field names to highlight (default: all)
+    """
+
+    def _process(self, input):
+        spans = self._extract_spans(input)
+        source_text = self._find_source_text(input)
+        if source_text is None:
+            raise ValueError(f"{self} could not find source text in the input chain of {input}")
+
+        fmt = self.settings.get("format", "html")
+        annotated_text, matched = self._highlight(source_text, spans, fmt)
+        return ItemResult(
+            annotated_text,
+            input=input,
+            processor=self,
+            metadata={
+                "type": "TEXT",
+                "annotated": True,
+                "format": fmt,
+                "highlights": matched,
+            },
+        )
+
+    def _extract_spans(self, input):
+        """Pull {label: value} pairs out of the input -- JSON extractor output,
+        a dict value, or a list of labels."""
+        value = input.value
+        if isinstance(value, (bytes, bytearray)):
+            value = value.decode("utf-8", "replace")
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except Exception:
+                value = {"match": value}
+
+        keep = set(self.settings.get("fields", []) or [])
+        pairs = []
+
+        def flatten(label, v):
+            if isinstance(v, dict):
+                for k, sub in v.items():
+                    flatten(k, sub)
+            elif isinstance(v, list):
+                for sub in v:
+                    flatten(label, sub)
+            elif v is not None:
+                text = str(v).strip()
+                if text:
+                    pairs.append((label, text))
+
+        flatten("value", value)
+        if keep:
+            pairs = [(label, v) for label, v in pairs if label in keep]
+        return pairs
+
+    def _find_source_text(self, input):
+        r = input.input
+        while isinstance(r, Result):
+            v = r.value
+            if isinstance(v, str) and v.strip():
+                return v
+            r = r.input
+        return None
+
+    def _highlight(self, text, pairs, fmt):
+        matched = []
+        for label, value in pairs:
+            if value not in text:
+                continue
+            if fmt == "markdown":
+                replacement = f"**{value}** _[{label}]_"
+            else:
+                replacement = f'<mark title="{label}" data-label="{label}">{value}</mark>'
+            text = text.replace(value, replacement)
+            matched.append({"label": label, "value": value})
+        return text, matched

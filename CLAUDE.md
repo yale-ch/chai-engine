@@ -42,6 +42,7 @@ python experiment.py
 - **`Describer`**: Generates text to describe content.
 - **`Extractor`**: Extracts structured data from content.
 - **`Reducer`**: Combines multiple results into one.
+- **`Annotator`**: Renders results as human-reviewable artifacts (e.g., `ImageBoxAnnotator` burns detection boxes into the source image via supervision; `TextHighlightAnnotator` highlights extracted values in their source text).
 - **`Translator`**: Translates linguistic content into different languages.
 - **`Storage`**: Persists input somewhere (e.g., `FileSystemStorage`, `PostgresStorage`, `SqliteStorage`).
 
@@ -84,6 +85,7 @@ Workflows are defined as JSON trees with `steps` and `next_steps`:
 - `chai/result.py`: Result class hierarchy (`Result`, `ItemResult`, `ListResult`, `FileItemResult`, `DirectoryListResult`).
 - `chai/provider.py`: Provider components for generating results from raw input.
 - `chai/gate.py`: `Gate` and `LabelTestGate` for conditional branching.
+- `chai/annotator.py`: `Annotator` components plus `annotate_image_bytes`/`collect_detections` helpers (also used by chai-workflow-builder for run previews).
 - `chai/ai/gemini.py`, `chai/ai/lm_studio.py`, `chai/ai/ollama.py`: AI component implementations.
 - `chai/transcriber.py`: Transcriber components with AI mixins.
 - `chai/ai_utils.py`: JSON extraction utilities for LLM responses.

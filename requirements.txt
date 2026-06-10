@@ -3,6 +3,7 @@ ujson
 Pillow
 requests
 ultralytics
+supervision
 transformers>=5.5.0
 python-dotenv
 google

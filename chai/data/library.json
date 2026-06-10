@@ -47,5 +47,18 @@
     "settings": {
       "directory": "results"
     }
+  },
+  "YoloDetectAndAnnotate": {
+    "id": "yolo_detect",
+    "type": "segmenter.YoloSegmenter",
+    "name": "YOLO Detect + Annotated Preview",
+    "settings": { "model": "yolo11n.pt", "confidence": 0.25 },
+    "next_steps": [
+      {
+        "id": "yolo_annotate",
+        "type": "annotator.ImageBoxAnnotator",
+        "name": "Annotated Detection Image"
+      }
+    ]
   }
 }
