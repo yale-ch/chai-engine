@@ -121,6 +121,59 @@ class TestRealComponents(unittest.TestCase):
         self.assertEqual(res.metadata["length"], 3)
 
 
+class TestSwitchGate(unittest.TestCase):
+    def setUp(self):
+        self.wf = Workflow({"id": "switch_test_wf", "type": "workflow.Workflow"})
+        self.gate = self.wf._make_step(
+            {
+                "type": "gate.SwitchGate",
+                "settings": {"key": "type"},
+                "case_steps": {
+                    "Person": [{"type": "describer.FileInfoDescriber", "id": "person_step"}],
+                    "Location": [{"type": "describer.FileInfoDescriber", "id": "place_step"}],
+                },
+                "default_steps": [{"type": "describer.FileInfoDescriber", "id": "other_step"}],
+            },
+            self.wf,
+        )
+
+    def test_dispatches_each_item_by_case(self):
+        entities = ItemResult(
+            [
+                {"type": "Person", "text": "John"},
+                {"type": "Location", "text": "Paris"},
+                {"type": "Date", "text": "1922"},
+                {"type": "PERSON", "text": "Maria"},  # case-insensitive
+            ]
+        )
+        res = self.gate.process(entities)
+        routed = [r.processor.id for r in res.value]
+        self.assertEqual(routed, ["person_step", "place_step", "other_step", "person_step"])
+        # each branch result's input carries which case matched
+        self.assertEqual(res.value[0].input.metadata["case"], "Person")
+
+    def test_scalar_value_dispatch(self):
+        res = self.gate.process(ItemResult({"type": "Location", "text": "Kenya"}))
+        self.assertEqual([r.processor.id for r in res.value], ["place_step"])
+
+    def test_no_match_no_default_returns_none(self):
+        wf = Workflow({"id": "switch_test_wf2", "type": "workflow.Workflow"})
+        gate = wf._make_step(
+            {
+                "type": "gate.SwitchGate",
+                "settings": {"key": "type"},
+                "case_steps": {"Person": [{"type": "describer.FileInfoDescriber"}]},
+            },
+            wf,
+        )
+        self.assertIsNone(gate.process(ItemResult([{"type": "Date", "text": "1922"}])))
+
+    def test_requires_some_branch(self):
+        wf = Workflow({"id": "switch_test_wf3", "type": "workflow.Workflow"})
+        with self.assertRaises(ValueError):
+            wf._make_step({"type": "gate.SwitchGate", "settings": {}}, wf)
+
+
 class TestGateInsideIterator(unittest.TestCase):
     """Regression: ResultIter must not re-wrap Results (hiding their metadata),
     or gates inside an Iterator can never see e.g. YOLO crop metadata."""

@@ -228,5 +228,5 @@ class IIIFDirFileProvider(DirFileProvider):
 
         # write images hash to disk
         with open(os.path.join(self.images_dir, "_info.json"), "w") as fh:
-            json.dumps(images, fh)
+            json.dump(images, fh)
         return images

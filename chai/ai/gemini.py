@@ -101,7 +101,6 @@ class GeminiComponent(Component):
         if "maps" in tls:
             self.tools.append(types.Tool(google_maps=types.GoogleMaps()))
 
-        self.tools = [types.Tool(google_search=types.GoogleSearch())]
         self.retry_options = types.HttpRetryOptions(attempts=3)
         self.http_options = types.HttpOptions(api_version="v1")
 
@@ -239,19 +238,27 @@ class GeminiComponent(Component):
         format_vars = {"step_name": self.name}
         format_vars.update(self.substitutions)
         prompt_text = self.prompt_text
+        if not isinstance(input, Result):
+            # Raw workflow input (e.g. text typed into a test run) -- wrap it
+            # so it flows through the same TEXT path as a transcribed result.
+            input = ItemResult(input, metadata={"type": "TEXT" if isinstance(input, str) else "DATA"})
         if isinstance(input, ItemResult):
             input = [input]
 
         for i, item in enumerate(input):
             if isinstance(item, Result):
                 typ = item.metadata.get("type", "")
+                if not typ and isinstance(item.value, str):
+                    # untyped results holding a string are treated as text
+                    typ = "TEXT"
                 # DATA, TEXT, IMAGE, AUDIO
                 if typ in ["DATA", "TEXT"]:
+                    text = item.value if isinstance(item.value, str) else str(item.value)
                     # embed if slot, else attach
                     if f"{{text_input_{i}}}" in prompt_text:
-                        format_vars[f"text_input_{i}"] = item.value
+                        format_vars[f"text_input_{i}"] = text
                     else:
-                        p = types.Part.from_text(text=item.value)
+                        p = types.Part.from_text(text=text)
                         inputs.append(p)
                 elif typ in ["IMAGE", "AUDIO", "VIDEO", "BINARY"]:
                     # attach
@@ -270,10 +277,11 @@ class GeminiComponent(Component):
         #     format_vars["first_input"] = self.inputs[0].file_data.file_uri.rsplit("/", 1)[-1]
         #     format_vars["last_input"] = self.inputs[-1].file_data.file_uri.rsplit("/", 1)[-1]
 
-        try:
-            p_text = prompt_text.format(**format_vars)
-        except KeyError as e:
-            print(f"Missing substitution in prompt for {self}: {e}")
+        # Substitute only the known slots ({step_name}, {text_input_0}, ...) so
+        # literal braces -- e.g. JSON examples in the prompt -- survive intact.
+        p_text = prompt_text
+        for k, v in format_vars.items():
+            p_text = p_text.replace("{" + k + "}", str(v))
 
         if not p_text:
             raise ValueError(f"Prompt text in {self} is empty")

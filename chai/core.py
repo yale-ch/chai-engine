@@ -53,6 +53,35 @@ def importClass(objectType):
     return parentClass
 
 
+def result_preview(result, limit=160, depth=0):
+    """Short, human-readable summary of what a component produced.
+
+    Sent with ``component_end`` lifecycle events so harnesses (e.g. the
+    workflow-builder) can show what leaves each node without serializing the
+    full result. Never triggers a FileItemResult's lazy file read.
+    """
+    if result is None:
+        return "(no output)"
+    if isinstance(result, Result):
+        cls = result.__class__.__name__
+        file_name = getattr(result, "file_name", "")
+        if file_name:
+            return f"{cls} '{file_name}'"
+        value = result.value
+        if type(value) is list:
+            if depth >= 1:
+                return f"{cls}({len(value)} items)"
+            inner = ", ".join(result_preview(v, limit=40, depth=depth + 1) for v in value[:3])
+            more = f", +{len(value) - 3} more" if len(value) > 3 else ""
+            return f"{cls}({len(value)} items: [{inner}{more}])"[: limit + 40]
+        result = value  # fall through to plain-value handling
+    text = result if isinstance(result, str) else repr(result)
+    text = " ".join(text.split())
+    if len(text) > limit:
+        text = text[:limit] + "…"
+    return text
+
+
 class Component(BaseThing):
     """A Component receives input, performs some computation on the Result and returns a new Result.
 
@@ -212,7 +241,7 @@ class Component(BaseThing):
         except Exception as e:
             self._emit("component_error", error=str(e))
             raise
-        self._emit("component_end")
+        self._emit("component_end", preview=result_preview(new_result))
 
         if new_result is None:
             # debug or other no-op step

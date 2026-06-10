@@ -7,8 +7,9 @@ shortcuts), metadata thresholds, or file types.
 
 from typing import List
 
-from .conditions import evaluate
-from .core import Component
+from .conditions import MISSING, evaluate, resolve_source
+from .core import Component, result_preview
+from .result import ItemResult, Result
 from .workflow import Workflow
 
 
@@ -57,11 +58,12 @@ class Gate(Component):
         # emit their own lifecycle events.
         self._emit("component_start")
         try:
-            result = self._process(input, self._test(input))
+            case = self._test(input)
+            result = self._process(input, case)
         except Exception as e:
             self._emit("component_error", error=str(e))
             raise
-        self._emit("component_end")
+        self._emit("component_end", preview=result_preview(result), branch="true" if case else "false")
         return result
 
 
@@ -169,6 +171,110 @@ class FileTypeGate(ConditionGate):
         if isinstance(types, str):
             types = [t.strip() for t in types.split(",")]
         return {"source": "type", "op": "in", "value": [t.upper() for t in types]}
+
+
+class SwitchGate(Gate):
+    """Routes items to named branches by their label/value instead of a single
+    true/false test -- "if the label is PERSON do x, if PLACE do y".
+
+    Branches are configured as ``case_steps`` in the tree (a sibling of
+    ``true_steps``): ``{"PERSON": [steps...], "PLACE": [steps...]}``, plus an
+    optional ``default_steps`` branch for unmatched items. The switch value
+    comes from ``source``; when it resolves to a LIST (classifier labels, an
+    extractor's JSON array, a segmenter's results) every item is dispatched
+    individually to its matching branch, each wrapped as an ``ItemResult``
+    with ``case`` metadata (existing Results pass through unwrapped). Items
+    with no matching case fall to ``default_steps`` or are dropped. Returns a
+    ListResult of the branch outputs (None if nothing ran).
+
+    Settings:
+        - source: where the switch value(s) come from -- a condition source like
+                  'value', 'labels', or 'metadata.x' (default 'value')
+        - key:    how to read the case label from each item: a dict key for dict
+                  items (default 'label' then 'type'), or a condition source for
+                  Result items (e.g. 'metadata.yolo_class')
+        - cases:  case labels, comma-separated or a list -- used by the builder
+                  UI to draw one output port per case
+        - case_sensitive: match case labels exactly (default false)
+    """
+
+    def __init__(self, tree, workflow, parent=None):
+        super().__init__(tree, workflow, parent)
+        self.case_sensitive = bool(self.settings.get("case_sensitive", False))
+        self.case_steps = {}
+        for label, steps in (tree.get("case_steps") or {}).items():
+            built = []
+            for o in steps:
+                op = self._make_step(o, workflow)
+                op.parent = self
+                built.append(op)
+            self.case_steps[self._norm(label)] = built
+        self.default_steps = []
+        for o in tree.get("default_steps", []):
+            op = self._make_step(o, workflow)
+            op.parent = self
+            self.default_steps.append(op)
+        if not self.case_steps and not self.default_steps:
+            raise ValueError(f"SwitchGate ({self!r}) needs at least one case_steps branch (or default_steps)")
+
+    def _norm(self, label):
+        label = str(label)
+        return label if self.case_sensitive else label.lower()
+
+    def _case_value(self, item):
+        key = self.settings.get("key")
+        if isinstance(item, Result):
+            value = resolve_source(item, key or "value")
+            return None if value is MISSING else value
+        if isinstance(item, dict):
+            if key:
+                return item.get(key)
+            return item.get("label", item.get("type"))
+        return item
+
+    def process(self, input):
+        self._emit("component_start")
+        try:
+            result, matched = self._dispatch(input)
+        except Exception as e:
+            self._emit("component_error", error=str(e))
+            raise
+        self._emit("component_end", preview=result_preview(result), branch=", ".join(matched) or "(no match)")
+        return result
+
+    def _dispatch(self, input):
+        resolved = resolve_source(input, self.settings.get("source", "value")) if input is not None else MISSING
+        if resolved is MISSING or resolved is None:
+            items = []
+        elif type(resolved) is list:
+            items = resolved
+        else:
+            items = [resolved]
+
+        merged = self.outputResultClass([], input=input, processor=self)
+        matched = []
+        for item in items:
+            case_value = self._case_value(item)
+            steps = self.case_steps.get(self._norm(case_value)) if case_value is not None else None
+            label = str(case_value) if case_value is not None else "(none)"
+            if steps is None:
+                steps = self.default_steps
+                label = f"{label} -> default"
+            if not steps:
+                continue
+            matched.append(label)
+            if isinstance(item, Result):
+                item_result = item
+            else:
+                item_result = ItemResult(item, input=input, processor=self, metadata={"case": str(case_value)})
+            for step in steps:
+                out = step.process(item_result)
+                if out is not None:
+                    merged.append(out)
+
+        if not matched:
+            return None, matched
+        return merged, matched
 
 
 class LabelTestGate(Gate):

@@ -73,10 +73,16 @@ class SampleClassifier(Classifier):
     """Sample a given percentage of inputs by tagging them.
 
     For each input, draws a random percentage and returns ``LabelListResult(["flagged"])`` when it
-    falls below ``self.percentage``, otherwise an empty label list -- useful for spot-checking a
-    fraction of a corpus. Note: ``percentage`` must be set on the instance by the caller; the class
-    itself does not read it from ``settings``.
+    falls below the configured percentage, otherwise an empty label list -- useful for spot-checking
+    a fraction of a corpus.
+
+    Settings:
+        - percentage: percentage of inputs to flag, 0-100 (default 10)
     """
+
+    def __init__(self, tree, workflow, parent=None):
+        super().__init__(tree, workflow, parent)
+        self.percentage = float(self.settings.get("percentage", 10))
 
     def _process(self, input):
         pc = randint(0, 10000) / 100
