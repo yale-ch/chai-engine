@@ -1,10 +1,21 @@
+"""Describers: components that generate descriptive text about their input.
+
+AI-backed variants (``GeminiDescriber``, ``OllamaDescriber``, ...) are generated from the backends in
+``chai.ai``; ``FileInfoDescriber`` produces deterministic file statistics without a model.
+"""
+
 from .ai import create_all_components
 from .core import Component
 from .result import ItemResult
 
 
 class Describer(Component):
-    """Takes content and generates text to describe it"""
+    """Takes content and generates text to describe it.
+
+    Abstract base for the describer role: subclasses implement ``_process`` and return an
+    ``ItemResult`` whose value is a textual description of the input Result (image, text, data...).
+    When no prompt is configured, AI-backed variants use the workflow's default ``description`` prompt.
+    """
 
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)

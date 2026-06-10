@@ -1,3 +1,10 @@
+"""Storage components: persist Results to the filesystem or a database.
+
+Storage steps are pass-through: they write the input Result somewhere and return it unchanged, so
+they can be inserted anywhere in a pipeline (typically as ``next_steps``) without affecting the data
+flow.
+"""
+
 import os
 import sqlite3
 
@@ -7,9 +14,16 @@ from .core import Component, Result
 
 
 class Storage(Component):
-    """Take the input and store it somewhere"""
+    """Take the input and store it somewhere.
+
+    Base class for persistence components: ``build_json`` renders the input Result via ``to_json``
+    (non-recursive, child Results referenced by id), and subclasses override ``_process`` to write that
+    representation out. ``_process`` always returns the input unchanged so downstream steps see the
+    original Result.
+    """
 
     def build_json(self, input: Result):
+        """Serialize *input* for persistence (non-recursive ``Result.to_json``)."""
         return input.to_json(recurse=False)
 
     def _process(self, input: Result) -> Result:
@@ -18,6 +32,15 @@ class Storage(Component):
 
 
 class FileSystemStorage(Storage):
+    """Writes each Result as a JSON file in a pairtree under a per-processor directory.
+
+    The path is ``<directory>/<processor id>/<id[0:2]>/<id[2:4]>/<result id>.json``; an existing file
+    gets a ``.1`` version suffix. Returns the input unchanged.
+
+    Settings:
+        - directory: root directory for stored results (default 'results')
+    """
+
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)
         if "directory" not in self.settings:
@@ -52,11 +75,24 @@ class FileSystemStorage(Storage):
 
 
 class PostgresStorage(Storage):
+    """Placeholder for PostgreSQL persistence -- not implemented yet.
+
+    Currently behaves like the base ``Storage`` (a pass-through that stores nothing).
+    """
+
     pass
 
 
 class SqliteStorage(Storage):
-    """Store results in a SQLite database"""
+    """Store results in a SQLite database.
+
+    Writes the input Result into a ``results`` table (value/metadata/extra as JSON columns) and each
+    of its ``derivative_results`` into a ``derivatives`` table keyed by source result and component.
+    The schema is created lazily on first use and the input is returned unchanged.
+
+    Settings:
+        - database: path of the SQLite database file (default 'results.db')
+    """
 
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)

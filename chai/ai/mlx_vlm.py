@@ -34,7 +34,27 @@ logger = logging.getLogger("chai")
 
 
 class MLXVLMComponent(Component):
-    """Run an MLX-VLM vision-language model in-process on Apple Silicon."""
+    """Run an MLX-VLM vision-language model in-process on Apple Silicon.
+
+    Input is an ``ItemResult`` or list-shaped Result whose entries carry ``type`` metadata (with the
+    same one-level ``Iterator`` unwrap as the OpenAI backend): TEXT/DATA values fill
+    ``{text_input_<i>}`` prompt slots, IMAGE entries are materialized as temp files (mlx-vlm wants
+    paths) and optionally downscaled. Output is an ``ItemResult`` whose value is parsed JSON (when
+    ``expected_output`` is 'json') or raw text, with ``token_usage``/``duration``/``type``/``engine``/
+    ``model`` metadata. Model weights are cached at class level, so multiple components sharing one
+    model name load it only once per process; scratch image files are deleted after each run.
+
+    Settings:
+        - model: HuggingFace id of an MLX-converted VLM (default 'mlx-community/Qwen3-VL-4B-Instruct-4bit')
+        - prompt: prompt template; supports {step_name}, {text_input_<i>}, {input_length},
+          {first_input} and {last_input} substitutions (default '')
+        - expected_output: 'json' to parse the reply as JSON, anything else for raw text (default 'json')
+        - temperature: sampling temperature (default 0.4)
+        - top_p: nucleus sampling threshold (default 0.9)
+        - max_output_tokens: response token cap (default 2048)
+        - max_image_size: long-edge pixels; if set, images are downscaled before inference (default 0 = off)
+        - verbose: stream generation progress from mlx-vlm (default false)
+    """
 
     DEFAULT_MODEL = "mlx-community/Qwen3-VL-4B-Instruct-4bit"
     ENGINE_NAME = "mlx-vlm"

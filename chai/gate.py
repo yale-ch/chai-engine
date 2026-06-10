@@ -1,3 +1,10 @@
+"""Gates: components that branch the workflow based on a test of the input.
+
+A Gate evaluates ``_test(input)`` and routes the input to its ``true_steps`` or ``false_steps``
+children. Concrete gates test labels (``LabelTestGate``), JSON conditions (``ConditionGate`` and its
+shortcuts), metadata thresholds, or file types.
+"""
+
 from typing import List
 
 from .conditions import evaluate
@@ -6,7 +13,15 @@ from .workflow import Workflow
 
 
 class Gate(Component):
-    """A Component that acts as a gating mechanism"""
+    """A Component that acts as a gating mechanism.
+
+    Instead of ``steps``/``next_steps`` it builds two child branches from the config: ``true_steps``
+    (run when ``_test(input)`` is truthy) and ``false_steps`` (run otherwise). The chosen branch's
+    outputs are merged into a ``ListResult``; when the chosen branch is empty the gate returns ``None``
+    (input is dropped). ``process`` deliberately bypasses ``Component.process`` -- no ``register_on``
+    handling, no ``process_out`` -- but still emits the standard lifecycle events. The base ``_test``
+    always returns ``True``; subclasses override it.
+    """
 
     false_steps: List["Workflow"] = []
     true_steps: List["Workflow"] = []
@@ -157,6 +172,17 @@ class FileTypeGate(ConditionGate):
 
 
 class LabelTestGate(Gate):
+    """Routes on labels that a specific classifier assigned to the input.
+
+    The classifier must run earlier with ``register_on`` so its ``LabelListResult`` is registered as a
+    derivative on the tested result; this gate fetches those derivatives and passes the input to
+    ``true_steps`` when any configured label is present, ``false_steps`` otherwise.
+
+    Settings:
+        - label:     label or list of labels to look for (required)
+        - component: id of the classifier whose labels are tested (required)
+    """
+
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)
         if "label" not in self.settings:

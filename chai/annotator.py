@@ -103,7 +103,13 @@ def annotate_image_bytes(image_bytes, detections, thickness=2, with_labels=True,
 
 
 class Annotator(Component):
-    """Renders the input as a human-reviewable artifact (annotated image or text)"""
+    """Renders the input as a human-reviewable artifact (annotated image or text).
+
+    Abstract base for the annotator role: subclasses implement ``_process``, take a detection or
+    extraction Result, and return a new Result (image or text) with ``annotated: true`` metadata,
+    leaving the original data untouched. Typically wired as a ``next_step`` of the component whose
+    output should be reviewed.
+    """
 
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)

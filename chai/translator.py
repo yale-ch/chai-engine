@@ -1,10 +1,21 @@
+"""Translators: components that translate linguistic content between languages.
+
+AI-backed variants (``GeminiTranslator``, ...) are generated from the backends in ``chai.ai``;
+``GlossaryTranslator`` does deterministic term substitution without a model.
+"""
+
 from .ai import create_all_components
 from .core import Component
 from .result import ItemResult
 
 
 class Translator(Component):
-    """Takes linguistic content and translates it into one or more different languages"""
+    """Takes linguistic content and translates it into one or more different languages.
+
+    Abstract base for the translator role: subclasses implement ``_process``, take a text-carrying
+    Result and return an ``ItemResult`` with the translated text. When no prompt is configured,
+    AI-backed variants use the workflow's default ``translation`` prompt.
+    """
 
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)

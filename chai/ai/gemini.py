@@ -1,3 +1,10 @@
+"""Google Gemini backend for chai.
+
+Talks to the Gemini API via the ``google-genai`` client, either directly (``GEMINI_API_KEY`` /
+``GOOGLE_API_KEY``) or through Vertex AI when ``GOOGLE_CLOUD_PROJECT`` is set. Role mixins such as
+``GeminiTranscriber`` are generated from ``GeminiComponent`` by ``chai.ai.create_all_components``.
+"""
+
 import io
 import logging
 import os
@@ -18,6 +25,32 @@ logger = logging.getLogger("chai")
 
 
 class GeminiComponent(Component):
+    """Component that sends its input to Google's Gemini API and returns the response.
+
+    Input is an ``ItemResult`` or list-shaped Result whose entries carry ``type`` metadata: TEXT/DATA
+    values are formatted into ``{text_input_<i>}`` prompt slots or attached as text parts, IMAGE
+    entries are attached as image parts (other binary types are not supported yet). Output is an
+    ``ItemResult`` whose value is the parsed JSON (when ``expected_output`` is 'json') or the raw text,
+    with ``token_usage``/``duration``/``type`` metadata. Authentication comes from the environment:
+    ``GOOGLE_CLOUD_PROJECT`` selects Vertex AI, otherwise ``GEMINI_API_KEY``/``GOOGLE_API_KEY`` is
+    required. For Gemini 2.5 models, thinking is disabled by default (budget 0, overridable via the
+    parent's ``ai_config.thinking_budget``).
+
+    Settings:
+        - model: Gemini model id (default 'gemini-3.1-flash-lite-preview')
+        - prompt: prompt template; supports {step_name} and {text_input_<i>} substitutions (default '')
+        - expected_output: 'json' to parse the reply as JSON, anything else for raw text (default 'json')
+        - temperature: sampling temperature (default 0.4)
+        - top_p: nucleus sampling threshold (default 0.9)
+        - max_output_tokens: response token cap (default 8192)
+        - location: Vertex AI location when using a GCP project (default 'global')
+        - hate_speech_safety: HARM_CATEGORY_HATE_SPEECH threshold (default 'OFF')
+        - dangerous_content_safety: HARM_CATEGORY_DANGEROUS_CONTENT threshold (default 'OFF')
+        - sexually_explicit_safety: HARM_CATEGORY_SEXUALLY_EXPLICIT threshold (default 'OFF')
+        - harassment_safety: HARM_CATEGORY_HARASSMENT threshold (default 'OFF')
+        - tools: list of tool names to enable: 'search', 'url', 'code', 'maps' (default [])
+    """
+
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)
 

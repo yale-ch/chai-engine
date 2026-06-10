@@ -1,3 +1,5 @@
+"""Parsing helpers for LLM responses: robust JSON/YAML extraction from messy model output."""
+
 import logging
 import re
 from typing import Optional, Union
@@ -9,6 +11,7 @@ logger = logging.getLogger("chai")
 
 
 def extract_yaml(text: str):
+    """Parse *text* as YAML, returning ``None`` on any parse failure."""
     try:
         return yaml.safe_load(text)
     except Exception:

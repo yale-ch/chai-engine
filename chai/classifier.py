@@ -1,3 +1,9 @@
+"""Classifiers: components that assign one or more labels to their input.
+
+All classifiers return a ``LabelListResult`` of string labels for the input Result; combined with
+``register_on`` and a gate (``LabelTestGate`` / ``ConditionGate``) they drive conditional branching.
+"""
+
 import re
 from random import randint
 
@@ -7,7 +13,13 @@ from .utils import text_from_input
 
 
 class Classifier(Component):
-    """Takes an input and runs a classification on it to return one or more labels"""
+    """Takes an input and runs a classification on it to return one or more labels.
+
+    Abstract base for the classifier role: subclasses implement ``_process`` and return a
+    ``LabelListResult`` (a list of string labels) for the input Result. AI-backed variants
+    (``GeminiClassifier``, ``OllamaClassifier``, ...) are generated via ``chai.ai`` mixins; when no
+    prompt is configured the workflow's default ``classification`` prompt is used.
+    """
 
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)
@@ -58,7 +70,13 @@ class KeywordClassifier(Classifier):
 
 
 class SampleClassifier(Classifier):
-    """Sample a given percentage of inputs by tagging them"""
+    """Sample a given percentage of inputs by tagging them.
+
+    For each input, draws a random percentage and returns ``LabelListResult(["flagged"])`` when it
+    falls below ``self.percentage``, otherwise an empty label list -- useful for spot-checking a
+    fraction of a corpus. Note: ``percentage`` must be set on the instance by the caller; the class
+    itself does not read it from ``settings``.
+    """
 
     def _process(self, input):
         pc = randint(0, 10000) / 100
@@ -67,14 +85,23 @@ class SampleClassifier(Classifier):
 
 
 class HumanClassifier(Classifier):
-    """A human will assign the classification in the web API"""
+    """A human will assign the classification in the web API.
+
+    Placeholder for human-in-the-loop labelling: always returns ``LabelListResult(["NOT_DONE"])`` so a
+    downstream gate can park the result until a person reviews it.
+    """
 
     def _process(self, input):
         return LabelListResult(["NOT_DONE"], input=input, processor=self)
 
 
 class FileTypeClassifier(Classifier):
-    """Classifies input by its filetype metadata, labelling TEXT or IMAGE results as 'accepted'."""
+    """Classifies input by its filetype metadata, labelling TEXT or IMAGE results as 'accepted'.
+
+    Reads the input Result's ``metadata["type"]`` (set by e.g. ``FileItemResult``) and returns
+    ``LabelListResult(["accepted"])`` for TEXT/IMAGE, ``["rejected"]`` for anything else -- a simple
+    filter for mixed directories.
+    """
 
     def _process(self, input):
         file_type = input.metadata.get("type", "")

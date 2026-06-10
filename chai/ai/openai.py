@@ -33,22 +33,31 @@ logger = logging.getLogger("chai")
 class OpenAIComponent(Component):
     """Talks to any OpenAI-compatible chat completions endpoint.
 
-    Configure via ``settings``:
+    Input is an ``ItemResult`` or list-shaped Result whose entries carry ``type`` metadata (with a
+    one-level unwrap for ``Iterator``-re-wrapped items, see ``_unwrap_typed``): TEXT/DATA values fill
+    ``{text_input_<i>}`` prompt slots, IMAGE entries become base64 ``image_url`` content parts. Output
+    is an ``ItemResult`` whose value is parsed JSON (when ``expected_output`` is 'json') or raw text,
+    with ``token_usage``/``duration``/``type``/``engine``/``model`` metadata. A leading ``</think>``
+    block (reasoning models) is stripped. Subclasses (``VLLMComponent``, ``SGLangComponent``) only
+    override the class defaults ``DEFAULT_API_HOST``/``DEFAULT_MODEL``/``ENGINE_NAME``.
 
-    ``api_host``
-        ``host:port`` or full base URL. Default ``api.openai.com``. ``/v1`` is
-        appended automatically if not already present.
-    ``api_key``
-        Bearer token. Defaults to ``EMPTY`` (which most local servers ignore).
-    ``model``
-        Model id, must match what the server advertises in ``/v1/models``.
-    ``temperature`` / ``top_p`` / ``max_output_tokens``
-        Sampling knobs (mapped to OpenAI ``max_tokens``).
-    ``max_image_size``
-        Long-edge in pixels; if set, images are downscaled before being
-        base64-encoded into ``image_url`` content parts.
-    ``extra_body``
-        Dict passed verbatim to the OpenAI client, e.g. vLLM/sglang extras.
+    Settings:
+        - api_host: host:port or full base URL; '/v1' is appended automatically if not already
+          present (default 'api.openai.com')
+        - api_key: bearer token; most local servers ignore it (default 'EMPTY')
+        - model: model id, must match what the server advertises in /v1/models (default '')
+        - prompt: prompt template; supports {step_name}, {text_input_<i>}, {input_length},
+          {first_input} and {last_input} substitutions (default '')
+        - expected_output: 'json' to parse the reply as JSON, anything else for raw text (default 'json')
+        - temperature: sampling temperature (default 0.4)
+        - top_p: nucleus sampling threshold (default 0.9)
+        - max_output_tokens: response token cap, mapped to OpenAI max_tokens (default 4096)
+        - max_image_size: long-edge pixels; if set, images are downscaled before being base64-encoded
+          (default 0 = off)
+        - image_mime_type: mime type declared for attached images (default 'image/jpeg')
+        - image_detail: OpenAI image detail hint: 'low', 'high' or 'auto' (default 'auto')
+        - timeout: request timeout in seconds (default 600)
+        - extra_body: dict passed verbatim to the OpenAI client, e.g. vLLM/sglang extras (default unset)
     """
 
     DEFAULT_API_HOST: str = "api.openai.com"

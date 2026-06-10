@@ -1,24 +1,34 @@
+"""Small PIL-based image helpers shared by the AI backends and annotators.
+
+Conversions between bytes and ``PIL.Image``, EXIF-aware rotation, normalized-coordinate cropping and
+long-edge downscaling (used to shrink images before sending them to vision models).
+"""
+
 from io import BytesIO
 
 from PIL import Image, ImageOps
 
 
 def image_from_bytes(data):
+    """Open raw image *data* (bytes) as a ``PIL.Image``."""
     return Image.open(BytesIO(data))
 
 
 def bytes_from_image(img):
+    """Serialize a ``PIL.Image`` to PNG bytes."""
     buf = BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
 
 
 def exif_rotate(img):
+    """Apply the image's EXIF orientation so pixels match how the photo was taken."""
     img = ImageOps.exif_transpose(img)
     return img
 
 
 def crop(img, crop_region):
+    """Crop *img* to *crop_region*, a dict of normalized (0-1) x/y/width/height values."""
     # Convert normalized coords to pixel coords
     w, h = img.size
     left = int(crop_region["x"] * w)
@@ -30,6 +40,7 @@ def crop(img, crop_region):
 
 
 def scale(img, long_edge):
+    """Downscale *img* so its longest edge is at most *long_edge* pixels (no-op if already smaller)."""
     width, height = img.size
 
     # If image is already smaller than max_size, return as is

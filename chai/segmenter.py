@@ -1,3 +1,10 @@
+"""Segmenters: components that break content into smaller pieces.
+
+Covers text splitting (``TextSegmenter``/``WordSegmenter``), image region detection
+(``YoloSegmenter``) and AI-generated segmentations (``GeminiSegmenter`` etc., generated from
+``chai.ai``). Output is a list-shaped Result of segments, usually consumed by an ``Iterator``.
+"""
+
 import io
 import re
 
@@ -8,7 +15,12 @@ from .utils import text_from_input
 
 
 class Segmenter(Component):
-    """Takes content and breaks it up into segments"""
+    """Takes content and breaks it up into segments.
+
+    Abstract base for the segmenter role: subclasses implement ``_process`` and return a list-shaped
+    Result (``ListResult`` of text chunks, ``FileItemResult`` crops, ...) derived from the input. When
+    no prompt is configured, AI-backed variants use the workflow's default ``segmentation`` prompt.
+    """
 
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)

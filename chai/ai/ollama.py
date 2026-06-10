@@ -1,3 +1,10 @@
+"""Ollama backend for chai.
+
+Talks to a local `Ollama <https://ollama.com>`_ server through the ``ollama`` Python client (default
+``localhost:11434``). Role mixins such as ``OllamaClassifier`` are generated from ``OllamaComponent``
+by ``chai.ai.create_all_components``.
+"""
+
 import io
 import logging
 import time
@@ -15,6 +22,25 @@ logger = logging.getLogger("chai")
 
 
 class OllamaComponent(Component):
+    """Component that sends its input to a local Ollama server and returns the response.
+
+    Input is an ``ItemResult`` or list-shaped Result whose entries carry ``type`` metadata: TEXT/DATA
+    values fill ``{text_input_<i>}`` prompt slots, IMAGE entries are attached as raw image bytes.
+    Output is an ``ItemResult`` whose value is parsed JSON (when ``expected_output`` is 'json') or raw
+    text, with ``token_usage``/``duration``/``type`` metadata. A ``</think>`` block at the start of
+    the reply (reasoning models) is stripped. An unreachable server is logged at construction time and
+    raises only when the component actually runs.
+
+    Settings:
+        - api_host: host:port of the Ollama server (default 'localhost:11434')
+        - model: Ollama model name (default 'llama3.2')
+        - prompt: prompt template; supports {step_name} and {text_input_<i>} substitutions (default '')
+        - expected_output: 'json' to parse the reply as JSON, anything else for raw text (default 'json')
+        - temperature: sampling temperature (default 0.4)
+        - top_p: nucleus sampling threshold (default 0.9)
+        - max_output_tokens: response token cap, mapped to num_predict (default 20000)
+    """
+
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)
         self.api_host = self.settings.get("api_host", "localhost:11434")

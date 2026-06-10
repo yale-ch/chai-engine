@@ -1,3 +1,10 @@
+"""Providers: components that generate the initial Results of a workflow from raw input.
+
+A Provider is typically the first step of a workflow: it turns a configured or supplied raw value (a
+directory path, a list of files, a IIIF manifest URL, a literal value) into a ``Result`` that the rest
+of the tree can process.
+"""
+
 import os
 from io import BytesIO
 
@@ -10,7 +17,14 @@ from .result import DirectoryListResult, ListResult, Result
 
 
 class Provider(Component):
-    """A Provider generates a Result given a raw input"""
+    """A Provider generates a Result given a raw input.
+
+    Unlike other components, a Provider can start a run by itself: ``Workflow._run`` calls ``run()``
+    (which processes the component's configured ``input``) when the step has its own input, instead of
+    feeding it the previous step's output. Subclasses override ``_process`` to turn the raw input into
+    a ``Result``; the default ``_process`` returns the input unchanged unless child ``steps`` exist, in
+    which case it falls back to the normal pass-down behaviour.
+    """
 
     def run(self) -> Result:
         if self.input:
@@ -60,7 +74,12 @@ class IntListProvider(Provider):
 
 
 class DirFileProvider(Provider):
-    """Take a director name and return a ListResult of ItemResults for each file"""
+    """Take a directory name and return one Result entry per file inside it.
+
+    Input is a directory path (string); output is a ``DirectoryListResult`` whose entries wrap each
+    file in the directory as a lazily-read ``FileItemResult``. Raises ``ValueError`` when the path does
+    not exist. Usually followed by an ``Iterator`` that processes each file.
+    """
 
     def _process(self, input):
         if os.path.exists(input):
@@ -102,6 +121,16 @@ class FileListProvider(Provider):
 
 
 class IIIFDirFileProvider(DirFileProvider):
+    """Downloads the images of a IIIF Presentation manifest and provides them as files.
+
+    Input is a manifest URL; the manifest and its painting-annotation images are fetched (and cached)
+    into a local directory, then a ``DirectoryListResult`` of the downloaded JPEG files is returned,
+    exactly like ``DirFileProvider`` over that directory.
+
+    Settings:
+        - directory: where to store the downloaded images (default 'downloads/<component id>')
+    """
+
     def __init__(self, tree, workflow, parent):
         super().__init__(tree, workflow, parent)
         # Now check where to put the images

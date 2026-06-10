@@ -1,3 +1,5 @@
+"""Small shared helpers: input-to-text coercion and a debugging pass-through step."""
+
 from .core import Component
 from .result import Result
 
@@ -16,6 +18,12 @@ def text_from_input(input, encoding="utf-8"):
 
 
 class DebugStep(Component):
+    """Prints the input's repr and returns ``None`` (a no-op step).
+
+    Because ``_process`` returns ``None``, ``Component.process`` skips registration and ``next_steps``
+    entirely -- drop a DebugStep anywhere in a tree to inspect what flows through without altering it.
+    """
+
     def _process(self, input: Result) -> Result:
         print(f"{self.id}: {repr(input)}")
         return None

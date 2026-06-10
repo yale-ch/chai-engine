@@ -1,10 +1,22 @@
+"""Transcribers: components that extract text from binary content (images, audio, files).
+
+AI-backed variants (``GeminiTranscriber``, ``LMStudioTranscriber``, ...) are generated from the
+backends in ``chai.ai``; ``TextFileTranscriber`` handles plain text files without a model.
+"""
+
 from .ai import create_all_components
 from .core import Component
 from .result import ItemResult
 
 
 class Transcriber(Component):
-    """Takes an image or audio and extracts the text from the binary content"""
+    """Takes an image or audio and extracts the text from the binary content.
+
+    Abstract base for the transcriber role: subclasses implement ``_process``, take a Result carrying
+    binary or file content (typically a ``FileItemResult`` with IMAGE/AUDIO type metadata) and return
+    an ``ItemResult`` whose value is the transcribed text. When no prompt is configured, AI-backed
+    variants use the workflow's default ``transcription`` prompt.
+    """
 
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)
