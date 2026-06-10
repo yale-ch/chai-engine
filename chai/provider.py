@@ -32,6 +32,13 @@ class MockProvider(Provider):
         return super()._process(ListResult(["a", "b", "c", "d"]))
 
 
+class IntListProvider(Provider):
+    """A provider that returns a fixed list of integers"""
+
+    def _process(self, input):
+        return super()._process(ListResult([1, 2, 3]))
+
+
 class DirFileProvider(Provider):
     """Take a director name and return a ListResult of ItemResults for each file"""
 

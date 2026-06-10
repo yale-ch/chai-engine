@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 
 from chai.workflow import Workflow
-from chai.result import ItemResult, ListResult  # noqa: E402 -- after Workflow to avoid circular import
+from chai.result import ItemResult, ListResult
 
 IMAGE_PATHS = [
     "/Users/wjm55/data/focus_images/Index 0_Index 01_Index 1_page_00.jpeg",

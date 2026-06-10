@@ -1,7 +1,5 @@
+from chai.result import ItemResult
 from chai.workflow import Workflow
-
-x = 0
-from chai.result import ItemResult  # noqa -- avoid circular import timing
 
 js = {
     "id": "wf2",

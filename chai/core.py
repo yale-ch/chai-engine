@@ -5,6 +5,9 @@ from typing import List, Optional
 
 from dotenv import find_dotenv, load_dotenv
 
+from .base import BaseThing  # noqa: F401 -- re-exported for backwards compatibility
+from .result import ListResult, Result
+
 # Set up the environment globally
 logger = logging.getLogger("chai")
 fn = find_dotenv(usecwd=True)
@@ -35,16 +38,6 @@ def importClass(objectType):
     except AttributeError:
         raise
     return parentClass
-
-
-class BaseThing(object):
-    id: str = ""
-    name: str = ""
-    workflow: Optional["Component"] = None
-    input = None
-
-
-from .result import ListResult, Result  # noqa -- Prevent circular import
 
 
 class Component(BaseThing):

@@ -4,7 +4,7 @@ from collections import Counter
 from .ai import create_all_components
 from .core import Component
 from .data_utils import extract_xpath
-from .result import ItemResult, Result
+from .result import ItemResult, ListResult, Result
 
 
 class Extractor(Component):
@@ -21,6 +21,20 @@ class Extractor(Component):
 
 
 globals().update(create_all_components(Extractor))
+
+
+class DoubleExtractor(Extractor):
+    """Multiplies the input value by 2.
+
+    For an integer this doubles it; for a list it follows Python semantics
+    and repeats the list (e.g. [1,2,3] * 2 == [1,2,3,1,2,3]).
+    """
+
+    def _process(self, input: Result) -> Result:
+        val = input.value * 2
+        if type(val) is list:
+            return ListResult(val, input=input, processor=self)
+        return ItemResult(val, input=input, processor=self)
 
 
 class WordCountExtractor(Extractor):
