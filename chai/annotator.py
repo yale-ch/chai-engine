@@ -67,8 +67,13 @@ def find_source_image(result):
     return None
 
 
-def annotate_image_bytes(image_bytes, detections, thickness=2, with_labels=True, with_confidence=True):
-    """Draw *detections* onto *image_bytes* with supervision; return PNG bytes."""
+def annotate_image_bytes(image_bytes, detections, thickness=None, with_labels=True, with_confidence=True):
+    """Draw *detections* onto *image_bytes* with supervision; return PNG bytes.
+
+    ``thickness`` defaults to scaling with image size (a 2px line on a 5000px
+    herbarium scan disappears when the preview is downscaled); pass an int to
+    force a specific line width. Label text scales the same way.
+    """
     import numpy as np
     import supervision as sv
 
@@ -77,6 +82,11 @@ def annotate_image_bytes(image_bytes, detections, thickness=2, with_labels=True,
     img = image_from_bytes(image_bytes).convert("RGB")
     if not detections:
         return bytes_from_image(img)
+
+    long_edge = max(img.size)
+    if thickness is None:
+        thickness = max(2, round(long_edge / 400))
+    text_scale = max(0.5, long_edge / 1500)
 
     class_names = sorted({d["label"] for d in detections})
     name_to_id = {name: i for i, name in enumerate(class_names)}
@@ -95,7 +105,9 @@ def annotate_image_bytes(image_bytes, detections, thickness=2, with_labels=True,
             if with_confidence and d.get("confidence") is not None:
                 label = f"{label} {d['confidence']:.2f}"
             labels.append(label)
-        scene = sv.LabelAnnotator().annotate(scene=scene, detections=sv_detections, labels=labels)
+        scene = sv.LabelAnnotator(
+            text_scale=text_scale, text_thickness=max(1, thickness // 2), text_padding=max(4, thickness)
+        ).annotate(scene=scene, detections=sv_detections, labels=labels)
 
     from PIL import Image
 
@@ -130,7 +142,7 @@ class ImageBoxAnnotator(Annotator):
     Settings:
         - labels:     if true (default), draw class labels on each box
         - confidence: if true (default), append confidence scores to labels
-        - thickness:  box line thickness in pixels (default 2)
+        - thickness:  box line thickness in pixels (default: scales with image size)
         - output:     optional file path to also write the annotated PNG
     """
 
@@ -140,10 +152,11 @@ class ImageBoxAnnotator(Annotator):
         if source is None:
             raise ValueError(f"{self} could not find a source IMAGE result in the input chain of {input}")
 
+        thickness = self.settings.get("thickness")
         png = annotate_image_bytes(
             source.value,
             detections,
-            thickness=int(self.settings.get("thickness", 2)),
+            thickness=int(thickness) if thickness else None,  # None = scale with image size
             with_labels=bool(self.settings.get("labels", True)),
             with_confidence=bool(self.settings.get("confidence", True)),
         )
