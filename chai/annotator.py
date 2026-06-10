@@ -168,18 +168,28 @@ class ImageBoxAnnotator(Annotator):
 
 
 class TextHighlightAnnotator(Annotator):
-    """Highlights extracted values in their source text.
+    """Highlights extracted values in their source text -- ONE visualization
+    for the whole task, with each value labelled by its entity type
+    ("Tom PERSON, D.C. PLACE"), so wire a single annotator per extractor.
 
-    Wire this as a next_step of an Extractor (or Classifier): it walks up the
-    input chain to the nearest plain-text result (e.g. a transcription), then
-    wraps every extracted value it can find verbatim in the text with a
-    labelled highlight. Output is an ``annotated: true`` TEXT result whose
-    value is HTML ``<mark>`` markup (or ``**bold**`` markdown).
+    Walks up the input chain to the nearest plain-text result (e.g. a
+    transcription or the raw test input), then wraps every extracted value in
+    a labelled highlight. Entity-shaped dicts ({"type": "Person", "text":
+    "Tom"}) are labelled with their entity type, not the JSON field name;
+    label/value key names are auto-detected (label/type/class/category and
+    text/value/span/name) and overridable. Output is an ``annotated: true``
+    TEXT result whose value is HTML ``<mark data-label=...>`` markup (or
+    ``**bold**`` markdown); viewers color each distinct label differently.
 
     Settings:
         - format: 'html' (default) or 'markdown'
-        - fields: optional list of JSON field names to highlight (default: all)
+        - label_field: dict key holding each entity's label (default: auto-detect)
+        - value_field: dict key holding each entity's text (default: auto-detect)
+        - fields: optional labels to keep, comma-separated (default: all)
     """
+
+    _LABEL_KEYS = ("label", "type", "class", "category", "entity")
+    _VALUE_KEYS = ("text", "value", "span", "name", "match")
 
     def _process(self, input):
         spans = self._extract_spans(input)
@@ -216,24 +226,48 @@ class TextHighlightAnnotator(Annotator):
         keep = self.settings.get("fields", []) or []
         if isinstance(keep, str):
             keep = [f.strip() for f in keep.split(",") if f.strip()]
-        keep = set(keep)
+        keep = {k.lower() for k in keep}
         pairs = []
+        seen = set()
+
+        def add(label, text):
+            text = str(text).strip()
+            if not text:
+                return
+            key = (str(label), text)
+            if key not in seen:
+                seen.add(key)
+                pairs.append(key)
+
+        def entity_pair(d):
+            """(label, text) when the dict looks like one extracted entity."""
+            lf = self.settings.get("label_field") or next((k for k in self._LABEL_KEYS if k in d), None)
+            vf = self.settings.get("value_field") or next(
+                (k for k in self._VALUE_KEYS if k in d and k != lf), None
+            )
+            if lf and vf and isinstance(d.get(vf), (str, int, float)) and isinstance(d.get(lf), str):
+                return (d[lf], d[vf])
+            return None
 
         def flatten(label, v):
             if isinstance(v, dict):
+                ep = entity_pair(v)
+                if ep:
+                    add(*ep)
+                    return
                 for k, sub in v.items():
                     flatten(k, sub)
             elif isinstance(v, list):
                 for sub in v:
                     flatten(label, sub)
             elif v is not None:
-                text = str(v).strip()
-                if text:
-                    pairs.append((label, text))
+                add(label, v)
 
         flatten("value", value)
         if keep:
-            pairs = [(label, v) for label, v in pairs if label in keep]
+            pairs = [(label, v) for label, v in pairs if label.lower() in keep]
+        # Longest values first so "Ada Lovelace" wins over a bare "Ada"
+        pairs.sort(key=lambda p: len(p[1]), reverse=True)
         return pairs
 
     def _find_source_text(self, input):
@@ -250,14 +284,27 @@ class TextHighlightAnnotator(Annotator):
         return None
 
     def _highlight(self, text, pairs, fmt):
+        import re
+
+        if not pairs:
+            return text, []
+        # One regex pass over the original text: longer values win overlaps
+        # and nothing gets re-wrapped inside an earlier replacement.
+        by_value = {}
+        for label, value in pairs:  # pairs arrive longest-first
+            by_value.setdefault(value, label)
+        pattern = re.compile("|".join(re.escape(v) for v in by_value))
         matched = []
-        for label, value in pairs:
-            if value not in text:
-                continue
+        seen = set()
+
+        def repl(m):
+            value = m.group(0)
+            label = by_value[value]
+            if (label, value) not in seen:
+                seen.add((label, value))
+                matched.append({"label": label, "value": value})
             if fmt == "markdown":
-                replacement = f"**{value}** _[{label}]_"
-            else:
-                replacement = f'<mark title="{label}" data-label="{label}">{value}</mark>'
-            text = text.replace(value, replacement)
-            matched.append({"label": label, "value": value})
-        return text, matched
+                return f"**{value}** _[{label}]_"
+            return f'<mark title="{label}" data-label="{label}">{value}</mark>'
+
+        return pattern.sub(repl, text), matched
