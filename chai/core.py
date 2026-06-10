@@ -246,16 +246,18 @@ class Component(BaseThing):
         if new_result is None:
             # debug or other no-op step
             return None
-        elif isinstance(input, Result):
-            # Ensure the result always knows its input
-            if new_result.input is None:
+        else:
+            # Ensure the result always knows its input -- including a raw
+            # first-step input (e.g. text typed into a test run), so the
+            # provenance chain always bottoms out at the original input
+            if new_result.input is None and input is not None:
                 new_result.input = input
             # ... And which component created it
             if new_result.processor is None:
                 new_result.processor = self
             # ... so that we can walk up the hierarchy to link results
 
-            if self.register_on:
+            if isinstance(input, Result) and self.register_on:
                 # list of processors, on to which we register the new result for the input
                 inp = input
                 targets = self.register_on[:]

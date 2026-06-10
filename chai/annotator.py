@@ -213,7 +213,10 @@ class TextHighlightAnnotator(Annotator):
             except Exception:
                 value = {"match": value}
 
-        keep = set(self.settings.get("fields", []) or [])
+        keep = self.settings.get("fields", []) or []
+        if isinstance(keep, str):
+            keep = [f.strip() for f in keep.split(",") if f.strip()]
+        keep = set(keep)
         pairs = []
 
         def flatten(label, v):
