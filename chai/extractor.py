@@ -41,7 +41,9 @@ class WordCountExtractor(Extractor):
     """Extracts individual words from plain text and produces a JSON word-count dictionary."""
 
     def _process(self, input: Result) -> Result:
-        text = input.value if isinstance(input.value, str) else str(input.value)
+        text = input.value if isinstance(input, Result) else input
+        if not isinstance(text, str):
+            text = str(text)
         words = text.lower().split()
         counts = dict(Counter(words))
         return ItemResult(json.dumps(counts), input=input, processor=self)

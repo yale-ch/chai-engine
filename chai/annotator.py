@@ -44,9 +44,23 @@ def collect_detections(result):
 
 
 def find_source_image(result):
-    """Walk up the input chain to the nearest on-disk/in-memory IMAGE result."""
+    """Walk up the input chain to the nearest on-disk/in-memory IMAGE result.
+
+    Accepts a Result or a raw input value: the chain may bottom out at the raw
+    workflow input (e.g. a path string typed into a test run rather than a
+    Provider-made result), which gets wrapped in a FileItemResult when it
+    points at an image file.
+    """
     r = result
-    while isinstance(r, Result):
+    while r is not None:
+        if not isinstance(r, Result):
+            try:
+                candidate = FileItemResult(str(r))
+                if candidate.metadata.get("type") == "IMAGE" and candidate.file_path.exists():
+                    return candidate
+            except (OSError, ValueError):
+                pass
+            return None
         if isinstance(r, FileItemResult) and r.metadata.get("type") == "IMAGE":
             return r
         r = r.input
@@ -215,7 +229,11 @@ class TextHighlightAnnotator(Annotator):
 
     def _find_source_text(self, input):
         r = input.input
-        while isinstance(r, Result):
+        while r is not None:
+            if not isinstance(r, Result):
+                # raw workflow input, e.g. text typed into a test run
+                text = str(r)
+                return text if text.strip() else None
             v = r.value
             if isinstance(v, str) and v.strip():
                 return v
