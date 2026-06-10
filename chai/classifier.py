@@ -50,11 +50,15 @@ class FileTypeClassifier(Classifier):
 
 
 class YoloClassifier(Classifier):
-    """Classifies images using a YOLO model from ultralytics.
+    """Classifies images using a YOLO classification model from ultralytics.
 
-    Returns detected class names as labels. Configure via settings:
-        - model: YOLO model name (default: "yolo11n-cls.pt")
-        - confidence: minimum confidence threshold (default: 0.5)
+    Returns the top class names above the confidence threshold as labels.
+    Strictly for classification heads (i.e. models with ``result.probs``);
+    for detection models with bounding boxes, use ``segmenter.YoloSegmenter``.
+
+    Settings:
+        - model:      YOLO classification model (default: "yolo11n-cls.pt")
+        - confidence: minimum probability to emit a label (default: 0.5)
     """
 
     def __init__(self, tree, workflow, parent=None):
@@ -71,22 +75,15 @@ class YoloClassifier(Classifier):
         else:
             source = input.value
 
-        results = self.model(source, verbose=False)
-
         labels = []
-        for result in results:
-            if hasattr(result, "probs") and result.probs is not None:
-                # Classification model — get top classes above threshold
-                for idx, conf in enumerate(result.probs.data.tolist()):
-                    if conf >= self.confidence:
-                        labels.append(result.names[idx])
-            elif hasattr(result, "boxes") and result.boxes is not None:
-                # Detection model — get unique class names above threshold
-                for box in result.boxes:
-                    if box.conf.item() >= self.confidence:
-                        cls_id = int(box.cls.item())
-                        name = result.names[cls_id]
-                        if name not in labels:
-                            labels.append(name)
+        for result in self.model(source, verbose=False):
+            if getattr(result, "probs", None) is None:
+                raise ValueError(
+                    f"{self.__class__.__name__} requires a YOLO classification model; "
+                    "for detection models use segmenter.YoloSegmenter."
+                )
+            for idx, conf in enumerate(result.probs.data.tolist()):
+                if conf >= self.confidence:
+                    labels.append(result.names[idx])
 
         return LabelListResult(labels, input=input, processor=self)
