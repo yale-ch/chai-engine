@@ -67,7 +67,75 @@ def create_all_components(base_class: type) -> dict:
         name = f"{ai_class.__name__.replace('Component', '')}{base_class.__name__}"
         new = create_ai_component(name, base_class, ai_class)
         clss[name] = new
+    dispatcher_name = f"AI{base_class.__name__}"
+    clss[dispatcher_name] = create_ai_dispatcher(dispatcher_name, base_class, clss)
     return clss
+
+
+def available_services() -> dict:
+    """Map of service name -> backend Component class for the importable backends.
+
+    ``custom`` is an alias for the OpenAI-compatible backend (point it at any
+    server with ``api_host``); ``mlx_vlm`` aliases ``mlxvlm``.
+    """
+    services = {}
+    for ai_class in __all__:
+        services[ai_class.__name__.replace("Component", "").lower()] = ai_class
+    if "openai" in services:
+        services["custom"] = services["openai"]
+    if "mlxvlm" in services:
+        services["mlx_vlm"] = services["mlxvlm"]
+    return services
+
+
+def create_ai_dispatcher(name: str, base_class: type, composites: dict) -> type:
+    """Generate the service-selectable ``AI<Role>`` class (e.g. ``AITranscriber``).
+
+    One palette node for the whole role: the ``service`` setting picks the backend at construction
+    time, so instantiating ``AITranscriber`` with ``{"service": "ollama"}`` actually returns an
+    ``OllamaTranscriber``. All other settings (``model``, ``prompt``, ``api_host``, ...) pass through
+    to the chosen backend, which supplies its own model default.
+
+    Settings:
+        - service: AI backend to use: gemini | lmstudio | ollama | openai | custom (an OpenAI-compatible endpoint, set api_host) | vllm | sglang | mlx_vlm (default gemini)
+        - model: model id for the chosen service (each service has a sensible default)
+        - prompt: prompt template, passed through to the backend
+        - api_host: server host:port for local/custom services
+    """
+
+    def __new__(cls, tree, workflow, parent=None):
+        service = str(tree.get("settings", {}).get("service", "gemini")).lower().strip()
+        ai_class = available_services().get(service)
+        if ai_class is None:
+            raise ValueError(
+                f"Unknown AI service {service!r} for {name}; available: {sorted(available_services())}"
+            )
+        target = composites.get(f"{ai_class.__name__.replace('Component', '')}{base_class.__name__}")
+        if target is None:
+            raise ValueError(f"Service {service!r} has no {base_class.__name__} composite available")
+        inst = object.__new__(target)
+        # The target composite is not a subclass of the dispatcher, so Python
+        # will not call __init__ for us after __new__ -- do it explicitly.
+        inst.__init__(tree, workflow, parent)
+        return inst
+
+    doc = f"""Service-selectable AI {base_class.__name__.lower()}: one node for every AI backend.
+
+    Pick the backend with the ``service`` setting -- constructing this class actually returns the
+    matching composite (e.g. ``service: ollama`` -> ``Ollama{base_class.__name__}``). All other
+    settings pass through to the chosen backend.
+
+    Settings:
+        - service: gemini | lmstudio | ollama | openai | custom (OpenAI-compatible endpoint, set api_host) | vllm | sglang | mlx_vlm (default gemini)
+        - model: model id for the chosen service (each service has a sensible default)
+        - prompt: prompt template, passed through to the backend
+        - api_host: server host:port for local/custom services
+    """
+    return type(
+        name,
+        (base_class,),
+        {"__new__": __new__, "__module__": base_class.__module__, "__doc__": doc},
+    )
 
 
 def create_ai_component(name: str, base_class: type, ai_class: type) -> type:
@@ -102,5 +170,12 @@ def create_ai_component(name: str, base_class: type, ai_class: type) -> type:
     return type(
         name,
         (base_class, ai_class),
-        {"__init__": __init__, "_process": _process, "__module__": base_class.__module__},
+        {
+            "__init__": __init__,
+            "_process": _process,
+            "__module__": base_class.__module__,
+            # Marks machine-generated per-backend composites so UIs can hide
+            # them behind the service-selectable AI<Role> dispatcher.
+            "_chai_generated": True,
+        },
     )
