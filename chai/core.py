@@ -137,8 +137,19 @@ class Component(BaseThing):
                 merged.append(res)
         return merged
 
+    def _emit(self, event, **info):
+        """Forward a lifecycle event to the workflow's run listeners."""
+        if self.workflow is not None and self.workflow is not self:
+            self.workflow.emit(event, self, **info)
+
     def process(self, input) -> Result:
-        new_result = self._process(input)
+        self._emit("component_start")
+        try:
+            new_result = self._process(input)
+        except Exception as e:
+            self._emit("component_error", error=str(e))
+            raise
+        self._emit("component_end")
 
         if new_result is None:
             # debug or other no-op step

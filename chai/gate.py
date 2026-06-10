@@ -38,8 +38,16 @@ class Gate(Component):
         return merged
 
     def process(self, input):
-        # Where does the metadata about this function get stored?
-        return self._process(input, self._test(input))
+        # Gates bypass Component.process (no result registration), so they
+        # emit their own lifecycle events.
+        self._emit("component_start")
+        try:
+            result = self._process(input, self._test(input))
+        except Exception as e:
+            self._emit("component_error", error=str(e))
+            raise
+        self._emit("component_end")
+        return result
 
 
 class ConditionGate(Gate):

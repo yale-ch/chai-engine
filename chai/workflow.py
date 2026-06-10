@@ -1,9 +1,12 @@
+import logging
 import os
 
 import ujson as json
 
 from .core import Component
 from .result import ListResult, Result
+
+logger = logging.getLogger("chai")
 
 
 class Workflow(Component):
@@ -14,6 +17,7 @@ class Workflow(Component):
             workflow = self
         self.registry_ids = {}
         self.id_counter = -1
+        self.listeners = []
 
         # read in defaults from data/
 
@@ -64,7 +68,45 @@ class Workflow(Component):
             raise ValueError(f"Tried to create identifier that already exists: {cid}")
         return cid
 
+    def add_listener(self, fn):
+        """Subscribe *fn* to run events; it is called with a dict per event
+        (component_start / component_end / component_error). Lets harnesses
+        like chai-workflow-builder show live progress."""
+        self.listeners.append(fn)
+
+    def remove_listener(self, fn):
+        if fn in self.listeners:
+            self.listeners.remove(fn)
+
+    def emit(self, event, component, **info):
+        """Notify listeners that *component* hit a lifecycle point. A failing
+        listener is logged and skipped -- observers must never break a run."""
+        if not self.listeners:
+            return
+        payload = {
+            "event": event,
+            "component_id": component.id,
+            "component_name": component.name,
+            "component_class": component.__class__.__name__,
+            **info,
+        }
+        for fn in self.listeners:
+            try:
+                fn(payload)
+            except Exception as e:
+                logger.warning(f"Workflow listener failed on {event}: {e}")
+
     def run(self, input=None) -> Result:
+        self.emit("component_start", self)
+        try:
+            res = self._run(input)
+        except Exception as e:
+            self.emit("component_error", self, error=str(e))
+            raise
+        self.emit("component_end", self)
+        return res
+
+    def _run(self, input=None) -> Result:
         res = ListResult([], processor=self)
         if input is not None:
             res.input = input
