@@ -120,21 +120,6 @@ class TestIterator(unittest.TestCase):
         self.assertEqual(out.value[0].value[0].value["fields"]["a"], "correct")
         self.assertEqual(out.value[1].metadata.get("type"), "ERROR")
 
-    def test_cache_replays_results(self):
-        db = tempfile.mktemp(suffix=".db")
-        events = []
-        self.wf.add_listener(lambda ev: events.append(ev["event"]))
-        it1 = self._gloss_iterator({"cache": db}, "iter_c1")
-        out1 = it1.process(ListResult([ItemResult("the cat")]))
-        self.assertEqual(out1.value[0].value[0].value, "the Katze")
-        self.assertNotIn("iterator_cache_hit", events)
-
-        # same config, new run: replayed from cache
-        it2 = self._gloss_iterator({"cache": db}, "iter_c2")
-        out2 = it2.process(ListResult([ItemResult("the cat")]))
-        self.assertEqual(out2.value[0].value[0].value, "the Katze")
-        self.assertIn("iterator_cache_hit", events)
-
 
 if __name__ == "__main__":
     unittest.main()

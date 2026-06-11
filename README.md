@@ -95,7 +95,7 @@ Two consequences worth internalizing:
 | Role | Job | Examples |
 |---|---|---|
 | **Provider** | Generate a Result from raw input | `DirFileProvider`, `FileListProvider`, `IIIFDirFileProvider`, `StaticProvider` |
-| **Iterator** | Run children once per entry | `Iterator` (with `workers`, `continue_on_error`, `cache`) |
+| **Iterator** | Run children once per entry | `Iterator` (with `workers`, `continue_on_error`) |
 | **Classifier** | Assign labels | `KeywordClassifier`, `FileTypeClassifier`, `YoloClassifier`, `AIClassifier` |
 | **Gate** | Conditional branch (`true_steps`/`false_steps`) | `ConditionGate`, `ValueTestGate`, `MetadataTestGate`, `ThresholdGate`, `FileTypeGate`, `LabelTestGate` |
 | **SwitchGate** | Per-label branch (`case_steps`), for-each over lists | `SwitchGate` |
@@ -133,7 +133,7 @@ set `api_host`), `vllm`, `sglang`, `mlx_vlm` (Apple Silicon).
 
 ### Conditions: one test language for all gates
 
-Gates evaluate JSON conditions (`chai/conditions.py`) against any Result:
+Gates evaluate JSON conditions (defined alongside the gates in `chai/gate.py`) against any Result:
 
 ```json
 {"all": [
@@ -163,10 +163,8 @@ Every component accepts an error policy in `settings`:
 `Iterator` adds corpus-scale controls:
 
 - `workers: 8` — process entries through a thread pool (input order preserved)
-- `continue_on_error: true` — failed entries become ERROR records, the rest proceed
-- `cache: run_cache.db` — completed entries replay on re-runs (keyed by item
-  identity + a hash of the child-step config, so editing a prompt invalidates
-  the cache); interrupted corpus runs resume where they stopped
+- `continue_on_error: true` — failed entries become ERROR records, the rest
+  proceed (pair with `SqliteStorage` to persist what succeeded)
 
 `Extractor` adds `schema` — a JSON-Schema subset (`type`, `properties`,
 `required`, `items`, `enum`) checked on every output; invalid model output

@@ -1,6 +1,6 @@
 import unittest
 
-from chai.conditions import MISSING, apply_op, evaluate, resolve_source
+from chai.gate import MISSING, apply_op, evaluate, resolve_source
 from chai.result import FileItemResult, ItemResult, LabelListResult
 
 

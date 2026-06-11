@@ -289,7 +289,7 @@ class LabelListResult(ListResult):
     """Receives a list of strings as labels from a classifier.
 
     Emitted by ``Classifier`` subclasses; gates (``LabelTestGate``, the ``labels`` condition source in
-    ``chai.conditions``) look specifically for this type when collecting labels from a result and its
+    ``chai.gate``) look specifically for this type when collecting labels from a result and its
     derivatives.
     """
 

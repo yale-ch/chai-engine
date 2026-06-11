@@ -37,7 +37,7 @@ python experiment.py
 - **`Provider`**: Generates a `Result` from raw input (e.g., `DirFileProvider` reads files from a directory).
 - **`Iterator`**: Calls further components for each entry in a `Result` to make a new result.
 - **`Classifier`**: Assigns one or more labels to input (e.g., `KeywordClassifier`, `FileTypeClassifier`, `YoloClassifier`).
-- **`Gate`**: Acts as a gating mechanism with `true_steps` and `false_steps` based on a test. `ConditionGate` evaluates a component-agnostic JSON condition (see `chai/conditions.py`); `ValueTestGate`, `MetadataTestGate`, `ThresholdGate`, and `FileTypeGate` are convenience subclasses; `LabelTestGate` tests labels registered by a classifier.
+- **`Gate`**: Acts as a gating mechanism with `true_steps` and `false_steps` based on a test. `ConditionGate` evaluates a component-agnostic JSON condition (see `chai/gate.py`); `ValueTestGate`, `MetadataTestGate`, `ThresholdGate`, and `FileTypeGate` are convenience subclasses; `LabelTestGate` tests labels registered by a classifier.
 - **`Transcriber`**: Extracts text from images or audio.
 - **`Describer`**: Generates text to describe content.
 - **`Extractor`**: Extracts structured data from content.
@@ -48,7 +48,7 @@ python experiment.py
 - **`Embedder`**: Embeddings + vector search (`VectorIndexer`, `VectorRetriever` over a SQLite `VectorStore`; services: hash/gemini/ollama/openai-compatible).
 - **`Evaluator`**: Scores output against ground truth (`TextMetricsEvaluator`: exact/CER/WER; `RecordFieldEvaluator`: per-field precision/recall/F1).
 
-Every component supports an error policy via settings (`retries`, `retry_delay`, `on_error: skip`) and an `error_steps` config branch. `Iterator` adds `workers` (thread-pool concurrency), `continue_on_error`, and `cache` (SQLite run cache for resumable corpus runs). `Extractor` validates output against a `schema` setting (chai/schema.py), retrying invalid model output.
+Every component supports an error policy via settings (`retries`, `retry_delay`, `on_error: skip`) and an `error_steps` config branch. `Iterator` adds `workers` (thread-pool concurrency) and `continue_on_error`. `Extractor` validates output against a `schema` setting (chai/schema.py), retrying invalid model output.
 
 ### AI Components (`chai/ai/`)
 
@@ -89,7 +89,6 @@ Workflows are defined as JSON trees with `steps` and `next_steps`:
 - `chai/result.py`: Result class hierarchy (`Result`, `ItemResult`, `ListResult`, `FileItemResult`, `DirectoryListResult`).
 - `chai/provider.py`: Provider components for generating results from raw input.
 - `chai/gate.py`: `Gate`, `ConditionGate` (+ convenience gates), and `LabelTestGate` for conditional branching.
-- `chai/conditions.py`: JSON condition language (`source`/`op`/`value` with `all`/`any`/`not`) evaluated against any `Result` -- shared by the gates.
 - `chai/annotator.py`: `Annotator` components plus `annotate_image_bytes`/`collect_detections` helpers (also used by chai-workflow-builder for run previews).
 - `chai/ai/gemini.py`, `chai/ai/lm_studio.py`, `chai/ai/ollama.py`: AI component implementations.
 - `chai/transcriber.py`: Transcriber components with AI mixins.
