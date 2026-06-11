@@ -1,3 +1,10 @@
+"""LM Studio backend for chai.
+
+Talks to a local `LM Studio <https://lmstudio.ai>`_ server through the ``lmstudio`` Python SDK
+(default ``localhost:1234``). Role mixins such as ``LMStudioTranscriber`` are generated from
+``LMStudioComponent`` by ``chai.ai.create_all_components``.
+"""
+
 import io
 import logging
 import time
@@ -16,6 +23,26 @@ logger = logging.getLogger("chai")
 
 
 class LMStudioComponent(Component):
+    """Component that sends its input to a local LM Studio server and returns the response.
+
+    Input is an ``ItemResult`` or list-shaped Result whose entries carry ``type`` metadata: TEXT/DATA
+    values fill ``{text_input_<i>}`` prompt slots, IMAGE entries are uploaded as image attachments
+    (optionally downscaled first). Output is an ``ItemResult`` whose value is parsed JSON (when
+    ``expected_output`` is 'json') or raw text, with ``token_usage``/``duration``/``type`` metadata.
+    A ``</think>`` block at the start of the reply (reasoning models) is stripped.
+
+    Settings:
+        - api_host: host:port of the LM Studio server (default 'localhost:1234')
+        - model: model identifier as known to LM Studio (default 'qwen/qwen3.5-9b')
+        - prompt: prompt template; supports {step_name}, {text_input_<i>}, {input_length},
+          {first_input} and {last_input} substitutions (default '')
+        - expected_output: 'json' to parse the reply as JSON, anything else for raw text (default 'json')
+        - temperature: sampling temperature (default 0.4)
+        - top_p: nucleus sampling threshold (default 0.9)
+        - max_output_tokens: response token cap (default 32000)
+        - max_image_size: long-edge pixel limit; images are downscaled before upload if set (default 0 = off)
+    """
+
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)
         self.api_host = self.settings.get("api_host", "localhost:1234")

@@ -1,3 +1,10 @@
+"""Apply XPath expressions to plain dicts (used by ``extractor.JsonXpathExtractor``).
+
+The dict is rendered as a throwaway ``<record>`` XML document so lxml can evaluate the XPath, then the
+matched element paths are translated back into dict/list lookups on the original data. Data types are
+not preserved in the XML because the operation is never reversed.
+"""
+
 from lxml import etree
 
 
@@ -29,6 +36,7 @@ def _convert(what, output):
 
 
 def dicttoxml(what):
+    """Render dict *what* as a ``<record>...</record>`` XML string ('@' in keys becomes '__')."""
     output = ["<record>"]
     _convert(what, output)
     output.append("</record>")
@@ -37,6 +45,7 @@ def dicttoxml(what):
 
 
 def xpath_on_record(what, xpath):
+    """Evaluate *xpath* against dict *what*; return matched element paths (without '/record')."""
     xml = dicttoxml(what)
     try:
         dom = etree.XML(xml)
@@ -56,6 +65,7 @@ def xpath_on_record(what, xpath):
 
 
 def extract_xpath(what, xpath):
+    """Return the value in dict *what* addressed by *xpath* (first match only)."""
     paths = xpath_on_record(what, xpath)
     for p in paths:
         bits = p[1:].split("/")

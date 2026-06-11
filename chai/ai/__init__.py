@@ -56,7 +56,12 @@ except ImportError as e:  # pragma: no cover -- Apple Silicon only
 
 
 def create_all_components(base_class: type) -> dict:
-    """Iterate through __all__ and create the components"""
+    """Generate one composite class per backend in ``__all__`` for a given role base class.
+
+    Called at import time by the role modules (``chai.transcriber``, ``chai.classifier``, ...), which
+    splat the returned ``{name: class}`` dict into their module globals. Names are formed as
+    ``<Backend><Role>``, e.g. ``GeminiTranscriber`` from ``GeminiComponent`` + ``Transcriber``.
+    """
     clss = {}
     for ai_class in __all__:
         name = f"{ai_class.__name__.replace('Component', '')}{base_class.__name__}"
@@ -69,6 +74,12 @@ def create_ai_component(name: str, base_class: type, ai_class: type) -> type:
     """
     Dynamically generates a composite AI component class (e.g. GeminiSegmenter).
     This avoids having to hand-craft boilerplate multiple inheritance classes.
+
+    The generated class inherits ``(base_class, ai_class)``. Its ``__init__`` runs the AI backend's
+    initializer first (which reaches ``Component.__init__`` via super), then the role base's
+    ``__init__`` for role defaults like the fallback prompt -- ``Component.__init__``'s
+    already-initialized guard prevents double initialization. ``_process`` always delegates to the AI
+    backend, so the composite takes the role's name/prompt defaults but the backend's behaviour.
     """
 
     def __init__(self, tree, workflow, parent=None):
@@ -91,5 +102,9 @@ def create_ai_component(name: str, base_class: type, ai_class: type) -> type:
     return type(
         name,
         (base_class, ai_class),
-        {"__init__": __init__, "_process": _process, "__module__": base_class.__module__},
+        {
+            "__init__": __init__,
+            "_process": _process,
+            "__module__": base_class.__module__,
+        },
     )

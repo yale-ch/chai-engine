@@ -3,6 +3,8 @@ ujson
 Pillow
 requests
 ultralytics
+pi-heif
+supervision
 transformers>=5.5.0
 python-dotenv
 google

@@ -1,3 +1,11 @@
+"""HuggingFace transformers backend for chai (in-process, text-only).
+
+Loads a causal LM with ``AutoModelForCausalLM``/``AutoTokenizer`` and runs generation directly in the
+Python process -- no server. Listed in ``chai.ai.__more_than_all__``: it is importable and usable via
+explicit subclasses, but skipped by the automatic role-mixin generation because it loads heavy local
+weights at construction time.
+"""
+
 import logging
 import time
 
@@ -11,6 +19,22 @@ logger = logging.getLogger("chai")
 
 
 class TransformersComponent(Component):
+    """Component that runs a local HuggingFace causal LM on text input.
+
+    Input is an ``ItemResult`` or list-shaped Result whose TEXT/DATA entries fill ``{text_input_<i>}``
+    prompt slots (a TEXT/DATA entry without a matching slot raises; images are not supported). Output
+    is an ``ItemResult`` whose value is parsed JSON ('json'), parsed YAML ('yaml') or raw text,
+    depending on ``expected_output``, with ``token_usage``/``duration``/``type`` metadata. The chat
+    template is applied with thinking disabled.
+
+    Settings:
+        - model: HuggingFace model id or local path (required)
+        - prompt: prompt template; supports {step_name} and {text_input_<i>} substitutions (default '')
+        - expected_output: 'json', 'yaml' or anything else for raw text (default 'json')
+        - max_new_tokens: generation token cap (default 2048)
+        - tie_word_embeddings: passed to from_pretrained (default true)
+    """
+
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)
         model = self.settings.get("model", None)

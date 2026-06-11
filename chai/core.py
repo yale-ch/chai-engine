@@ -1,5 +1,14 @@
+"""Core building blocks of the chai engine.
+
+Defines ``Component`` (the unit of processing that turns a ``Result`` into a new ``Result``) and
+``importClass`` (string -> class resolution used to build component trees from JSON workflow configs).
+``BaseThing``, the shared identity base, lives in ``chai.base``. Every other component type in chai
+subclasses ``Component``.
+"""
+
 import importlib
 import logging
+import time
 import uuid
 from typing import List, Optional
 
@@ -16,6 +25,11 @@ if fn:
 
 
 def importClass(objectType):
+    """Resolve a workflow-config ``type`` string (e.g. ``"provider.DirFileProvider"``) to a class.
+
+    The string is split into module and class name; the module is looked up inside the ``chai`` package
+    (a bare class name defaults to ``chai.core``). Import or attribute failures are logged and re-raised.
+    """
     if not objectType:
         return None
     try:
@@ -40,18 +54,80 @@ def importClass(objectType):
     return parentClass
 
 
+def result_preview(result, limit=160, depth=0):
+    """Short, human-readable summary of what a component produced.
+
+    Sent with ``component_end`` lifecycle events so harnesses (e.g. the
+    workflow-builder) can show what leaves each node without serializing the
+    full result. Never triggers a FileItemResult's lazy file read.
+    """
+    if result is None:
+        return "(no output)"
+    if isinstance(result, Result):
+        cls = result.__class__.__name__
+        file_name = getattr(result, "file_name", "")
+        if file_name:
+            return f"{cls} '{file_name}'"
+        value = result.value
+        if type(value) is list:
+            if depth >= 1:
+                return f"{cls}({len(value)} items)"
+            inner = ", ".join(result_preview(v, limit=40, depth=depth + 1) for v in value[:3])
+            more = f", +{len(value) - 3} more" if len(value) > 3 else ""
+            return f"{cls}({len(value)} items: [{inner}{more}])"[: limit + 40]
+        result = value  # fall through to plain-value handling
+    text = result if isinstance(result, str) else repr(result)
+    text = " ".join(text.split())
+    if len(text) > limit:
+        text = text[:limit] + "…"
+    return text
+
+
 class Component(BaseThing):
-    """A Component receives input, performs some computation on the Result and returns a new Result"""
+    """A Component receives input, performs some computation on the Result and returns a new Result.
+
+    Components form a tree that mirrors the JSON workflow config: ``__init__`` walks the config dict and
+    instantiates each entry of ``steps`` (children run *inside* ``_process``, receiving this component's
+    input) and ``next_steps`` (children run *after* ``process``, receiving this component's output via
+    ``process_out``). Free-form per-component configuration lives in ``settings`` (a plain dict read by
+    subclasses); the full config dict is kept on ``config``.
+
+    The processing contract is split in two:
+
+    * ``_process(input)`` -- the core logic, overridden by subclasses. Receives a ``Result`` (or raw
+      input when first in a run) and returns a new ``Result`` (or ``None`` for no-op/debug steps). The
+      default implementation passes the input to every child in ``steps`` and merges their outputs into
+      an ``outputResultClass`` (``ListResult`` by default).
+    * ``process(input)`` -- the wrapper called by parents. It emits ``component_start`` /
+      ``component_end`` / ``component_error`` lifecycle events via ``_emit``, calls ``_process``, fills
+      in the new result's ``input`` and ``processor`` back-references, handles ``register_on``
+      bookkeeping, and finally forwards the result to ``next_steps`` through ``process_out``.
+
+    ``register_on`` is a list of component ids (or the literal ``"parent"``) resolved to instances at
+    build time: after ``_process`` returns, ``process`` walks up the input's ``Result.input`` chain and
+    registers the new result as a derivative on each ancestor result produced by one of those
+    components, so later steps (e.g. ``LabelTestGate``) can look up what this component said about an
+    earlier result.
+    """
 
     parent: Optional["Component"] = None
     steps: List["Component"] = []
     next_steps: List["Component"] = []
+    error_steps: List["Component"] = []
     outputResultClass = ListResult
     settings: dict = {}
     register_on: list = []
     config: dict = {}
 
     def _make_step(self, tree, wf):
+        """Build one child component from its config dict.
+
+        If the dict has a ``base`` key, the named entry from the workflow's ``library`` (see
+        ``Workflow``) is used as a template: the step's own keys override the library's, except
+        ``settings``, whose keys are merged into (and take precedence over) the library settings. The
+        resulting ``type`` string is resolved via ``importClass`` and instantiated with this component
+        as parent.
+        """
         base = tree.get("base", "")
         if base:
             if not self.workflow:
@@ -79,7 +155,13 @@ class Component(BaseThing):
             return inst
 
     def __init__(self, tree, workflow, parent=None):
-        # Walk tree and built components
+        """Walk the config *tree* and build this component plus its ``steps``/``next_steps`` children.
+
+        Assigns an ``id`` (from the config, or generated by the workflow), registers the component in
+        the workflow's registry, resolves ``register_on`` ids to component instances, and recursively
+        instantiates children. A second call on an already-initialized instance is a no-op (guards
+        against double ``__init__`` in the AI mixin classes).
+        """
 
         if self.workflow is not None or self.id != "":
             # Already initialized
@@ -125,10 +207,23 @@ class Component(BaseThing):
             op = self._make_step(o, workflow)
             self.next_steps.append(op)
 
+        # Optional error branch: runs with an ERROR ItemResult when _process
+        # (and its retries) fail; see Component.process.
+        self.error_steps = []
+        for o in tree.get("error_steps", []):
+            op = self._make_step(o, workflow)
+            op.parent = self
+            self.error_steps.append(op)
+
     def __repr__(self):
         return f"<{self.name}>"
 
     def _process(self, input: Result) -> Result:
+        """Default core logic: pass *input* to every child in ``steps`` and merge their outputs.
+
+        Subclasses override this with their real computation; they should return a new ``Result``
+        (or ``None`` to signal a no-op step).
+        """
         # Default is pass down
         merged = self.outputResultClass([], input=input, processor=self)
         for step in self.steps:
@@ -137,22 +232,70 @@ class Component(BaseThing):
                 merged.append(res)
         return merged
 
+    def _emit(self, event, **info):
+        """Forward a lifecycle event to the workflow's run listeners."""
+        if self.workflow is not None and self.workflow is not self:
+            self.workflow.emit(event, self, **info)
+
     def process(self, input) -> Result:
-        new_result = self._process(input)
+        """Run this component on *input* and forward the output to ``next_steps``.
+
+        Wraps ``_process`` with lifecycle events (``component_start`` / ``component_end``, or
+        ``component_error``), back-fills ``input``/``processor`` on the new result, performs
+        ``register_on`` derivative registration by walking up the input chain, and returns
+        ``process_out``'s result. Returns ``None`` when ``_process`` produced no result.
+
+        Error policy (every component, via settings):
+
+        * ``retries`` -- re-run ``_process`` up to N extra times on exception, with exponential
+          backoff starting at ``retry_delay`` seconds (default 1.0).
+        * ``error_steps`` (config branch, sibling of ``next_steps``) -- when retries are exhausted,
+          an ERROR ItemResult (the message, with ``error``/``component`` metadata) runs through this
+          branch and its output is returned instead of raising.
+        * ``on_error: skip`` -- when retries are exhausted (and there is no error branch), return
+          ``None`` so the run continues without this component's output, instead of raising.
+        """
+        self._emit("component_start")
+        retries = int(self.settings.get("retries", 0) or 0)
+        retry_delay = float(self.settings.get("retry_delay", 1.0) or 0)
+        attempt = 0
+        while True:
+            try:
+                new_result = self._process(input)
+                break
+            except Exception as e:
+                attempt += 1
+                if attempt <= retries:
+                    self._emit("component_retry", error=str(e), attempt=attempt)
+                    if retry_delay:
+                        time.sleep(retry_delay * (2 ** (attempt - 1)))
+                    continue
+                self._emit("component_error", error=str(e))
+                if getattr(self, "error_steps", None):
+                    return self._process_error(input, e)
+                if str(self.settings.get("on_error", "")).lower() == "skip":
+                    logger.warning(f"{self} failed and was skipped (on_error: skip): {e}")
+                    return None
+                raise
+        # the live result rides along for in-process listeners (e.g. run
+        # persistence); serializing consumers must drop it before encoding
+        self._emit("component_end", preview=result_preview(new_result), result=new_result)
 
         if new_result is None:
             # debug or other no-op step
             return None
-        elif isinstance(input, Result):
-            # Ensure the result always knows its input
-            if new_result.input is None:
+        else:
+            # Ensure the result always knows its input -- including a raw
+            # first-step input (e.g. text typed into a test run), so the
+            # provenance chain always bottoms out at the original input
+            if new_result.input is None and input is not None:
                 new_result.input = input
             # ... And which component created it
             if new_result.processor is None:
                 new_result.processor = self
             # ... so that we can walk up the hierarchy to link results
 
-            if self.register_on:
+            if isinstance(input, Result) and self.register_on:
                 # list of processors, on to which we register the new result for the input
                 inp = input
                 targets = self.register_on[:]
@@ -166,13 +309,48 @@ class Component(BaseThing):
         # and call process_out to get to the next step
         return self.process_out(new_result)
 
+
+    def _process_error(self, input, error) -> Result:
+        """Run the ``error_steps`` branch with an ERROR ItemResult describing the failure."""
+        from .result import ItemResult  # local import; ItemResult isn't needed at module load
+
+        err = ItemResult(
+            str(error),
+            metadata={
+                "type": "ERROR",
+                "error": str(error),
+                "error_class": error.__class__.__name__,
+                "component": self.id,
+                "input_preview": result_preview(input),
+            },
+            input=input if isinstance(input, Result) else None,
+            processor=self,
+        )
+        merged = ListResult([], input=err, processor=self)
+        for step in self.error_steps:
+            x = step.process(err)
+            if x is not None:
+                merged.append(x)
+        if len(merged.value) == 1:
+            return merged.value[0]
+        return merged if merged.value else None
+
     def process_out(self, input) -> Result:
-        if self.next_steps:
-            merged = ListResult([], input=input, processor=self)
-            for step in self.next_steps:
-                x = step.process(input)
-                if x is not None:
-                    merged.append(x)
-            return merged
-        else:
+        """Forward this component's output to its ``next_steps``.
+
+        With no ``next_steps``, *input* is returned unchanged. A single next step's result passes
+        through unwrapped -- so a reducer chained after a fan-out returns its own merged result, not
+        a one-item ListResult around it (and a no-op step like DebugStep passes *input* along).
+        Multiple next steps fan out and their results are merged into a ``ListResult``.
+        """
+        if not self.next_steps:
             return input
+        if len(self.next_steps) == 1:
+            x = self.next_steps[0].process(input)
+            return input if x is None else x
+        merged = ListResult([], input=input, processor=self)
+        for step in self.next_steps:
+            x = step.process(input)
+            if x is not None:
+                merged.append(x)
+        return merged

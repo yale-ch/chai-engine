@@ -1,3 +1,12 @@
+"""Result classes: the data objects passed between chai components.
+
+Every component consumes and produces ``Result`` instances. The hierarchy distinguishes single values
+(``ItemResult``), lists (``ListResult``), on-disk files (``FileItemResult``), directories
+(``DirectoryListResult``) and classifier labels (``LabelListResult``). Results form a linked chain via
+``input`` (what they were computed from) and ``processor`` (which component made them), letting later
+steps walk back up the provenance chain.
+"""
+
 import time
 import uuid
 from pathlib import Path
@@ -7,6 +16,25 @@ from .base import BaseThing
 
 
 class Result(BaseThing):
+    """Base class for all data passed between components.
+
+    Attributes:
+
+    * ``value`` -- the payload itself (text, bytes, dict, list of child Results, ...).
+    * ``input`` -- the ``Result`` (or raw input value) this one was computed from; following ``input``
+      repeatedly walks up the provenance chain to the original workflow input.
+    * ``processor`` -- the ``Component`` that produced this result.
+    * ``metadata`` -- run information: a ``timestamp`` is always added; components add e.g. ``type``
+      (TEXT/IMAGE/AUDIO/DATA), ``token_usage``, ``duration``, ``confidence``, ``bbox``.
+    * ``extra`` -- free-form extra information not interpreted by the engine.
+    * ``derivative_results`` -- ``{component: [results]}`` registered via ``register_result``; this is
+      how ``register_on`` makes e.g. a classifier's labels for a result discoverable by a later
+      ``LabelTestGate``.
+
+    ``to_json`` serializes the result (optionally recursing into child Results); ``view`` prints an
+    indented tree of nested results for debugging.
+    """
+
     value = None
     input: Optional["Result"] = None
     processor: Optional["BaseThing"] = None
@@ -37,6 +65,7 @@ class Result(BaseThing):
         return f"{self.__class__.__name__}(value={self.value!r})"
 
     def set_value(self, value):
+        """Assign the payload; subclasses hook this to normalize values (e.g. sorting file lists)."""
         self.value = value
 
     def to_json(self, recurse=False):
@@ -74,6 +103,7 @@ class Result(BaseThing):
         return js
 
     def register_result(self, component, result):
+        """Record *result* as a derivative of this result made by *component* (no duplicates)."""
         # register the result against the component
         if component not in self.derivative_results:
             self.derivative_results[component] = []
@@ -81,6 +111,7 @@ class Result(BaseThing):
             self.derivative_results[component].append(result)
 
     def get_derivative_result(self, component):
+        """Return the list of results *component* registered against this result (may be empty)."""
         return self.derivative_results.get(component, [])
 
     def _build_view(self, lines, indent):
@@ -105,13 +136,24 @@ class Result(BaseThing):
 
 
 class ItemResult(Result):
-    """A Result with a single value"""
+    """A Result with a single value.
+
+    Iterating over an ItemResult yields its one value, so code written against ListResults (e.g. the
+    AI components' ``build_contents``) also accepts single items.
+    """
 
     def __iter__(self):
         return iter([self.value])
 
 
 class ResultIter(object):
+    """Iterator over a ``ListResult``'s values, wrapping raw entries on the fly.
+
+    Mirrors ``ListResult.__getitem__``: values that are already ``Result`` instances are passed through
+    untouched (re-wrapping them would hide their metadata); raw values (paths, strings, ...) are wrapped
+    in the list's ``valueClass`` (e.g. ``ItemResult``, or ``FileItemResult`` for directory listings).
+    """
+
     count = 0
     result = None
 
@@ -123,16 +165,23 @@ class ResultIter(object):
     def __next__(self):
         if self.count == len(self.result.value):
             raise StopIteration()
-        elif self.valueClass is not None:
-            val = self.valueClass(self.result.value[self.count])
-        else:
-            val = self.result.value[self.count]
+        val = self.result.value[self.count]
+        # Match ListResult.__getitem__: pass existing Results through untouched
+        # (re-wrapping them would hide their metadata), only wrap raw values.
+        if not isinstance(val, Result) and self.valueClass is not None:
+            val = self.valueClass(val)
         self.count += 1
         return val
 
 
 class ListResult(Result):
-    """A Result with multiple values"""
+    """A Result with multiple values.
+
+    ``value`` is normally a list whose entries may be raw values or nested Results. Iteration and
+    indexing wrap raw entries in ``valueClass`` while passing existing Results through unchanged (see
+    ``ResultIter``). This is the default ``outputResultClass`` that components use when merging the
+    outputs of their ``steps``/``next_steps``.
+    """
 
     # This is copied by ResultIter
     valueClass = ItemResult
@@ -168,7 +217,14 @@ class ListResult(Result):
 
 
 class FileItemResult(ItemResult):
-    """A result that mirrors an on-disk file"""
+    """A result that mirrors an on-disk file.
+
+    Constructed with a file *path* as its value; ``file_name``/``file_path`` record the location and
+    the ``type`` metadata (IMAGE/TEXT/AUDIO/DATA) is guessed from the extension. Reading is lazy: the
+    ``value`` property returns ``file_bytes``, opening and caching the file on first access only.
+    Components may also assign ``file_bytes`` directly (e.g. ``YoloSegmenter`` crops) to carry
+    in-memory content that never touches disk.
+    """
 
     file_bytes = b""
     file_name = ""
@@ -214,7 +270,12 @@ class FileItemResult(ItemResult):
 
 
 class DirectoryListResult(ListResult):
-    """A result that mirrors an on-disk directory"""
+    """A result that mirrors an on-disk directory.
+
+    ``value`` is a list of file paths (sorted on assignment for deterministic order); iterating or
+    indexing wraps each path in a lazily-read ``FileItemResult``. Produced by ``DirFileProvider`` and
+    friends.
+    """
 
     valueClass = FileItemResult
 
@@ -225,6 +286,11 @@ class DirectoryListResult(ListResult):
 
 
 class LabelListResult(ListResult):
-    """Receives a list of strings as labels from a classifier"""
+    """Receives a list of strings as labels from a classifier.
+
+    Emitted by ``Classifier`` subclasses; gates (``LabelTestGate``, the ``labels`` condition source in
+    ``chai.gate``) look specifically for this type when collecting labels from a result and its
+    derivatives.
+    """
 
     pass

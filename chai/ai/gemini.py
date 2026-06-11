@@ -1,3 +1,10 @@
+"""Google Gemini backend for chai.
+
+Talks to the Gemini API via the ``google-genai`` client, either directly (``GEMINI_API_KEY`` /
+``GOOGLE_API_KEY``) or through Vertex AI when ``GOOGLE_CLOUD_PROJECT`` is set. Role mixins such as
+``GeminiTranscriber`` are generated from ``GeminiComponent`` by ``chai.ai.create_all_components``.
+"""
+
 import io
 import logging
 import os
@@ -18,6 +25,33 @@ logger = logging.getLogger("chai")
 
 
 class GeminiComponent(Component):
+    """Component that sends its input to Google's Gemini API and returns the response.
+
+    Input is an ``ItemResult`` or list-shaped Result whose entries carry ``type`` metadata: TEXT/DATA
+    values are formatted into ``{text_input_<i>}`` prompt slots or attached as text parts, IMAGE
+    entries are attached as image parts (other binary types are not supported yet). Output is an
+    ``ItemResult`` whose value is the parsed JSON (when ``expected_output`` is 'json') or the raw text,
+    with ``token_usage``/``duration``/``type`` metadata. Authentication comes from the environment:
+    ``GOOGLE_CLOUD_PROJECT`` selects Vertex AI, otherwise ``GEMINI_API_KEY``/``GOOGLE_API_KEY`` is
+    required. For Gemini 2.5 models, thinking is disabled by default (budget 0, overridable via the
+    ``thinking_budget`` setting).
+
+    Settings:
+        - model: Gemini model id (default 'gemini-3.1-flash-lite-preview')
+        - prompt: prompt template; supports {step_name} and {text_input_<i>} substitutions (default '')
+        - expected_output: 'json' to parse the reply as JSON, anything else for raw text (default 'json')
+        - temperature: sampling temperature (default 0.4)
+        - top_p: nucleus sampling threshold (default 0.9)
+        - max_output_tokens: response token cap (default 8192)
+        - location: Vertex AI location when using a GCP project (default 'global')
+        - hate_speech_safety: HARM_CATEGORY_HATE_SPEECH threshold (default 'OFF')
+        - dangerous_content_safety: HARM_CATEGORY_DANGEROUS_CONTENT threshold (default 'OFF')
+        - sexually_explicit_safety: HARM_CATEGORY_SEXUALLY_EXPLICIT threshold (default 'OFF')
+        - harassment_safety: HARM_CATEGORY_HARASSMENT threshold (default 'OFF')
+        - tools: tool names to enable: 'search', 'url', 'code', 'maps' (default ['search']; pass [] to disable grounding)
+        - thinking_budget: thinking-token budget for 2.5 models (default 0 = thinking off)
+    """
+
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)
 
@@ -57,8 +91,10 @@ class GeminiComponent(Component):
             safety_settings=self.safety_settings,
         )
 
+        # Google Search grounding is on by default; disable with tools: [] or
+        # pick the exact set with e.g. tools: ["search", "url"].
         self.tools = []
-        tls = self.settings.get("tools", [])
+        tls = self.settings.get("tools", ["search"])
         if "search" in tls:
             self.tools.append(types.Tool(google_search=types.GoogleSearch()))
         if "url" in tls:
@@ -67,19 +103,19 @@ class GeminiComponent(Component):
             self.tools.append(types.Tool(code_execution=types.ToolCodeExecution))
         if "maps" in tls:
             self.tools.append(types.Tool(google_maps=types.GoogleMaps()))
+        if self.tools:
+            self.base_config.tools = self.tools
 
-        self.tools = [types.Tool(google_search=types.GoogleSearch())]
         self.retry_options = types.HttpRetryOptions(attempts=3)
         self.http_options = types.HttpOptions(api_version="v1")
 
         self.substitutions = {"ADDITIONAL_CONTEXT": ""}
-        # timeout = milliseconds
-        # retry_options = self.retry_options
-        # base_config.tools = self.tools
 
         if "2.5" in self.model:
             # Default to turning off thinking, as it can go wild and ignore the budget
-            self.thinking_config = types.ThinkingConfig(thinking_budget=parent.ai_config.get("thinking_budget", 0))
+            self.thinking_config = types.ThinkingConfig(
+                thinking_budget=self.settings.get("thinking_budget", 0)
+            )
             self.base_config.thinking_config = self.thinking_config
 
         self.connect_to_client()
@@ -205,19 +241,27 @@ class GeminiComponent(Component):
         format_vars = {"step_name": self.name}
         format_vars.update(self.substitutions)
         prompt_text = self.prompt_text
+        if not isinstance(input, Result):
+            # Raw workflow input (e.g. text typed into a test run) -- wrap it
+            # so it flows through the same TEXT path as a transcribed result.
+            input = ItemResult(input, metadata={"type": "TEXT" if isinstance(input, str) else "DATA"})
         if isinstance(input, ItemResult):
             input = [input]
 
         for i, item in enumerate(input):
             if isinstance(item, Result):
                 typ = item.metadata.get("type", "")
+                if not typ and isinstance(item.value, str):
+                    # untyped results holding a string are treated as text
+                    typ = "TEXT"
                 # DATA, TEXT, IMAGE, AUDIO
                 if typ in ["DATA", "TEXT"]:
+                    text = item.value if isinstance(item.value, str) else str(item.value)
                     # embed if slot, else attach
                     if f"{{text_input_{i}}}" in prompt_text:
-                        format_vars[f"text_input_{i}"] = item.value
+                        format_vars[f"text_input_{i}"] = text
                     else:
-                        p = types.Part.from_text(text=item.value)
+                        p = types.Part.from_text(text=text)
                         inputs.append(p)
                 elif typ in ["IMAGE", "AUDIO", "VIDEO", "BINARY"]:
                     # attach
@@ -236,10 +280,11 @@ class GeminiComponent(Component):
         #     format_vars["first_input"] = self.inputs[0].file_data.file_uri.rsplit("/", 1)[-1]
         #     format_vars["last_input"] = self.inputs[-1].file_data.file_uri.rsplit("/", 1)[-1]
 
-        try:
-            p_text = prompt_text.format(**format_vars)
-        except KeyError as e:
-            print(f"Missing substitution in prompt for {self}: {e}")
+        # Substitute only the known slots ({step_name}, {text_input_0}, ...) so
+        # literal braces -- e.g. JSON examples in the prompt -- survive intact.
+        p_text = prompt_text
+        for k, v in format_vars.items():
+            p_text = p_text.replace("{" + k + "}", str(v))
 
         if not p_text:
             raise ValueError(f"Prompt text in {self} is empty")

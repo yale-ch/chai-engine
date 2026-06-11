@@ -1,11 +1,25 @@
+"""Classifiers: components that assign one or more labels to their input.
+
+All classifiers return a ``LabelListResult`` of string labels for the input Result; combined with
+``register_on`` and a gate (``LabelTestGate`` / ``ConditionGate``) they drive conditional branching.
+"""
+
+import re
 from random import randint
 
 from .core import Component
 from .result import FileItemResult, LabelListResult
+from .utils import text_from_input
 
 
 class Classifier(Component):
-    """Takes an input and runs a classification on it to return one or more labels"""
+    """Takes an input and runs a classification on it to return one or more labels.
+
+    Abstract base for the classifier role: subclasses implement ``_process`` and return a
+    ``LabelListResult`` (a list of string labels) for the input Result. AI-backed variants
+    (``GeminiClassifier``, ``OllamaClassifier``, ...) are generated via ``chai.ai`` mixins; when no
+    prompt is configured the workflow's default ``classification`` prompt is used.
+    """
 
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)
@@ -19,13 +33,56 @@ class Classifier(Component):
         raise NotImplementedError()
 
 
-class MockClassifier(Classifier):
+class KeywordClassifier(Classifier):
+    """Labels text by keyword (or regex) matches -- no model required.
+
+    Settings:
+        - labels:         dict of {label: [patterns]} (a bare string or list is
+                          also accepted per label) (required)
+        - regex:          if true, patterns are regular expressions (default false)
+        - case_sensitive: default false
+    """
+
+    def __init__(self, tree, workflow, parent=None):
+        super().__init__(tree, workflow, parent)
+        raw = self.settings.get("labels")
+        if not isinstance(raw, dict) or not raw:
+            raise ValueError(f"KeywordClassifier ({self!r}) needs the `labels` setting: {{label: [patterns]}}")
+        self.use_regex = bool(self.settings.get("regex", False))
+        self.case_sensitive = bool(self.settings.get("case_sensitive", False))
+        flags = 0 if self.case_sensitive else re.IGNORECASE
+        self.label_patterns = {}
+        for label, patterns in raw.items():
+            if isinstance(patterns, str):
+                patterns = [patterns]
+            self.label_patterns[label] = [
+                re.compile(p if self.use_regex else re.escape(p), flags) for p in patterns
+            ]
+
     def _process(self, input):
-        return LabelListResult(["MOCK"], input=input, processor=self)
+        text = text_from_input(input)
+        labels = [
+            label
+            for label, patterns in self.label_patterns.items()
+            if any(p.search(text) for p in patterns)
+        ]
+        return LabelListResult(labels, input=input, processor=self)
 
 
 class SampleClassifier(Classifier):
-    """Sample a given percentage of inputs by tagging them"""
+    """Sample a given percentage of inputs by tagging them.
+
+    For each input, draws a random percentage and returns ``LabelListResult(["flagged"])`` when it
+    falls below the configured percentage, otherwise an empty label list -- useful for spot-checking
+    a fraction of a corpus.
+
+    Settings:
+        - percentage: percentage of inputs to flag, 0-100 (default 10)
+    """
+
+    def __init__(self, tree, workflow, parent=None):
+        super().__init__(tree, workflow, parent)
+        self.percentage = float(self.settings.get("percentage", 10))
 
     def _process(self, input):
         pc = randint(0, 10000) / 100
@@ -34,14 +91,23 @@ class SampleClassifier(Classifier):
 
 
 class HumanClassifier(Classifier):
-    """A human will assign the classification in the web API"""
+    """A human will assign the classification in the web API.
+
+    Placeholder for human-in-the-loop labelling: always returns ``LabelListResult(["NOT_DONE"])`` so a
+    downstream gate can park the result until a person reviews it.
+    """
 
     def _process(self, input):
         return LabelListResult(["NOT_DONE"], input=input, processor=self)
 
 
 class FileTypeClassifier(Classifier):
-    """Classifies input by its filetype metadata, labelling TEXT or IMAGE results as 'accepted'."""
+    """Classifies input by its filetype metadata, labelling TEXT or IMAGE results as 'accepted'.
+
+    Reads the input Result's ``metadata["type"]`` (set by e.g. ``FileItemResult``) and returns
+    ``LabelListResult(["accepted"])`` for TEXT/IMAGE, ``["rejected"]`` for anything else -- a simple
+    filter for mixed directories.
+    """
 
     def _process(self, input):
         file_type = input.metadata.get("type", "")
