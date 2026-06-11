@@ -241,7 +241,9 @@ class Component(BaseThing):
         except Exception as e:
             self._emit("component_error", error=str(e))
             raise
-        self._emit("component_end", preview=result_preview(new_result))
+        # the live result rides along for in-process listeners (e.g. run
+        # persistence); serializing consumers must drop it before encoding
+        self._emit("component_end", preview=result_preview(new_result), result=new_result)
 
         if new_result is None:
             # debug or other no-op step

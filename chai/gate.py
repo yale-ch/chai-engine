@@ -63,7 +63,9 @@ class Gate(Component):
         except Exception as e:
             self._emit("component_error", error=str(e))
             raise
-        self._emit("component_end", preview=result_preview(result), branch="true" if case else "false")
+        self._emit(
+            "component_end", preview=result_preview(result), branch="true" if case else "false", result=result
+        )
         return result
 
 
@@ -239,7 +241,9 @@ class SwitchGate(Gate):
         except Exception as e:
             self._emit("component_error", error=str(e))
             raise
-        self._emit("component_end", preview=result_preview(result), branch=", ".join(matched) or "(no match)")
+        self._emit(
+            "component_end", preview=result_preview(result), branch=", ".join(matched) or "(no match)", result=result
+        )
         return result
 
     def _dispatch(self, input):

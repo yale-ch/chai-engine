@@ -137,7 +137,7 @@ class Workflow(Component):
             raise
         from .core import result_preview
 
-        self.emit("component_end", self, preview=result_preview(res))
+        self.emit("component_end", self, preview=result_preview(res), result=res)
         return res
 
     def _run(self, input=None) -> Result:

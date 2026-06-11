@@ -202,6 +202,52 @@ def _row_to_dict(row):
     }
 
 
+def ensure_database(database):
+    """Create *database* (and its parent directory) with the chai schema if missing; returns the path.
+
+    Lets an app pre-build its results database so storage viewers work before the first run.
+    """
+    parent = os.path.dirname(database)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    _connect(database).close()
+    return database
+
+
+def store_json_result(database, result_id, value, processor_id=None, workflow_id=None, metadata=None):
+    """Insert/refresh one result row from already-serialized JSON values.
+
+    The viewer-side counterpart of ``SqliteStorage._process`` for callers that hold a run's
+    serialized output (dicts) rather than live ``Result`` objects -- e.g. a front-end persisting
+    run results into its app-local database. Re-storing keeps any human correction and the
+    original ``created_at``.
+    """
+    conn = _connect(database)
+    try:
+        conn.execute(
+            """
+            INSERT INTO results (id, processor_id, workflow_id, value_json, metadata_json)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                processor_id = excluded.processor_id,
+                workflow_id = excluded.workflow_id,
+                value_json = excluded.value_json,
+                metadata_json = excluded.metadata_json
+            """,
+            (
+                result_id,
+                processor_id,
+                workflow_id,
+                json.dumps(_json_safe(value)),
+                json.dumps(_json_safe(metadata)) if metadata else None,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return True
+
+
 def list_results(database, processor_id=None, workflow_id=None, limit=100, offset=0):
     """Return stored results as a list of dicts, newest first.
 
