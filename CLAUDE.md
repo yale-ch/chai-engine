@@ -41,7 +41,7 @@ python experiment.py
 - **`Transcriber`**: Extracts text from images or audio.
 - **`Describer`**: Generates text to describe content.
 - **`Extractor`**: Extracts structured data from content.
-- **`Reducer`**: Combines multiple results into one.
+- **`Reducer`**: Combines multiple results into one. Branches converge two ways: a parent's `steps` fan out and its `next_steps` (e.g. `MergeDictReducer`, `TextJoinReducer`) receive the merged list; or `CollectReducer` gathers everything specific components produced anywhere in the input subtree (gate branches, iterator entries). `FlattenReducer` collapses nested lists; `utils.FanOut` is the explicit fan-out node.
 - **`Annotator`**: Renders results as human-reviewable artifacts (e.g., `ImageBoxAnnotator` burns detection boxes into the source image via supervision; `TextHighlightAnnotator` highlights extracted values in their source text).
 - **`Translator`**: Translates linguistic content into different languages.
 - **`Storage`**: Persists input somewhere (e.g., `FileSystemStorage`, `PostgresStorage`, `SqliteStorage`).

@@ -27,3 +27,20 @@ class DebugStep(Component):
     def _process(self, input: Result) -> Result:
         print(f"{self.id}: {repr(input)}")
         return None
+
+
+class FanOut(Component):
+    """Runs every child step on the SAME input and merges their outputs into one ListResult.
+
+    The explicit "two different sets of runs" node: put the parallel branches in ``steps`` and a
+    reducer in ``next_steps`` to reunite them::
+
+        {"type": "utils.FanOut",
+         "steps": [analysisA, analysisB],
+         "next_steps": [{"type": "reducer.MergeDictReducer"}]}
+
+    (This is ``Component``'s default behaviour given a concrete palette-visible name.)
+    """
+
+    def _process(self, input: Result) -> Result:
+        return super()._process(input)

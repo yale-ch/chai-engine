@@ -274,15 +274,19 @@ class Component(BaseThing):
     def process_out(self, input) -> Result:
         """Forward this component's output to its ``next_steps``.
 
-        With no ``next_steps``, *input* is returned unchanged. Otherwise each next step processes the
-        output and the per-step results are merged into a ``ListResult``.
+        With no ``next_steps``, *input* is returned unchanged. A single next step's result passes
+        through unwrapped -- so a reducer chained after a fan-out returns its own merged result, not
+        a one-item ListResult around it (and a no-op step like DebugStep passes *input* along).
+        Multiple next steps fan out and their results are merged into a ``ListResult``.
         """
-        if self.next_steps:
-            merged = ListResult([], input=input, processor=self)
-            for step in self.next_steps:
-                x = step.process(input)
-                if x is not None:
-                    merged.append(x)
-            return merged
-        else:
+        if not self.next_steps:
             return input
+        if len(self.next_steps) == 1:
+            x = self.next_steps[0].process(input)
+            return input if x is None else x
+        merged = ListResult([], input=input, processor=self)
+        for step in self.next_steps:
+            x = step.process(input)
+            if x is not None:
+                merged.append(x)
+        return merged
