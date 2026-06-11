@@ -33,22 +33,6 @@ class Extractor(Component):
             self.prompt_text = self.workflow.default_prompts.get("extraction", "")
         self.expects = "json"
 
-    def _validate_output(self, new_result):
-        """Enforce the optional ``schema`` setting on extracted values (see Component.process:
-        a validation failure retries like any other error)."""
-        schema = self.settings.get("schema")
-        if not schema or new_result is None:
-            return
-        if isinstance(schema, str):
-            schema = json.loads(schema)
-        value = new_result.value
-        if isinstance(value, (bytes, bytearray)):
-            value = value.decode("utf-8", "replace")
-        if isinstance(value, str):
-            value = json.loads(value)
-        from .schema import validate
-
-        validate(value, schema)
 
     def _process(self, input):
         raise NotImplementedError()

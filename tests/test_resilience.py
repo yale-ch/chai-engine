@@ -103,21 +103,22 @@ class TestIterator(unittest.TestCase):
         self.assertEqual(texts, [f"Katze {i}" for i in range(8)])
 
     def test_continue_on_error_records_failures(self):
-        # the record evaluator raises on non-record input ("not json" fails json.loads)
+        from chai.core import Component
+
+        class FailsOnBad(Component):
+            def _process(self, input):
+                if input.value == "bad":
+                    raise ValueError("cannot process 'bad'")
+                return ItemResult(input.value.upper(), input=input, processor=self)
+
         it = self.wf._make_step(
-            {
-                "type": "iterator.Iterator",
-                "id": "iter_e",
-                "settings": {"continue_on_error": True},
-                "steps": [
-                    {"type": "evaluator.RecordFieldEvaluator", "settings": {"expected": {"a": "1"}}}
-                ],
-            },
+            {"type": "iterator.Iterator", "id": "iter_e", "settings": {"continue_on_error": True}},
             self.wf,
         )
-        out = it.process(ListResult([ItemResult({"a": "1"}), ItemResult("not json")]))
+        it.steps = [FailsOnBad({"id": "fail_on_bad"}, self.wf)]
+        out = it.process(ListResult([ItemResult("good"), ItemResult("bad")]))
         self.assertEqual(len(out.value), 2)
-        self.assertEqual(out.value[0].value[0].value["fields"]["a"], "correct")
+        self.assertEqual(out.value[0].value[0].value, "GOOD")
         self.assertEqual(out.value[1].metadata.get("type"), "ERROR")
 
 

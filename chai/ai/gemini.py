@@ -34,7 +34,7 @@ class GeminiComponent(Component):
     with ``token_usage``/``duration``/``type`` metadata. Authentication comes from the environment:
     ``GOOGLE_CLOUD_PROJECT`` selects Vertex AI, otherwise ``GEMINI_API_KEY``/``GOOGLE_API_KEY`` is
     required. For Gemini 2.5 models, thinking is disabled by default (budget 0, overridable via the
-    parent's ``ai_config.thinking_budget``).
+    ``thinking_budget`` setting).
 
     Settings:
         - model: Gemini model id (default 'gemini-3.1-flash-lite-preview')
@@ -48,7 +48,8 @@ class GeminiComponent(Component):
         - dangerous_content_safety: HARM_CATEGORY_DANGEROUS_CONTENT threshold (default 'OFF')
         - sexually_explicit_safety: HARM_CATEGORY_SEXUALLY_EXPLICIT threshold (default 'OFF')
         - harassment_safety: HARM_CATEGORY_HARASSMENT threshold (default 'OFF')
-        - tools: list of tool names to enable: 'search', 'url', 'code', 'maps' (default [])
+        - tools: tool names to enable: 'search', 'url', 'code', 'maps' (default ['search']; pass [] to disable grounding)
+        - thinking_budget: thinking-token budget for 2.5 models (default 0 = thinking off)
     """
 
     def __init__(self, tree, workflow, parent=None):
@@ -90,8 +91,10 @@ class GeminiComponent(Component):
             safety_settings=self.safety_settings,
         )
 
+        # Google Search grounding is on by default; disable with tools: [] or
+        # pick the exact set with e.g. tools: ["search", "url"].
         self.tools = []
-        tls = self.settings.get("tools", [])
+        tls = self.settings.get("tools", ["search"])
         if "search" in tls:
             self.tools.append(types.Tool(google_search=types.GoogleSearch()))
         if "url" in tls:
@@ -100,19 +103,19 @@ class GeminiComponent(Component):
             self.tools.append(types.Tool(code_execution=types.ToolCodeExecution))
         if "maps" in tls:
             self.tools.append(types.Tool(google_maps=types.GoogleMaps()))
+        if self.tools:
+            self.base_config.tools = self.tools
 
         self.retry_options = types.HttpRetryOptions(attempts=3)
         self.http_options = types.HttpOptions(api_version="v1")
 
         self.substitutions = {"ADDITIONAL_CONTEXT": ""}
-        # timeout = milliseconds
-        # retry_options = self.retry_options
-        # base_config.tools = self.tools
 
         if "2.5" in self.model:
             # Default to turning off thinking, as it can go wild and ignore the budget
-            parent_ai = getattr(parent, "ai_config", None) or {}
-            self.thinking_config = types.ThinkingConfig(thinking_budget=parent_ai.get("thinking_budget", 0))
+            self.thinking_config = types.ThinkingConfig(
+                thinking_budget=self.settings.get("thinking_budget", 0)
+            )
             self.base_config.thinking_config = self.thinking_config
 
         self.connect_to_client()

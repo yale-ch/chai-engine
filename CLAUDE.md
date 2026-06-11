@@ -41,14 +41,13 @@ python experiment.py
 - **`Transcriber`**: Extracts text from images or audio.
 - **`Describer`**: Generates text to describe content.
 - **`Extractor`**: Extracts structured data from content.
-- **`Reducer`**: Combines multiple results into one. Branches converge two ways: a parent's `steps` fan out and its `next_steps` (e.g. `MergeDictReducer`, `TextJoinReducer`) receive the merged list; or `CollectReducer` gathers everything specific components produced anywhere in the input subtree (gate branches, iterator entries). `FlattenReducer` collapses nested lists; `utils.FanOut` is the explicit fan-out node.
+- **`Reducer`**: Combines multiple results into one. Branches converge two ways: a parent's `steps` fan out and its `next_steps` (e.g. `MergeDictReducer`, `TextJoinReducer`) receive the merged list; or `CollectReducer` gathers everything specific components produced anywhere in the input subtree (gate branches, iterator entries). `FlattenReducer` collapses nested lists; `fanout.FanOut` is the explicit fan-out node.
 - **`Annotator`**: Renders results as human-reviewable artifacts (e.g., `ImageBoxAnnotator` burns detection boxes into the source image via supervision; `TextHighlightAnnotator` highlights extracted values in their source text).
 - **`Translator`**: Translates linguistic content into different languages.
 - **`Storage`**: Persists input somewhere (e.g., `FileSystemStorage`, `PostgresStorage`, `SqliteStorage`).
-- **`Embedder`**: Embeddings + vector search (`VectorIndexer`, `VectorRetriever` over a SQLite `VectorStore`; services: hash/gemini/ollama/openai-compatible).
-- **`Evaluator`**: Scores output against ground truth (`TextMetricsEvaluator`: exact/CER/WER; `RecordFieldEvaluator`: per-field precision/recall/F1).
+- **`Embedder`**: Embeddings + vector search (`VectorIndexer`, `VectorRetriever` over a SQLite `VectorStore` that lives in `chai/storage.py`; services: hash/gemini/ollama/openai-compatible).
 
-Every component supports an error policy via settings (`retries`, `retry_delay`, `on_error: skip`) and an `error_steps` config branch. `Iterator` adds `workers` (thread-pool concurrency) and `continue_on_error`. `Extractor` validates output against a `schema` setting (chai/schema.py), retrying invalid model output.
+Every component supports an error policy via settings (`retries`, `retry_delay`, `on_error: skip`) and an `error_steps` config branch. `Iterator` adds `workers` (thread-pool concurrency) and `continue_on_error`.
 
 ### AI Components (`chai/ai/`)
 

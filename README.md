@@ -30,8 +30,8 @@ from chai.workflow import Workflow
 wf = Workflow({
     "type": "Workflow", "id": "wf",
     "steps": [
-        {"type": "extractor.AIExtractor", "id": "ner",
-         "settings": {"service": "gemini", "model": "gemini-3.1-flash-lite",
+        {"type": "extractor.GeminiExtractor", "id": "ner",
+         "settings": {"model": "gemini-3.1-flash-lite",
                       "prompt": "Extract entities as a JSON list of {\"type\":..., \"text\":...}"},
          "next_steps": [{"type": "annotator.TextHighlightAnnotator", "id": "highlight"}]}
     ],
@@ -96,20 +96,20 @@ Two consequences worth internalizing:
 |---|---|---|
 | **Provider** | Generate a Result from raw input | `DirFileProvider`, `FileListProvider`, `IIIFDirFileProvider`, `StaticProvider` |
 | **Iterator** | Run children once per entry | `Iterator` (with `workers`, `continue_on_error`) |
-| **Classifier** | Assign labels | `KeywordClassifier`, `FileTypeClassifier`, `YoloClassifier`, `AIClassifier` |
+| **Classifier** | Assign labels | `KeywordClassifier`, `FileTypeClassifier`, `YoloClassifier`, `GeminiClassifier`, ... |
 | **Gate** | Conditional branch (`true_steps`/`false_steps`) | `ConditionGate`, `ValueTestGate`, `MetadataTestGate`, `ThresholdGate`, `FileTypeGate`, `LabelTestGate` |
 | **SwitchGate** | Per-label branch (`case_steps`), for-each over lists | `SwitchGate` |
-| **Segmenter** | Break content into parts | `TextSegmenter`, `WordSegmenter`, `YoloSegmenter` (detection crops), `AISegmenter` |
-| **Transcriber** | Image/audio → text | `TextFileTranscriber`, `AITranscriber` (vision OCR) |
-| **Describer** | Content → descriptive text | `FileInfoDescriber`, `AIDescriber` |
-| **Extractor** | Content → structured data | `WordCountExtractor`, `JsonXpathExtractor`, `AIExtractor` (with `schema` validation) |
-| **Translator** | Language transforms | `GlossaryTranslator`, `AITranslator` |
-| **Reducer** | Merge branched runs into one result | `FlattenReducer`, `CollectReducer`, `MergeDictReducer`, `TextJoinReducer`, `AIReducer` |
+| **Segmenter** | Break content into parts | `TextSegmenter`, `WordSegmenter`, `YoloSegmenter` (detection crops), `GeminiSegmenter`, ... |
+| **Transcriber** | Image/audio → text | `TextFileTranscriber`, `GeminiTranscriber` and other vision backends |
+| **Describer** | Content → descriptive text | `FileInfoDescriber`, `GeminiDescriber`, ... |
+| **Extractor** | Content → structured data | `WordCountExtractor`, `JsonXpathExtractor`, `GeminiExtractor`, ... |
+| **Translator** | Language transforms | `GlossaryTranslator`, `GeminiTranslator`, ... |
+| **Reducer** | Merge branched runs into one result | `FlattenReducer`, `CollectReducer`, `MergeDictReducer`, `TextJoinReducer`, `GeminiReducer`, ... |
 | **Annotator** | Human-reviewable artifacts | `ImageBoxAnnotator` (supervision boxes), `TextHighlightAnnotator` (labelled `<mark>`s) |
 | **Embedder** | Vectors + similarity | `VectorIndexer`, `VectorRetriever` (SQLite store; hash/gemini/ollama/openai services) |
-| **Evaluator** | Score vs ground truth | `TextMetricsEvaluator` (exact/CER/WER), `RecordFieldEvaluator` (field P/R/F1) |
 | **Storage** | Persist results | `FileSystemStorage`, `SqliteStorage` (+ human corrections) |
-| **Utils** | Plumbing | `FanOut` (explicit parallel fan-out), `DebugStep` (print & pass) |
+| **FanOut** | Explicit parallel split | `FanOut` (run all children on the same input; optional concurrent `workers`) |
+| **Utils** | Plumbing | `DebugStep` (print & pass) |
 
 Deterministic components (`KeywordClassifier`, `TextSegmenter`,
 `StaticProvider`, `TextFileTranscriber`, `FileInfoDescriber`,
@@ -117,19 +117,15 @@ Deterministic components (`KeywordClassifier`, `TextSegmenter`,
 without models or API keys — the test suite and example workflows rely on
 this.
 
-### AI services: one node, any backend
+### AI backends
 
-`AITranscriber`, `AIExtractor`, etc. pick their backend with a `service`
-setting — constructing one returns the matching composite class:
+Every AI-capable role has a generated composite per backend (``GeminiTranscriber``,
+``OllamaExtractor``, ``VLLMDescriber``, ...): the role contributes prompts and defaults,
+the backend contributes the API call. Backends: Gemini (Vertex AI via
+`GOOGLE_CLOUD_PROJECT`; Google Search grounding on by default, `tools: []` disables),
+LM Studio, Ollama, OpenAI-compatible endpoints (vLLM, sglang, anything with an
+`api_host`), and MLX-VLM on Apple Silicon.
 
-```json
-{"type": "transcriber.AITranscriber",
- "settings": {"service": "gemini", "model": "gemini-3.1-flash-lite", "prompt": "Transcribe this."}}
-```
-
-Services: `gemini` (default; Vertex AI via `GOOGLE_CLOUD_PROJECT`),
-`lmstudio`, `ollama`, `openai`, `custom` (any OpenAI-compatible endpoint —
-set `api_host`), `vllm`, `sglang`, `mlx_vlm` (Apple Silicon).
 
 ### Conditions: one test language for all gates
 
@@ -166,10 +162,6 @@ Every component accepts an error policy in `settings`:
 - `continue_on_error: true` — failed entries become ERROR records, the rest
   proceed (pair with `SqliteStorage` to persist what succeeded)
 
-`Extractor` adds `schema` — a JSON-Schema subset (`type`, `properties`,
-`required`, `items`, `enum`) checked on every output; invalid model output
-flows into the retry loop, so `retries: 2` + a schema re-asks the model until
-the record validates.
 
 ## Observability & human review
 

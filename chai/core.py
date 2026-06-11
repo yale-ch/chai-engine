@@ -248,8 +248,7 @@ class Component(BaseThing):
         Error policy (every component, via settings):
 
         * ``retries`` -- re-run ``_process`` up to N extra times on exception, with exponential
-          backoff starting at ``retry_delay`` seconds (default 1.0). Output that fails
-          ``_validate_output`` (e.g. an Extractor's ``schema``) is retried the same way.
+          backoff starting at ``retry_delay`` seconds (default 1.0).
         * ``error_steps`` (config branch, sibling of ``next_steps``) -- when retries are exhausted,
           an ERROR ItemResult (the message, with ``error``/``component`` metadata) runs through this
           branch and its output is returned instead of raising.
@@ -263,7 +262,6 @@ class Component(BaseThing):
         while True:
             try:
                 new_result = self._process(input)
-                self._validate_output(new_result)
                 break
             except Exception as e:
                 attempt += 1
@@ -311,9 +309,6 @@ class Component(BaseThing):
         # and call process_out to get to the next step
         return self.process_out(new_result)
 
-    def _validate_output(self, new_result):
-        """Hook: subclasses raise here to reject ``_process`` output (which then retries like any
-        other failure). The base implementation accepts everything."""
 
     def _process_error(self, input, error) -> Result:
         """Run the ``error_steps`` branch with an ERROR ItemResult describing the failure."""
