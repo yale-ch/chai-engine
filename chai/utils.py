@@ -39,8 +39,22 @@ class FanOut(Component):
          "steps": [analysisA, analysisB],
          "next_steps": [{"type": "reducer.MergeDictReducer"}]}
 
-    (This is ``Component``'s default behaviour given a concrete palette-visible name.)
+    With ``workers`` the branches run concurrently in a thread pool -- two AI calls overlap instead
+    of queueing. Outputs always keep step order, so reducers see the same shape either way.
+
+    Settings:
+        - workers: run child steps concurrently with this many threads (default 1 = sequential)
     """
 
     def _process(self, input: Result) -> Result:
-        return super()._process(input)
+        workers = int(self.settings.get("workers", 1) or 1)
+        if workers <= 1 or len(self.steps) <= 1:
+            return super()._process(input)
+        from concurrent.futures import ThreadPoolExecutor
+
+        merged = self.outputResultClass([], input=input, processor=self)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for res in pool.map(lambda step: step.process(input), self.steps):  # keeps step order
+                if res is not None:
+                    merged.append(res)
+        return merged
