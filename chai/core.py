@@ -8,6 +8,7 @@ subclasses ``Component``.
 
 import importlib
 import logging
+import time
 import uuid
 from typing import List, Optional
 
@@ -112,6 +113,7 @@ class Component(BaseThing):
     parent: Optional["Component"] = None
     steps: List["Component"] = []
     next_steps: List["Component"] = []
+    error_steps: List["Component"] = []
     outputResultClass = ListResult
     settings: dict = {}
     register_on: list = []
@@ -205,6 +207,14 @@ class Component(BaseThing):
             op = self._make_step(o, workflow)
             self.next_steps.append(op)
 
+        # Optional error branch: runs with an ERROR ItemResult when _process
+        # (and its retries) fail; see Component.process.
+        self.error_steps = []
+        for o in tree.get("error_steps", []):
+            op = self._make_step(o, workflow)
+            op.parent = self
+            self.error_steps.append(op)
+
     def __repr__(self):
         return f"<{self.name}>"
 
@@ -231,16 +241,44 @@ class Component(BaseThing):
         """Run this component on *input* and forward the output to ``next_steps``.
 
         Wraps ``_process`` with lifecycle events (``component_start`` / ``component_end``, or
-        ``component_error`` before re-raising), back-fills ``input``/``processor`` on the new result,
-        performs ``register_on`` derivative registration by walking up the input chain, and returns
+        ``component_error``), back-fills ``input``/``processor`` on the new result, performs
+        ``register_on`` derivative registration by walking up the input chain, and returns
         ``process_out``'s result. Returns ``None`` when ``_process`` produced no result.
+
+        Error policy (every component, via settings):
+
+        * ``retries`` -- re-run ``_process`` up to N extra times on exception, with exponential
+          backoff starting at ``retry_delay`` seconds (default 1.0). Output that fails
+          ``_validate_output`` (e.g. an Extractor's ``schema``) is retried the same way.
+        * ``error_steps`` (config branch, sibling of ``next_steps``) -- when retries are exhausted,
+          an ERROR ItemResult (the message, with ``error``/``component`` metadata) runs through this
+          branch and its output is returned instead of raising.
+        * ``on_error: skip`` -- when retries are exhausted (and there is no error branch), return
+          ``None`` so the run continues without this component's output, instead of raising.
         """
         self._emit("component_start")
-        try:
-            new_result = self._process(input)
-        except Exception as e:
-            self._emit("component_error", error=str(e))
-            raise
+        retries = int(self.settings.get("retries", 0) or 0)
+        retry_delay = float(self.settings.get("retry_delay", 1.0) or 0)
+        attempt = 0
+        while True:
+            try:
+                new_result = self._process(input)
+                self._validate_output(new_result)
+                break
+            except Exception as e:
+                attempt += 1
+                if attempt <= retries:
+                    self._emit("component_retry", error=str(e), attempt=attempt)
+                    if retry_delay:
+                        time.sleep(retry_delay * (2 ** (attempt - 1)))
+                    continue
+                self._emit("component_error", error=str(e))
+                if getattr(self, "error_steps", None):
+                    return self._process_error(input, e)
+                if str(self.settings.get("on_error", "")).lower() == "skip":
+                    logger.warning(f"{self} failed and was skipped (on_error: skip): {e}")
+                    return None
+                raise
         # the live result rides along for in-process listeners (e.g. run
         # persistence); serializing consumers must drop it before encoding
         self._emit("component_end", preview=result_preview(new_result), result=new_result)
@@ -272,6 +310,35 @@ class Component(BaseThing):
 
         # and call process_out to get to the next step
         return self.process_out(new_result)
+
+    def _validate_output(self, new_result):
+        """Hook: subclasses raise here to reject ``_process`` output (which then retries like any
+        other failure). The base implementation accepts everything."""
+
+    def _process_error(self, input, error) -> Result:
+        """Run the ``error_steps`` branch with an ERROR ItemResult describing the failure."""
+        from .result import ItemResult  # local import; ItemResult isn't needed at module load
+
+        err = ItemResult(
+            str(error),
+            metadata={
+                "type": "ERROR",
+                "error": str(error),
+                "error_class": error.__class__.__name__,
+                "component": self.id,
+                "input_preview": result_preview(input),
+            },
+            input=input if isinstance(input, Result) else None,
+            processor=self,
+        )
+        merged = ListResult([], input=err, processor=self)
+        for step in self.error_steps:
+            x = step.process(err)
+            if x is not None:
+                merged.append(x)
+        if len(merged.value) == 1:
+            return merged.value[0]
+        return merged if merged.value else None
 
     def process_out(self, input) -> Result:
         """Forward this component's output to its ``next_steps``.

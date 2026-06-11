@@ -20,6 +20,11 @@ class Extractor(Component):
     ``ItemResult`` carrying structured data (a dict/list, or JSON text) extracted from the input
     Result. When no prompt is configured, AI-backed variants use the workflow's default ``extraction``
     prompt and expect JSON output from the model.
+
+    Settings:
+        - schema: JSON-Schema dict (or JSON string) the extracted value must match -- type,
+          properties, required, items, enum (see chai.schema). Invalid output counts as a failure,
+          so combined with `retries` the model is re-asked until the record validates.
     """
 
     def __init__(self, tree, workflow, parent=None):
@@ -27,6 +32,23 @@ class Extractor(Component):
         if not getattr(self, "prompt_text", None):
             self.prompt_text = self.workflow.default_prompts.get("extraction", "")
         self.expects = "json"
+
+    def _validate_output(self, new_result):
+        """Enforce the optional ``schema`` setting on extracted values (see Component.process:
+        a validation failure retries like any other error)."""
+        schema = self.settings.get("schema")
+        if not schema or new_result is None:
+            return
+        if isinstance(schema, str):
+            schema = json.loads(schema)
+        value = new_result.value
+        if isinstance(value, (bytes, bytearray)):
+            value = value.decode("utf-8", "replace")
+        if isinstance(value, str):
+            value = json.loads(value)
+        from .schema import validate
+
+        validate(value, schema)
 
     def _process(self, input):
         raise NotImplementedError()

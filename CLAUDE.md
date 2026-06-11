@@ -45,6 +45,10 @@ python experiment.py
 - **`Annotator`**: Renders results as human-reviewable artifacts (e.g., `ImageBoxAnnotator` burns detection boxes into the source image via supervision; `TextHighlightAnnotator` highlights extracted values in their source text).
 - **`Translator`**: Translates linguistic content into different languages.
 - **`Storage`**: Persists input somewhere (e.g., `FileSystemStorage`, `PostgresStorage`, `SqliteStorage`).
+- **`Embedder`**: Embeddings + vector search (`VectorIndexer`, `VectorRetriever` over a SQLite `VectorStore`; services: hash/gemini/ollama/openai-compatible).
+- **`Evaluator`**: Scores output against ground truth (`TextMetricsEvaluator`: exact/CER/WER; `RecordFieldEvaluator`: per-field precision/recall/F1).
+
+Every component supports an error policy via settings (`retries`, `retry_delay`, `on_error: skip`) and an `error_steps` config branch. `Iterator` adds `workers` (thread-pool concurrency), `continue_on_error`, and `cache` (SQLite run cache for resumable corpus runs). `Extractor` validates output against a `schema` setting (chai/schema.py), retrying invalid model output.
 
 ### AI Components (`chai/ai/`)
 
