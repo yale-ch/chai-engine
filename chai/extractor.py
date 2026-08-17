@@ -7,7 +7,7 @@ count words or apply XPath expressions to JSON values.
 import json
 from collections import Counter
 
-from .ai import create_all_components
+from .ai import TransformersComponent, create_ai_component, create_all_components
 from .core import Component
 from .data_utils import extract_xpath
 from .result import ItemResult, ListResult, Result
@@ -33,12 +33,15 @@ class Extractor(Component):
             self.prompt_text = self.workflow.default_prompts.get("extraction", "")
         self.expects = "json"
 
-
     def _process(self, input):
         raise NotImplementedError()
 
 
 globals().update(create_all_components(Extractor))
+
+TransformersExtractor = create_ai_component(
+    "TransformersExtractor", Extractor, TransformersComponent
+)
 
 
 class DoubleExtractor(Extractor):
