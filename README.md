@@ -95,7 +95,7 @@ Two consequences worth internalizing:
 | Role | Job | Examples |
 |---|---|---|
 | **Provider** | Generate a Result from raw input | `DirFileProvider`, `FileListProvider`, `CsvFileProvider`, `IIIFDirFileProvider`, `StaticProvider` |
-| **Iterator** | Run children once per entry | `Iterator` (with `workers`, `continue_on_error`) |
+| **Iterator** | Run children once per entry | `Iterator` (with `workers`, `continue_on_error`), `SliceIterator` (every nth entry, for parallel runs) |
 | **Classifier** | Assign labels | `KeywordClassifier`, `FileTypeClassifier`, `YoloClassifier`, `GeminiClassifier`, ... |
 | **Gate** | Conditional branch (`true_steps`/`false_steps`) | `ConditionGate`, `ValueTestGate`, `MetadataTestGate`, `ThresholdGate`, `FileTypeGate`, `LabelTestGate` |
 | **SwitchGate** | Per-label branch (`case_steps`), for-each over lists | `SwitchGate` |

@@ -14,10 +14,12 @@
       "steps": [
         {
           "id": "ppl_rows",
-          "type": "iterator.Iterator",
+          "type": "iterator.SliceIterator",
           "name": "Row Iterator",
           "settings": {
-            "continue_on_error": true
+            "continue_on_error": true,
+            "max_slices": 1,
+            "slice": 0
           },
           "steps": [
             {

@@ -210,7 +210,10 @@ class TestCsvXpathChain(unittest.TestCase):
         provider = tree["steps"][0]
         self.assertEqual(provider["type"], "provider.CsvFileProvider")
         iterator = provider["steps"][0]
-        self.assertEqual(iterator["type"], "iterator.Iterator")
+        self.assertEqual(iterator["type"], "iterator.SliceIterator")
+        # Sliceable, but processing every row unless a run overrides it
+        self.assertEqual(iterator["settings"]["max_slices"], 1)
+        self.assertEqual(iterator["settings"]["slice"], 0)
         xpath = iterator["steps"][0]
         self.assertEqual(xpath["type"], "extractor.JsonXpathExtractor")
         self.assertEqual(xpath["settings"]["xpath"], "/name")

@@ -45,6 +45,10 @@ class Iterator(Component):
             processor=self,
         )
 
+    def select_items(self, input: Result) -> list:
+        """The entries of *input* to run the child steps over; subclasses may narrow this."""
+        return list(input)
+
     def _process(self, input: Result) -> Result:
         workers = int(self.settings.get("workers", 1) or 1)
         continue_on_error = bool(self.settings.get("continue_on_error", False))
@@ -57,7 +61,7 @@ class Iterator(Component):
                     raise
                 return self._entry_error(x, e)
 
-        items = list(input)
+        items = self.select_items(input)
         merged = self.outputResultClass([], input=input, processor=self)
         if workers > 1 and len(items) > 1:
             with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -67,3 +71,34 @@ class Iterator(Component):
             for x in items:
                 merged.append(run_one(x))
         return merged
+
+
+class SliceIterator(Iterator):
+    """Process only every nth entry of a list, so one input can be split across parallel runs.
+
+    Identical to ``Iterator`` except that an entry is processed only when its zero-based position
+    satisfies ``position % max_slices == slice``: with ``max_slices`` of 24, slice 0 takes entries
+    0, 24, 48, ... and slice 1 takes 1, 25, 49, ... The slices of a given ``max_slices`` are disjoint
+    and together cover every entry exactly once, so the same workflow can be run once per slice --
+    in separate processes or on separate machines -- to divide the work.
+
+    The output holds one entry per *selected* input entry, not per input entry, so positions in the
+    result are the slice's own. Where the original position matters, take it from the entry (a
+    ``CsvFileProvider`` row, for instance, records its own ``row`` in its metadata).
+
+    Settings:
+        - max_slices: how many slices to divide the input into (default 1: every entry, i.e. the
+          same behaviour as a plain Iterator)
+        - slice: zero-based index of the slice this run processes; must be less than max_slices
+          (default 0)
+        - workers, continue_on_error: as Iterator
+    """
+
+    def select_items(self, input: Result) -> list:
+        max_slices = int(self.settings.get("max_slices", 1) or 1)
+        offset = int(self.settings.get("slice", 0) or 0)
+        if max_slices < 1:
+            raise ValueError(f"max_slices must be 1 or more in {self}, got {max_slices}")
+        if not 0 <= offset < max_slices:
+            raise ValueError(f"slice must be between 0 and {max_slices - 1} in {self}, got {offset}")
+        return [x for i, x in enumerate(input) if i % max_slices == offset]
