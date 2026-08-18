@@ -5,6 +5,7 @@ directory path, a list of files, a IIIF manifest URL, a literal value) into a ``
 of the tree can process.
 """
 
+import csv
 import os
 from io import BytesIO
 
@@ -13,7 +14,7 @@ import ujson as json
 from PIL import Image
 
 from .core import Component
-from .result import DirectoryListResult, ListResult, Result
+from .result import DirectoryListResult, ItemResult, ListResult, Result
 
 
 class Provider(Component):
@@ -118,6 +119,65 @@ class FileListProvider(Provider):
 
         d = DirectoryListResult(paths, input=input, processor=self)
         return super()._process(d)
+
+
+class CsvFileProvider(Provider):
+    """Take a CSV file and return one dict-shaped Result entry per row.
+
+    Input is the path to a CSV file; output is a ``ListResult`` whose entries are ``ItemResult``s
+    holding one ``{column: value}`` dict per row. The entries are DATA-typed, so a JSON-shaped
+    component such as ``JsonXpathExtractor`` can address a column as ``/name``. Usually followed by an
+    ``Iterator`` that processes each row. Raises ``ValueError`` when the path does not exist, or when
+    the file has neither a header row nor configured ``columns``.
+
+    The column names end up in the list result's ``columns`` metadata, and each row records its
+    zero-based ``row`` (excluding the header) in its own metadata.
+
+    Settings:
+        - columns: explicit list of column names; when set the file is read as having no header row
+                   (default: take the names from the first row)
+        - delimiter: field separator (default ',')
+        - quotechar: quoting character (default '"')
+        - encoding: file encoding (default 'utf-8')
+        - limit: stop after this many rows (default: read all of them)
+    """
+
+    def _process(self, input):
+        if not os.path.exists(input):
+            raise ValueError(f"input file path does not exist: {input}")
+
+        columns = self.settings.get("columns", None)
+        limit = int(self.settings.get("limit", 0) or 0)
+
+        rows = ListResult([], input=input, processor=self)
+        with open(input, newline="", encoding=self.settings.get("encoding", "utf-8")) as fh:
+            reader = csv.DictReader(
+                fh,
+                fieldnames=list(columns) if columns else None,
+                delimiter=self.settings.get("delimiter", ","),
+                quotechar=self.settings.get("quotechar", '"'),
+                # Ragged rows: pad short ones with '', and collect any surplus fields under a named
+                # key rather than csv's default `None`, which no JSON consumer could address.
+                restval="",
+                restkey="_extra",
+            )
+            for idx, row in enumerate(reader):
+                if limit and idx >= limit:
+                    break
+                rows.append(
+                    ItemResult(
+                        dict(row),
+                        input=input,
+                        processor=self,
+                        metadata={"type": "DATA", "row": idx},
+                    )
+                )
+            fieldnames = reader.fieldnames
+
+        if not fieldnames:
+            raise ValueError(f"No columns found in {input}; is the CSV file empty?")
+        rows.metadata["columns"] = list(fieldnames)
+        return super()._process(rows)
 
 
 class IIIFDirFileProvider(DirFileProvider):

@@ -59,8 +59,14 @@ class TransformersComponent(Component):
         in_tokens = inputs.input_ids.shape[1]
         output_ids = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens)
         out_tokens = output_ids.shape[1] - in_tokens
-        raw_output = self.tokenizer.decode(output_ids[0][inputs.input_ids.shape[1] :], skip_special_tokens=True)
-        return {"text": raw_output, "input_tokens": in_tokens, "output_tokens": out_tokens}
+        raw_output = self.tokenizer.decode(
+            output_ids[0][inputs.input_ids.shape[1] :], skip_special_tokens=True
+        )
+        return {
+            "text": raw_output,
+            "input_tokens": in_tokens,
+            "output_tokens": out_tokens,
+        }
 
     @staticmethod
     def extract_text(resp) -> str:
@@ -81,8 +87,6 @@ class TransformersComponent(Component):
 
         ### Process input into the API call
 
-        print(input)
-
         format_vars = {"step_name": self.name}
         format_vars.update(self.substitutions)
         prompt_text = self.prompt_text
@@ -102,11 +106,15 @@ class TransformersComponent(Component):
                             f"Number of input slots in prompt doesn't match inputs in results for {self}"
                         )
                 else:
-                    raise NotImplementedError(f"Unsupported type {typ} for transformers: {item}")
+                    raise NotImplementedError(
+                        f"Unsupported type {typ} for transformers: {item}"
+                    )
         try:
             p_text = prompt_text.format(**format_vars)
         except KeyError as e:
-            print(f"Missing substitution in prompt for {self}: {e}\n{prompt_text}\n{format_vars}")
+            print(
+                f"Missing substitution in prompt for {self}: {e}\n{prompt_text}\n{format_vars}"
+            )
 
         if not p_text:
             raise ValueError(f"Prompt text in {self} is empty")

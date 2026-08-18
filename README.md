@@ -94,7 +94,7 @@ Two consequences worth internalizing:
 
 | Role | Job | Examples |
 |---|---|---|
-| **Provider** | Generate a Result from raw input | `DirFileProvider`, `FileListProvider`, `IIIFDirFileProvider`, `StaticProvider` |
+| **Provider** | Generate a Result from raw input | `DirFileProvider`, `FileListProvider`, `CsvFileProvider`, `IIIFDirFileProvider`, `StaticProvider` |
 | **Iterator** | Run children once per entry | `Iterator` (with `workers`, `continue_on_error`) |
 | **Classifier** | Assign labels | `KeywordClassifier`, `FileTypeClassifier`, `YoloClassifier`, `GeminiClassifier`, ... |
 | **Gate** | Conditional branch (`true_steps`/`false_steps`) | `ConditionGate`, `ValueTestGate`, `MetadataTestGate`, `ThresholdGate`, `FileTypeGate`, `LabelTestGate` |
@@ -112,7 +112,7 @@ Two consequences worth internalizing:
 | **Utils** | Plumbing | `DebugStep` (print & pass) |
 
 Deterministic components (`KeywordClassifier`, `TextSegmenter`,
-`StaticProvider`, `TextFileTranscriber`, `FileInfoDescriber`,
+`StaticProvider`, `CsvFileProvider`, `TextFileTranscriber`, `FileInfoDescriber`,
 `GlossaryTranslator`, all reducers/gates/evaluators, hash embeddings) run
 without models or API keys — the test suite and example workflows rely on
 this.

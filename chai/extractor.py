@@ -92,4 +92,6 @@ class JsonXpathExtractor(Extractor):
         if not xp:
             raise ValueError(f"Missing 'xpath' setting in {self}")
         val = extract_xpath(js, xp)
-        return ItemResult(val)
+        # Type the output so the extracted value can be fed to a downstream AI component
+        typ = "TEXT" if isinstance(val, str) else "DATA"
+        return ItemResult(val, input=input, processor=self, metadata={"type": typ})

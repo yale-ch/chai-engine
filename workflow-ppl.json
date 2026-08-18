@@ -1,0 +1,54 @@
+{
+  "id": "wf-ppl-csv",
+  "type": "workflow.Workflow",
+  "name": "Parse the names in a CSV of people",
+  "steps": [
+    {
+      "id": "ppl_csv",
+      "type": "provider.CsvFileProvider",
+      "name": "People CSV Reader",
+      "input": "inputs/people.csv",
+      "settings": {
+        "limit": 3
+      },
+      "steps": [
+        {
+          "id": "ppl_rows",
+          "type": "iterator.Iterator",
+          "name": "Row Iterator",
+          "settings": {
+            "continue_on_error": true
+          },
+          "steps": [
+            {
+              "id": "ppl_name",
+              "type": "extractor.JsonXpathExtractor",
+              "name": "Name Column Extractor",
+              "settings": {
+                "xpath": "/name"
+              },
+              "next_steps": [
+                {
+                  "id": "ppl_parsed",
+                  "type": "extractor.TransformersExtractor",
+                  "name": "Name Parser",
+                  "settings": {
+                    "model": "small-models-for-glam/Qwen3.5-4B-SFT-name-parser-yaml",
+                    "tie_word_embeddings": false,
+                    "prompt": "Parse this person name:\n\n{text_input_0}",
+                    "expected_output": "yaml"
+                  },
+                  "next_steps": [
+                    {
+                      "base": "FileSystemStorage"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
