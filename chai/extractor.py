@@ -31,7 +31,6 @@ class Extractor(Component):
         super().__init__(tree, workflow, parent)
         if not getattr(self, "prompt_text", None):
             self.prompt_text = self.workflow.default_prompts.get("extraction", "")
-        self.expects = "json"
 
     def _process(self, input):
         raise NotImplementedError()
