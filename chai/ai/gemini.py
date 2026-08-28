@@ -49,6 +49,8 @@ class GeminiComponent(Component):
         - sexually_explicit_safety: HARM_CATEGORY_SEXUALLY_EXPLICIT threshold (default 'OFF')
         - harassment_safety: HARM_CATEGORY_HARASSMENT threshold (default 'OFF')
         - tools: tool names to enable: 'search', 'url', 'code', 'maps' (default ['search']; pass [] to disable grounding)
+        - system_instruction: standing instructions sent in the model's system slot (default: none)
+        - response_mime_type: e.g. 'application/json' to make the API guarantee JSON (default: none)
         - thinking_budget: thinking-token budget for 2.5 models (default 0 = thinking off)
     """
 
@@ -84,11 +86,21 @@ class GeminiComponent(Component):
             types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold=harass),
         ]
 
+        # A system instruction is not the same thing as a longer prompt: it is
+        # the slot the model treats as standing instructions, and it is what a
+        # finetuning export preserves separately from the user turn.
+        self.system_instruction = self.settings.get("system_instruction", "") or None
+        # Ask the API itself to guarantee JSON rather than hoping the reply
+        # parses; the model may otherwise wrap it in prose or a code fence.
+        self.response_mime_type = self.settings.get("response_mime_type", "") or None
+
         self.base_config = types.GenerateContentConfig(
             temperature=self.temperature,
             top_p=self.top_p,
             max_output_tokens=self.max_output_tokens,
             safety_settings=self.safety_settings,
+            system_instruction=self.system_instruction,
+            response_mime_type=self.response_mime_type,
         )
 
         # Google Search grounding is on by default; disable with tools: [] or
@@ -135,19 +147,32 @@ class GeminiComponent(Component):
         else:
             self.client = genai.Client(api_key=self.api_key)
 
-    def generate_content(self, contents: Union[str, list]):
+    def request_config(self, system_instruction=None):
+        """The configured request, optionally with a per-call system instruction.
+
+        Components whose system instruction varies from call to call (a staged
+        pipeline, say) pass it here rather than rebuilding the component; when
+        it is None the configured one stands.
+        """
+        if system_instruction is None:
+            return self.base_config
+        return self.base_config.model_copy(update={"system_instruction": system_instruction})
+
+    def generate_content(self, contents: Union[str, list], system_instruction=None):
         """Synchronous wrapper for generate_content."""
         if not self.client:
             raise RuntimeError("Gemini client not initialized.")
 
-        return self.client.models.generate_content(model=self.model, contents=contents, config=self.base_config)
+        return self.client.models.generate_content(
+            model=self.model, contents=contents, config=self.request_config(system_instruction)
+        )
 
-    async def generate_content_async(self, contents: Union[str, list]):
+    async def generate_content_async(self, contents: Union[str, list], system_instruction=None):
         """Asynchronous wrapper for generate_content."""
         if not self.client:
             raise RuntimeError("Gemini client not initialized.")
         return await self.client.aio.models.generate_content(
-            model=self.model, contents=contents, config=self.base_config
+            model=self.model, contents=contents, config=self.request_config(system_instruction)
         )
 
     @staticmethod
