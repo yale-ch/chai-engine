@@ -8,15 +8,30 @@ Besides the components, this module exposes plain helper functions (``list_resul
 ``save_correction``, ``list_processors``) that a viewer app can import to browse a ``SqliteStorage``
 database and record human corrections alongside the original values. The helpers open a fresh
 connection per call, so they are safe to use from multi-threaded servers (e.g. Flask).
+
+``jsonl_to_parquet`` (and the ``ParquetRecordWriter`` behind it and ``ParquetStorage``) packs a run's
+results into a single Parquet file for bulk loading into a remote database; ``parquet_to_postgres``
+is the load step for PostgreSQL, putting a run's file into a table there, and ``postgres_params`` /
+``ensure_postgres_database`` / ``ensure_postgres_schema`` are the connection and setup helpers it and
+``PostgresStorage`` share.
 """
 
+import atexit
+import logging
 import os
+import re
 import sqlite3
+import threading
+import uuid
+import weakref
+from datetime import datetime, timezone
 
 import ujson as json
 
 from .core import Component, Result
 from .result import FileItemResult
+
+logger = logging.getLogger("chai")
 
 
 def _json_safe(value):
@@ -54,6 +69,166 @@ def result_to_json(result: Result):
     else:
         js = result.to_json(recurse=False)
     return _json_safe(js)
+
+
+_line_locks = {}
+_line_locks_guard = threading.Lock()
+
+
+def _line_lock(path):
+    """The write lock shared by everything appending to *path* (one per file, not per component)."""
+    with _line_locks_guard:
+        lock = _line_locks.get(path)
+        if lock is None:
+            lock = _line_locks[path] = threading.Lock()
+        return lock
+
+
+def source_value(result: Result, component_id: str):
+    """Value of the nearest result in *result*'s provenance chain that component *component_id* made.
+
+    Walks up the ``Result.input`` chain, so a result can record what it was computed from -- the CSV
+    row, the file, the segment of text -- rather than just the id of a result that lives elsewhere.
+    Returns ``None`` when no ancestor came from that component. A ``FileItemResult`` contributes its
+    ``file_name``, never the file's content.
+
+    Note that an ``Iterator`` stamps itself onto each entry it processes, so the entry a step ran on
+    is found under the *iterator's* id rather than that of the component that first made it.
+    """
+    while isinstance(result, Result):
+        processor = result.processor
+        if processor is not None and getattr(processor, "id", None) == component_id:
+            if isinstance(result, FileItemResult):
+                return result.file_name
+            return result.value
+        result = result.input
+    return None
+
+
+def build_record(result: Result, fields=None, sources=None):
+    """The flat, JSON-safe record for *result*: its selected fields plus any configured sources.
+
+    Shared by the storage components that write one record per result (``JsonLinesStorage``,
+    ``ParquetStorage``) so a run can be streamed to JSON-Lines or packed into Parquet with the same
+    columns. *fields* selects keys of the ``result_to_json`` representation -- a list to keep them as
+    they are, a ``{key: name}`` dict to keep and rename them (with ``"*"`` as the key naming a column
+    that holds the whole result JSON); ``None`` keeps all of them. *sources* is
+    a ``{key: component id}`` dict, each recording the value of the nearest ancestor result that
+    component produced (see ``source_value``).
+    """
+    whole = result_to_json(result)
+    js = whole
+    if fields:
+        if isinstance(fields, dict):
+            # "*" names a column holding the whole result JSON -- what SqliteStorage and
+            # PostgresStorage put in value_json, so a record can carry the same thing
+            js = {}
+            for key, name in fields.items():
+                if key == "*":
+                    js[name] = whole
+                elif key in whole:
+                    js[name] = whole[key]
+        else:
+            js = {key: whole[key] for key in fields if key in whole}
+    for key, cid in (sources or {}).items():
+        js[key] = _json_safe(source_value(result, cid))
+    return js
+
+
+def _arrow_type(pa, kind):
+    """The pyarrow type for one of the ``ParquetRecordWriter`` column kinds."""
+    if kind == "int":
+        return pa.int64()
+    if kind == "float":
+        return pa.float64()
+    if kind == "bool":
+        return pa.bool_()
+    if kind == "timestamp":
+        return pa.timestamp("us", tz="UTC")
+    # 'string' and 'json' are both text columns; 'json' encodes its non-text values on the way in
+    return pa.string()
+
+
+def _value_kind(value):
+    """The column kind *value* alone would need, or ``None`` for a null (which fits any column)."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, datetime):
+        return "timestamp"
+    return "json"
+
+
+def _merge_kinds(current, new):
+    """The kind a column needs to hold both kinds: ints widen to float, anything else mixed to json."""
+    if current is None or current == new:
+        return new
+    if new is None:
+        return current
+    if {current, new} == {"int", "float"}:
+        return "float"
+    return "json"
+
+
+def _as_datetime(value):
+    """*value* as a UTC-aware datetime -- from a datetime, an ISO-8601 string or epoch seconds."""
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return datetime.fromtimestamp(value, tz=timezone.utc)
+    if isinstance(value, str):
+        try:
+            return _as_datetime(datetime.fromisoformat(value.strip().replace("Z", "+00:00")))
+        except ValueError:
+            return None
+    return None
+
+
+def _coerce(value, kind):
+    """*value* as the Python type a *kind* column stores; unconvertible values become null.
+
+    A ``json`` column encodes every value, strings included, so each cell of the loaded column parses
+    the same way. A ``string`` column keeps text as it is and renders anything else readably.
+    """
+    if value is None:
+        return None
+    if kind == "json":
+        return json.dumps(_json_safe(value), ensure_ascii=False)
+    if kind == "string":
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (dict, list, tuple)):
+            return json.dumps(_json_safe(value), ensure_ascii=False)
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return str(value)
+    if kind == "int":
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    if kind == "float":
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+    if kind == "bool":
+        if isinstance(value, str):
+            return value.strip().lower() in ("true", "t", "yes", "y", "1")
+        try:
+            return bool(value)
+        except (TypeError, ValueError):
+            return None
+    if kind == "timestamp":
+        return _as_datetime(value)
+    return value
 
 
 class Storage(Component):
@@ -119,13 +294,810 @@ class FileSystemStorage(Storage):
         return input
 
 
-class PostgresStorage(Storage):
-    """Placeholder for PostgreSQL persistence -- not implemented yet.
+class JsonLinesStorage(Storage):
+    """Append each Result to one JSON-Lines file as soon as it is produced.
 
-    Currently behaves like the base ``Storage`` (a pass-through that stores nothing).
+    One line of JSON per result, written and flushed the moment the result passes through, so a run
+    over a large input never holds its results in memory waiting to write them at the end, and
+    whatever has been processed so far survives a crash or a kill part way through. Pair it with an
+    Iterator configured with ``retain_results: false`` -- otherwise the results are streamed to disk
+    but still kept in the iterator's output.
+
+    The file is re-opened in append mode for each line and closed again, so it is a complete, valid
+    JSON-Lines file at every moment; writes to the same path are serialized by a shared lock, making
+    it safe for an Iterator running with ``workers`` and for several steps (a value branch and an
+    error branch, say) writing to one file. Separate *processes*, e.g. the parallel runs of a
+    ``SliceIterator``, must each be given their own file.
+
+    Values are rendered by ``result_to_json``: bytes-safe, non-recursive, and a ``FileItemResult``
+    stores its ``file_name`` rather than its content. Returns the input unchanged.
+
+    Settings:
+        - file: path of the .jsonl file to write (default 'results.jsonl'); it and its parent
+          directories are created when the workflow is built, so a run that produces nothing still
+          leaves an empty file rather than none
+        - mode: 'append' (default) adds to whatever the file already holds; 'truncate' empties it
+          when the component is built, so re-running replaces the previous run's lines
+        - fields: which parts of the result JSON to record -- a list of keys to keep, or a
+          ``{key: name}`` dict that keeps and renames them, in which ``"*"`` as a key names a column
+          holding the whole result JSON (default: the whole result JSON split into its own columns,
+          i.e. id, type, workflowId, processorId, metadata, extraInfo, input and value)
+        - sources: ``{key: component id}`` dict; for each entry, the value of the nearest ancestor
+          result that component produced is recorded under *key* (see ``source_value``). This is how
+          a line can carry the input it was derived from next to the value derived from it
     """
 
-    pass
+    def __init__(self, tree, workflow, parent=None):
+        super().__init__(tree, workflow, parent)
+        if "file" not in self.settings:
+            self.settings["file"] = "results.jsonl"
+        self.file_name = os.path.abspath(self.settings["file"])
+        parent_dir = os.path.dirname(self.file_name)
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+        # Opened once, when the workflow is built, rather than on the first write -- so a run that
+        # produces nothing still leaves an (empty) file, and 'truncate' still clears the last run's
+        mode = "w" if str(self.settings.get("mode", "append")).lower() == "truncate" else "a"
+        with _line_lock(self.file_name):
+            with open(self.file_name, mode):
+                pass
+
+    def build_json(self, input: Result):
+        """The record for one line: the selected result fields plus any configured source values."""
+        return build_record(input, self.settings.get("fields", None), self.settings.get("sources", None))
+
+    def _process(self, input: Result) -> Result:
+        """Append the result to the JSON-Lines file, then pass it through unchanged."""
+        line = json.dumps(self.build_json(input), ensure_ascii=False) + "\n"
+        with _line_lock(self.file_name):
+            with open(self.file_name, "a", encoding="utf-8") as fh:
+                fh.write(line)
+        return input
+
+
+class ParquetRecordWriter:
+    """Write flat dict records to a single Parquet file, inferring the column types from the data.
+
+    Used by ``ParquetStorage`` and ``jsonl_to_parquet``; also usable on its own to turn any sequence
+    of dicts into a Parquet file. Records are buffered, then written as Parquet row groups:
+
+    * ``batch_size`` 0 (the default) buffers every record and writes one row group on ``close``, so
+      the column types are inferred from the whole dataset.
+    * a positive ``batch_size`` writes a row group each time that many records have accumulated. The
+      schema is fixed by the first batch; later values are coerced to it, and a column that only
+      appears in a later batch cannot be added and is logged and dropped.
+
+    Column types (the values of the *schema* dict, and what inference produces):
+        - string: text, as-is
+        - json: the value JSON-encoded into a text column -- what dicts, lists and columns of mixed
+          types become, so the loader on the far side can parse one column consistently
+        - int / float / bool: numeric and boolean columns
+        - timestamp: microsecond UTC timestamps, from ``datetime`` objects, ISO-8601 strings or epoch
+          seconds
+
+    Anything declared in *schema* keeps the declared type (and its column order comes first), which
+    is how a run whose data happens to be uniform can still produce the same table as every other
+    run. Missing keys become nulls, so records need not all have the same shape.
+
+    ``close`` finalizes the file and returns ``{"path", "rows", "columns"}``; the writer is
+    thread-safe, so an Iterator running with ``workers`` can add from several threads.
+    """
+
+    KINDS = ("string", "json", "int", "float", "bool", "timestamp")
+
+    def __init__(self, path, schema=None, batch_size=0, compression="snappy", metadata=None):
+        self.path = path
+        self.batch_size = int(batch_size or 0)
+        self.compression = compression or "snappy"
+        self.metadata = {str(k): str(v) for k, v in (metadata or {}).items()}
+        self.declared = {}
+        for column, kind in (schema or {}).items():
+            kind = str(kind).lower()
+            if kind not in self.KINDS:
+                raise ValueError(
+                    f"Unknown Parquet column type {kind!r} for column {column!r}; use one of {', '.join(self.KINDS)}"
+                )
+            self.declared[column] = kind
+        self.kinds = None
+        self.rows = 0
+        self._buffer = []
+        self._lock = threading.Lock()
+        self._writer = None
+        self._schema = None
+        self._modules_cache = None
+        self._dropped = set()
+
+    def _modules(self):
+        """The pyarrow modules, imported on first write so chai works without pyarrow installed."""
+        if self._modules_cache is None:
+            try:
+                import pyarrow as pa
+                import pyarrow.parquet as pq
+            except ImportError as e:  # pragma: no cover - depends on the install
+                raise ImportError("Writing Parquet files requires pyarrow: pip install pyarrow") from e
+            self._modules_cache = (pa, pq)
+        return self._modules_cache
+
+    def add(self, record):
+        """Buffer one record (a flat dict of column name to value)."""
+        with self._lock:
+            self._buffer.append(record)
+            if self.batch_size and len(self._buffer) >= self.batch_size:
+                self._write_buffer()
+
+    def add_all(self, records):
+        """Buffer each record of an iterable."""
+        for record in records:
+            self.add(record)
+
+    def close(self):
+        """Write whatever is buffered, finalize the file and return ``{"path", "rows", "columns"}``."""
+        with self._lock:
+            self._write_buffer(final=True)
+            writer, self._writer = self._writer, None
+            if writer is not None:
+                writer.close()
+            return {"path": self.path, "rows": self.rows, "columns": dict(self.kinds or {})}
+
+    def _write_buffer(self, final=False):
+        """Write the buffered records as one row group, opening the file (and schema) if needed."""
+        rows, self._buffer = self._buffer, []
+        if not rows:
+            # A run that produced nothing still leaves an empty, correctly typed file when the
+            # schema was declared -- there is nothing to infer one from otherwise.
+            if final and self._writer is None and self.declared:
+                self._open(dict(self.declared))
+            return
+        if self._writer is None:
+            self._open(self._infer(rows))
+        pa, _pq = self._modules()
+        arrays = [
+            pa.array([_coerce(row.get(column), kind) for row in rows], type=_arrow_type(pa, kind))
+            for column, kind in self.kinds.items()
+        ]
+        self._writer.write_table(pa.Table.from_arrays(arrays, schema=self._schema))
+        self.rows += len(rows)
+        for row in rows:
+            for column in row:
+                if column not in self.kinds and column not in self._dropped:
+                    self._dropped.add(column)
+                    logger.warning(
+                        f"Parquet column {column!r} first seen after the schema was fixed; "
+                        f"not written to {self.path}"
+                    )
+
+    def _infer(self, rows):
+        """Column name to column kind for *rows*: declared kinds first, then the inferred ones."""
+        kinds = dict(self.declared)
+        for row in rows:
+            for column, value in row.items():
+                if column in self.declared:
+                    continue
+                kinds[column] = _merge_kinds(kinds.get(column), _value_kind(value))
+        # A column that was null all the way through has no kind to infer; text holds nulls fine
+        return {column: kind or "string" for column, kind in kinds.items()}
+
+    def _open(self, kinds):
+        """Create the Parquet file with a schema built from *kinds* (plus the file-level metadata)."""
+        pa, pq = self._modules()
+        self.kinds = kinds
+        metadata = dict(self.metadata)
+        metadata["chai_columns"] = json.dumps(kinds)
+        self._schema = pa.schema(
+            [pa.field(column, _arrow_type(pa, kind)) for column, kind in kinds.items()],
+            metadata=metadata,
+        )
+        parent_dir = os.path.dirname(self.path)
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+        self._writer = pq.ParquetWriter(self.path, self._schema, compression=self.compression)
+
+
+def _flush_parquet_at_exit(ref):
+    """atexit hook for a ``ParquetStorage``, held weakly so the component can still be collected."""
+    storage = ref()
+    if storage is not None:
+        storage._close_quietly()
+
+
+class ParquetStorage(Storage):
+    """Collect every Result of one run into a single Parquet file, ready to bulk load elsewhere.
+
+    Each result that passes through becomes one row; the file is written when the run finishes (the
+    component subscribes to the workflow's ``component_end``/``component_error`` event, so a run that
+    dies part way through still leaves the rows it got to). Columns and their types are inferred from
+    the data unless declared in ``schema``; dicts, lists and columns of mixed types become
+    JSON-encoded text columns, which is what a loader on the far side can parse consistently. See
+    ``ParquetRecordWriter`` for the column kinds and how batching interacts with type inference.
+
+    Unlike ``SqliteStorage`` this stores one row per result and no derivative results: it is a table
+    of a run's output, not a browsable object graph. Rows are held in memory until the file is
+    written, so for a run too large for that use ``JsonLinesStorage`` (which writes as it goes) and
+    convert its output afterwards with ``jsonl_to_parquet``, or set ``batch_size`` to write row
+    groups during the run.
+
+    Returns the input unchanged. Writing needs ``pyarrow``, imported when the first row is written.
+
+    Settings:
+        - file: path of the .parquet file (default 'results.parquet'); ``{run_id}`` and
+          ``{timestamp}`` in the path are substituted per run, which is how parallel runs (e.g. the
+          slices of a ``SliceIterator``) each get their own file. Without a placeholder, a later run
+          of the same workflow overwrites the file.
+        - run_id: identifier for this run, recorded in every row and in the file's metadata
+          (default: a generated hex id, fresh for each run)
+        - run_columns: add the ``run_id`` and ``stored_at`` columns to every row (default true)
+        - constants: ``{column: value}`` written unchanged into every row -- a batch name, a source
+          system, the slice number -- so the loaded table can be filtered by them
+        - schema: ``{column: type}`` declaring the column types and their order, with type one of
+          string, json, int, float, bool, timestamp. Columns not listed are inferred; listed columns
+          missing from the data become null columns, so every run yields the same table
+        - fields: which parts of the result JSON to record -- a list of keys to keep, or a
+          ``{key: name}`` dict that keeps and renames them, in which ``"*"`` as a key names a column
+          holding the whole result JSON (default: the whole result JSON split into its own columns,
+          i.e. id, type, workflowId, processorId, metadata, extraInfo, input and value)
+        - sources: ``{column: component id}`` dict; for each entry, the value of the nearest ancestor
+          result that component produced is recorded in that column (see ``source_value``)
+        - null_if_empty: write an empty dict, list or string as null rather than as ``{}``/``[]``/``""``
+          (default false) -- which is what a table that treats "nothing here" as NULL wants, and what
+          ``SqliteStorage`` and ``PostgresStorage`` do with an empty ``metadata``
+        - batch_size: rows to buffer before writing a row group; 0 (the default) writes one row group
+          at the end of the run, having inferred the column types from all of it
+        - compression: Parquet codec, e.g. 'snappy' (default), 'zstd', 'gzip', 'none'
+        - flush_on_exit: also write the file at interpreter exit if the run never ended cleanly
+          (default true)
+    """
+
+    def __init__(self, tree, workflow, parent=None):
+        super().__init__(tree, workflow, parent)
+        if "file" not in self.settings:
+            self.settings["file"] = "results.parquet"
+        self.file_template = os.path.abspath(self.settings["file"])
+        parent_dir = os.path.dirname(self.file_template)
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+        self.run_columns = self.settings.get("run_columns", True)
+        self._lock = threading.Lock()
+        self._writer = None
+        self.run_id = None
+        self.file_name = None
+        self._run_started = False
+        self._start_run()
+        if hasattr(self.workflow, "add_listener"):  # a Workflow; the file is written when its run ends
+            self.workflow.add_listener(self._on_workflow_event)
+        if self.settings.get("flush_on_exit", True):
+            # A weak reference, so a workflow that is built and dropped is not kept alive until exit
+            atexit.register(_flush_parquet_at_exit, weakref.ref(self))
+
+    def _start_run(self):
+        """Pick the run id and resolve the file name for the run that is about to write."""
+        self.run_id = str(self.settings.get("run_id") or uuid.uuid4().hex)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        self.file_name = self.file_template.replace("{run_id}", self.run_id).replace("{timestamp}", stamp)
+        self._run_started = False
+
+    def _on_workflow_event(self, payload):
+        """Note that a run began, and close the file when the workflow finishes -- successfully or not."""
+        if payload.get("component_id") != self.workflow.id:
+            return
+        event = payload.get("event")
+        if event == "component_start":
+            self._run_started = True
+        elif event in ("component_end", "component_error"):
+            self.close()
+
+    def _close_quietly(self):
+        """``close`` for the atexit hook: a failure there must not mask what ended the process."""
+        try:
+            self.close()
+        except Exception as e:  # pragma: no cover - interpreter shutdown
+            logger.warning(f"Could not write Parquet file {self.file_name}: {e}")
+
+    def build_json(self, input: Result):
+        """The row for one result: the selected result fields, the constants and the run columns."""
+        js = build_record(input, self.settings.get("fields"), self.settings.get("sources"))
+        if self.settings.get("null_if_empty"):
+            js = {column: (None if value in ({}, [], "") else value) for column, value in js.items()}
+        for column, value in (self.settings.get("constants") or {}).items():
+            js[column] = value
+        if self.run_columns:
+            js["run_id"] = self.run_id
+            js["stored_at"] = datetime.now(timezone.utc)
+        return js
+
+    def _declared_schema(self):
+        """The configured ``schema``, extended with the columns this component adds to every row.
+
+        Only when a schema was declared at all: it is then the contract for the table on the far
+        side, so the constants and run columns belong in it -- otherwise a run that produced no rows
+        would leave a file missing columns that every other run has.
+        """
+        schema = self.settings.get("schema")
+        if not schema:
+            return None
+        schema = dict(schema)
+        for column, value in (self.settings.get("constants") or {}).items():
+            schema.setdefault(column, _value_kind(value) or "string")
+        if self.run_columns:
+            schema.setdefault("run_id", "string")
+            schema.setdefault("stored_at", "timestamp")
+        return schema
+
+    def _new_writer(self):
+        """A writer for the current run, tagging the file with the run's provenance."""
+        return ParquetRecordWriter(
+            self.file_name,
+            schema=self._declared_schema(),
+            batch_size=self.settings.get("batch_size", 0),
+            compression=self.settings.get("compression", "snappy"),
+            metadata={
+                "chai_run_id": self.run_id,
+                "chai_workflow_id": self.workflow.id if self.workflow else "",
+                "chai_component_id": self.id,
+                "chai_started_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+    def close(self):
+        """Write the Parquet file for the current run; returns ``{"path", "rows", "columns"}``.
+
+        Called automatically when the workflow finishes. Call it directly when results are pushed
+        through the component outside a ``Workflow.run``. Afterwards the component starts a new run,
+        so re-running the same workflow object writes a fresh file rather than appending to a closed
+        one. A run that produced no rows writes no file unless ``schema`` says what the file holds,
+        in which case it leaves an empty one with those columns.
+        """
+        with self._lock:
+            writer, self._writer = self._writer, None
+            if writer is None:
+                # A run that produced nothing still leaves an empty, correctly typed file when the
+                # schema says what the file holds -- but only for a run that actually happened, so a
+                # second close (the atexit hook after the workflow's own) writes nothing.
+                if not (self._run_started and self.settings.get("schema")):
+                    return None
+                writer = self._new_writer()
+            info = writer.close()
+            logger.info(f"Wrote {info['rows']} rows to {info['path']}")
+            self._start_run()
+            return info
+
+    def _process(self, input: Result) -> Result:
+        """Add the result as a row of the run's Parquet file, then pass it through unchanged."""
+        with self._lock:
+            if self._writer is None:
+                self._writer = self._new_writer()
+            writer = self._writer
+        writer.add(self.build_json(input))
+        return input
+
+
+def jsonl_to_parquet(jsonl_file, parquet_file, schema=None, batch_size=50000, compression="snappy", metadata=None):
+    """Convert a JSON-Lines file (see ``JsonLinesStorage``) into one Parquet file.
+
+    The counterpart to ``ParquetStorage`` for runs too large to hold in memory: stream the results to
+    JSON-Lines as they are produced, then pack the finished file into Parquet for the bulk load.
+    Reads and writes in batches of *batch_size* lines, so neither file is ever fully in memory; as
+    with ``ParquetRecordWriter``, the column types come from the first batch unless declared in
+    *schema*. Blank lines are skipped and an unparseable line raises. Returns
+    ``{"path", "rows", "columns"}``.
+    """
+    writer = ParquetRecordWriter(
+        parquet_file, schema=schema, batch_size=batch_size, compression=compression, metadata=metadata
+    )
+    with open(jsonl_file, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                writer.add(json.loads(line))
+    return writer.close()
+
+
+_PG_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
+
+
+def _pg_identifier(name):
+    """Validate a table or column name coming from configuration before it is put into SQL."""
+    name = str(name)
+    if not _PG_IDENTIFIER.match(name):
+        raise ValueError(f"{name!r} is not a usable PostgreSQL identifier")
+    return name
+
+
+def _pg_driver():
+    """The installed psycopg module -- version 3 if present, else psycopg2."""
+    try:
+        import psycopg
+
+        return psycopg
+    except ImportError:
+        pass
+    try:
+        import psycopg2
+
+        return psycopg2
+    except ImportError as e:  # pragma: no cover - depends on the install
+        raise ImportError("Talking to PostgreSQL requires psycopg: pip install psycopg[binary]") from e
+
+
+def postgres_params(settings=None, **overrides):
+    """Connection keywords for the chai database, from *settings*, the environment and the defaults.
+
+    A ``dsn`` setting (a libpq connection string or ``postgresql://`` URL) is passed through as-is and
+    used instead of the individual keywords. Otherwise ``host``, ``port``, ``database``, ``user`` and
+    ``password`` are taken from the settings, falling back to the standard ``PGHOST``/``PGPORT``/
+    ``PGDATABASE``/``PGUSER``/``PGPASSWORD`` environment variables and then to localhost:5432 and the
+    ``chai`` database.
+    """
+    settings = dict(settings or {})
+    settings.update(overrides)
+    if settings.get("dsn"):
+        return {"conninfo": settings["dsn"]}
+    params = {
+        "host": settings.get("host") or os.environ.get("PGHOST") or "localhost",
+        "port": int(settings.get("port") or os.environ.get("PGPORT") or 5432),
+        "dbname": settings.get("database") or os.environ.get("PGDATABASE") or "chai",
+    }
+    user = settings.get("user") or os.environ.get("PGUSER")
+    if user:
+        params["user"] = user
+    password = settings.get("password") or os.environ.get("PGPASSWORD")
+    if password:
+        params["password"] = password
+    return params
+
+
+def _pg_connect(params, autocommit=False):
+    """Open a connection from the keywords ``postgres_params`` produced (psycopg 3 or psycopg2)."""
+    driver = _pg_driver()
+    params = dict(params)
+    conninfo = params.pop("conninfo", None)
+    if driver.__name__ == "psycopg2":
+        # psycopg2 takes the connection string positionally and calls the database 'dbname' too
+        conn = driver.connect(conninfo) if conninfo else driver.connect(**params)
+        conn.autocommit = autocommit
+        return conn
+    if conninfo:
+        return driver.connect(conninfo, autocommit=autocommit)
+    return driver.connect(autocommit=autocommit, **params)
+
+
+def ensure_postgres_database(params=None, **overrides):
+    """Create the configured database if it does not exist yet; returns its name.
+
+    Connects to the server's ``postgres`` maintenance database to do it, so it needs an account
+    allowed to create databases -- the counterpart of SQLite's file appearing on first use. A server
+    that cannot be reached, or an account that may not create databases, raises.
+    """
+    params = postgres_params(params, **overrides)
+    if "conninfo" in params:
+        conn = _pg_connect(params)  # a dsn names its own database; nothing to create
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT current_database()")
+            return cursor.fetchone()[0]
+        finally:
+            conn.close()
+    database = params["dbname"]
+    try:
+        _pg_connect(params).close()
+        return database
+    except Exception as e:
+        if "does not exist" not in str(e):
+            raise
+    admin = dict(params, dbname="postgres")
+    conn = _pg_connect(admin, autocommit=True)  # CREATE DATABASE cannot run inside a transaction
+    try:
+        conn.cursor().execute(f'CREATE DATABASE "{database}"')
+        logger.info(f"Created PostgreSQL database {database}")
+    finally:
+        conn.close()
+    return database
+
+
+def _pg_ensure_schema(conn, table="results", derivatives_table=None):
+    """Create the results/derivatives tables and their indexes in PostgreSQL if they are missing."""
+    table = _pg_identifier(table)
+    derivatives = _pg_identifier(derivatives_table or f"{table}_derivatives")
+    cursor = conn.cursor()
+    cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS {table} (
+            id TEXT PRIMARY KEY,
+            processor_id TEXT,
+            workflow_id TEXT,
+            value_json JSONB,
+            metadata_json JSONB,
+            extra_json JSONB,
+            corrected_value_json JSONB,
+            corrected_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS {derivatives} (
+            id TEXT PRIMARY KEY,
+            source_id TEXT,
+            component_id TEXT,
+            result_json JSONB,
+            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    # Bring a database made before the correction columns existed up to date
+    for column, coltype in (("corrected_value_json", "JSONB"), ("corrected_at", "TIMESTAMPTZ")):
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {coltype}")
+    cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_processor ON {table}(processor_id)")
+    cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_workflow ON {table}(workflow_id)")
+    cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{derivatives}_source ON {derivatives}(source_id)")
+    conn.commit()
+    return table, derivatives
+
+
+def ensure_postgres_schema(params=None, table="results", derivatives_table=None, create_database=True, **overrides):
+    """Create the chai tables (and, unless told not to, the database) in PostgreSQL; returns the names.
+
+    Lets an app -- or the loader that follows a Parquet upload -- prepare the tables before anything
+    has run, the PostgreSQL counterpart of ``ensure_database``.
+    """
+    params = postgres_params(params, **overrides)
+    if create_database:
+        ensure_postgres_database(params)
+    conn = _pg_connect(params)
+    try:
+        return _pg_ensure_schema(conn, table, derivatives_table)
+    finally:
+        conn.close()
+
+
+class PostgresStorage(Storage):
+    """Store results in PostgreSQL, in the same shape ``SqliteStorage`` uses for SQLite.
+
+    Writes the input Result into a ``results`` table and each of its ``derivative_results`` into a
+    ``results_derivatives`` table keyed by source result and component. ``value_json`` holds the full
+    bytes-safe ``to_json(recurse=False)`` representation (id, type, value, metadata, provenance), with
+    ``metadata_json``/``extra_json`` as dedicated columns for querying and the nullable
+    ``corrected_value_json``/``corrected_at`` columns for human corrections -- the JSON columns are
+    ``jsonb``, so they can be indexed and queried in place. The ``processor_id``/``workflow_id``
+    columns are the ones in ``value_json``, so a result made by a component of a workflow counts as
+    that workflow's even when nothing stamped the workflow onto the result itself. Storing a result
+    again is an upsert that keeps any correction and the original ``created_at``. The input is
+    returned unchanged.
+
+    The database and the tables are created on first use if they are missing, so a workflow can be
+    pointed at a fresh server. One connection is held per component and shared by the run's threads
+    under a lock (an ``Iterator`` with ``workers`` serializes on it); a broken connection is reopened
+    on the next result rather than failing the run, and the connection is given back when the run
+    ends (``close`` does it by hand for results pushed through outside a ``Workflow.run``).
+
+    Needs psycopg (version 3, or psycopg2), imported when the first result is written.
+
+    Settings:
+        - dsn: full connection string or ``postgresql://`` URL; overrides the keywords below
+        - host / port / database / user / password: connection keywords, defaulting to the
+          ``PG*`` environment variables and then to localhost:5432 and the ``chai`` database
+        - table: name of the results table (default 'results')
+        - derivatives_table: name of the derivatives table (default '<table>_derivatives')
+        - create_database: create the database if the server does not have it yet (default true)
+    """
+
+    def __init__(self, tree, workflow, parent=None):
+        super().__init__(tree, workflow, parent)
+        self.params = postgres_params(self.settings)
+        self.table = _pg_identifier(self.settings.get("table", "results"))
+        self.derivatives_table = _pg_identifier(
+            self.settings.get("derivatives_table") or f"{self.table}_derivatives"
+        )
+        self._lock = threading.Lock()
+        self._conn = None
+        if hasattr(self.workflow, "add_listener"):  # a Workflow; give the connection back when it ends
+            self.workflow.add_listener(self._on_workflow_event)
+
+    def _on_workflow_event(self, payload):
+        """Close the connection when the workflow finishes, rather than holding it until collection."""
+        if payload.get("component_id") == self.workflow.id and payload.get("event") in (
+            "component_end",
+            "component_error",
+        ):
+            self.close()
+
+    def _connection(self):
+        """The component's connection, opened (and the schema ensured) on first use."""
+        if self._conn is None:
+            if self.settings.get("create_database", True):
+                ensure_postgres_database(self.params)
+            self._conn = _pg_connect(self.params)
+            _pg_ensure_schema(self._conn, self.table, self.derivatives_table)
+        return self._conn
+
+    def close(self):
+        """Close the connection; the next result opens a new one."""
+        with self._lock:
+            conn, self._conn = self._conn, None
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:  # pragma: no cover - already broken
+                    pass
+
+    def _store(self, input: Result):
+        """Upsert the result and its derivatives; assumes the caller holds the lock."""
+        conn = self._connection()
+        cursor = conn.cursor()
+        # The dedicated columns come out of the stored JSON, so a row cannot say one thing in
+        # value_json and another in the column a query filters on
+        js = self.build_json(input)
+        cursor.execute(
+            f"""
+            INSERT INTO {self.table}
+            (id, processor_id, workflow_id, value_json, metadata_json, extra_json)
+            VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb)
+            ON CONFLICT (id) DO UPDATE SET
+                processor_id = excluded.processor_id,
+                workflow_id = excluded.workflow_id,
+                value_json = excluded.value_json,
+                metadata_json = excluded.metadata_json,
+                extra_json = excluded.extra_json
+            """,
+            (
+                input.id,
+                js.get("processorId"),
+                js.get("workflowId"),
+                json.dumps(js),
+                json.dumps(_json_safe(input.metadata)) if input.metadata else None,
+                json.dumps(_json_safe(input.extra)) if input.extra else None,
+            ),
+        )
+        for component, results in input.derivative_results.items():
+            for result in results:
+                cursor.execute(
+                    f"""
+                    INSERT INTO {self.derivatives_table} (id, source_id, component_id, result_json)
+                    VALUES (%s, %s, %s, %s::jsonb)
+                    ON CONFLICT (id) DO UPDATE SET
+                        source_id = excluded.source_id,
+                        component_id = excluded.component_id,
+                        result_json = excluded.result_json
+                    """,
+                    (result.id, input.id, component.id, json.dumps(result_to_json(result))),
+                )
+        conn.commit()
+
+    def _process(self, input: Result) -> Result:
+        """Store the result in PostgreSQL"""
+        with self._lock:
+            try:
+                self._store(input)
+            except Exception:
+                # A connection that died between results (server restart, idle timeout) should cost
+                # one result at most, not the rest of the run
+                conn, self._conn = self._conn, None
+                if conn is None:
+                    raise
+                try:
+                    conn.close()
+                except Exception:  # pragma: no cover - already broken
+                    pass
+                self._store(input)
+        return input
+
+
+_PG_TYPES = {
+    "json": "JSONB",
+    "string": "TEXT",
+    "int": "BIGINT",
+    "float": "DOUBLE PRECISION",
+    "bool": "BOOLEAN",
+    "timestamp": "TIMESTAMPTZ",
+}
+
+
+def parquet_columns(parquet_file):
+    """The ``{column: kind}`` a Parquet file holds -- from the ``chai_columns`` metadata if it is there.
+
+    Files this module wrote record their column kinds when they are created; for any other Parquet
+    file the kinds are read off the Arrow schema instead (a text column is ``string``, since nothing
+    says whether it holds JSON).
+    """
+    import pyarrow.parquet as pq
+
+    schema = pq.ParquetFile(parquet_file).schema_arrow
+    declared = {}
+    if schema.metadata and b"chai_columns" in schema.metadata:
+        declared = json.loads(schema.metadata[b"chai_columns"].decode())
+    kinds = {}
+    for field in schema:
+        kind = declared.get(field.name)
+        if kind not in _PG_TYPES:
+            arrow = str(field.type)
+            if arrow.startswith("timestamp"):
+                kind = "timestamp"
+            elif arrow in ("int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64"):
+                kind = "int"
+            elif arrow in ("float", "double", "halffloat"):
+                kind = "float"
+            elif arrow == "bool":
+                kind = "bool"
+            else:
+                kind = "string"
+        kinds[field.name] = kind
+    return kinds
+
+
+def parquet_to_postgres(
+    parquet_file,
+    table,
+    params=None,
+    create=True,
+    truncate=False,
+    batch_size=10000,
+    create_database=True,
+    **overrides,
+):
+    """Load a Parquet file written by ``ParquetStorage`` into a PostgreSQL table.
+
+    The step after a run: the file holding everything one run produced is bulk loaded into the remote
+    database in row-group-sized batches, with ``COPY`` where the driver supports it. The table is
+    created from the file's own columns if it does not exist yet -- ``json`` columns become ``jsonb``,
+    so the loaded values are queryable rather than text -- and a table that already exists is loaded
+    into as it stands, which is how a Parquet run can land in the same shape ``PostgresStorage``
+    writes (see ``ensure_postgres_schema``). A column the table does not have raises rather than
+    being silently dropped.
+
+    Returns ``{"table", "rows", "columns"}``. Arguments:
+        - parquet_file / table: what to load and where
+        - params / dsn / host / port / database / user / password: where the server is (see
+          ``postgres_params``)
+        - create: create the table from the file's columns when it is missing (default true)
+        - truncate: empty the table before loading, so a re-load replaces rather than adds
+        - batch_size: rows per batch read from the file and sent to the server
+        - create_database: create the database if the server does not have it yet (default true)
+    """
+    import pyarrow.parquet as pq
+
+    table = _pg_identifier(table)
+    kinds = parquet_columns(parquet_file)
+    params = postgres_params(params, **overrides)
+    if create_database:
+        ensure_postgres_database(params)
+    conn = _pg_connect(params)
+    try:
+        cursor = conn.cursor()
+        if create:
+            columns = ", ".join(f"{_pg_identifier(c)} {_PG_TYPES[k]}" for c, k in kinds.items())
+            cursor.execute(f"CREATE TABLE IF NOT EXISTS {table} ({columns})")
+            conn.commit()
+        cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = %s", (table,))
+        existing = {row[0] for row in cursor.fetchall()}
+        missing = [c for c in kinds if c not in existing]
+        if missing:
+            raise ValueError(f"Table {table} has no column(s) {', '.join(missing)} for this Parquet file")
+        if truncate:
+            cursor.execute(f"TRUNCATE TABLE {table}")
+        names = list(kinds)
+        quoted = ", ".join(_pg_identifier(c) for c in names)
+        rows = 0
+        for batch in pq.ParquetFile(parquet_file).iter_batches(batch_size=batch_size, columns=names):
+            records = batch.to_pylist()
+            if not records:
+                continue
+            rows += _pg_copy_rows(cursor, table, quoted, names, records, kinds)
+        conn.commit()
+    finally:
+        conn.close()
+    logger.info(f"Loaded {rows} rows from {parquet_file} into {table}")
+    return {"table": table, "rows": rows, "columns": kinds}
+
+
+def _pg_copy_rows(cursor, table, quoted, names, records, kinds):
+    """Send one batch of records to *table*; ``COPY`` on psycopg 3, batched INSERTs on psycopg2."""
+    values = [[record.get(name) for name in names] for record in records]
+    if hasattr(cursor, "copy"):
+        # Text-format COPY: each value is written as text and parsed by the column's own type, so a
+        # json column's text lands in jsonb without a round trip through Python objects
+        with cursor.copy(f"COPY {table} ({quoted}) FROM STDIN") as copy:
+            for row in values:
+                copy.write_row(row)
+    else:  # psycopg2
+        casts = ", ".join("%s::jsonb" if kinds[name] == "json" else "%s" for name in names)
+        cursor.executemany(f"INSERT INTO {table} ({quoted}) VALUES ({casts})", values)
+    return len(values)
 
 
 def _ensure_schema(conn):

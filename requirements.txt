@@ -1,5 +1,8 @@
 tenacity
 ujson
+pyarrow
+# PostgresStorage; psycopg2 works too if that is what is already installed
+psycopg[binary]
 Pillow
 requests
 ultralytics

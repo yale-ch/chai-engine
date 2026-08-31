@@ -62,6 +62,51 @@
       "directory": "results"
     }
   },
+  "JsonLinesStorage": {
+    "type": "storage.JsonLinesStorage",
+    "settings": {
+      "file": "results/results.jsonl",
+      "mode": "append"
+    }
+  },
+  "ParquetStorage": {
+    "type": "storage.ParquetStorage",
+    "settings": {
+      "file": "results/results-{run_id}.parquet",
+      "compression": "snappy"
+    }
+  },
+  "PostgresStorage": {
+    "type": "storage.PostgresStorage",
+    "settings": {
+      "database": "chai",
+      "table": "results"
+    }
+  },
+  "ParquetStorageForPostgres": {
+    "type": "storage.ParquetStorage",
+    "settings": {
+      "file": "results/results-{run_id}.parquet",
+      "fields": {
+        "id": "id",
+        "processorId": "processor_id",
+        "workflowId": "workflow_id",
+        "*": "value_json",
+        "metadata": "metadata_json",
+        "extraInfo": "extra_json"
+      },
+      "schema": {
+        "id": "string",
+        "processor_id": "string",
+        "workflow_id": "string",
+        "value_json": "json",
+        "metadata_json": "json",
+        "extra_json": "json"
+      },
+      "null_if_empty": true,
+      "run_columns": false
+    }
+  },
   "YoloDetectAndAnnotate": {
     "id": "yolo_detect",
     "type": "segmenter.YoloSegmenter",

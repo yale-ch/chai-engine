@@ -24,6 +24,15 @@ class Iterator(Component):
           safe; local models (YOLO, transformers) may not be.
         - continue_on_error: when an entry fails, record an ERROR result for it and keep going
           instead of aborting the whole run (default false)
+        - retain_results: keep the per-entry results in the output (default true). Set it false for a
+          long run whose results are persisted as they are made (see ``storage.JsonLinesStorage``):
+          each entry's results are then dropped once its steps have finished, so memory does not grow
+          with the number of entries. The output is an empty list, and the entry counts move to the
+          result's metadata. Note that results a step registers on an ancestor result (``register_on``)
+          are held by that ancestor, so they stay in memory either way.
+
+    Either way, the output records how many entries were processed in its ``processed`` metadata, and
+    how many of those produced an ERROR result in its ``errors`` metadata.
     """
 
     def _run_entry(self, x, input):
@@ -52,6 +61,7 @@ class Iterator(Component):
     def _process(self, input: Result) -> Result:
         workers = int(self.settings.get("workers", 1) or 1)
         continue_on_error = bool(self.settings.get("continue_on_error", False))
+        retain_results = bool(self.settings.get("retain_results", True))
 
         def run_one(x):
             try:
@@ -63,13 +73,24 @@ class Iterator(Component):
 
         items = self.select_items(input)
         merged = self.outputResultClass([], input=input, processor=self)
+        counts = {"processed": 0, "errors": 0}
+
+        def collect(step_value):
+            """Count an entry's output and, unless results are being discarded, keep it."""
+            counts["processed"] += 1
+            if step_value is not None and step_value.metadata.get("type", "") == "ERROR":
+                counts["errors"] += 1
+            if retain_results:
+                merged.append(step_value)
+
         if workers > 1 and len(items) > 1:
             with ThreadPoolExecutor(max_workers=workers) as pool:
                 for step_value in pool.map(run_one, items):  # map preserves input order
-                    merged.append(step_value)
+                    collect(step_value)
         else:
             for x in items:
-                merged.append(run_one(x))
+                collect(run_one(x))
+        merged.metadata.update(counts)
         return merged
 
 
@@ -91,7 +112,7 @@ class SliceIterator(Iterator):
           same behaviour as a plain Iterator)
         - slice: zero-based index of the slice this run processes; must be less than max_slices
           (default 0)
-        - workers, continue_on_error: as Iterator
+        - workers, continue_on_error, retain_results: as Iterator
     """
 
     def select_items(self, input: Result) -> list:

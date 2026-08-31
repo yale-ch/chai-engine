@@ -35,7 +35,7 @@ python experiment.py
 ### Component Types
 
 - **`Provider`**: Generates a `Result` from raw input (e.g., `DirFileProvider` reads files from a directory; `CsvFileProvider` reads a CSV file into one dict-valued `ItemResult` per row).
-- **`Iterator`**: Calls further components for each entry in a `Result` to make a new result. `SliceIterator` processes only every nth entry (`slice`/`max_slices`), so one input can be divided between parallel runs.
+- **`Iterator`**: Calls further components for each entry in a `Result` to make a new result; `retain_results: false` drops each entry's results once its steps are done (for runs whose results are persisted as they go) and reports only the `processed`/`errors` counts in its output's metadata. `SliceIterator` processes only every nth entry (`slice`/`max_slices`), so one input can be divided between parallel runs.
 - **`Classifier`**: Assigns one or more labels to input (e.g., `KeywordClassifier`, `FileTypeClassifier`, `YoloClassifier`).
 - **`Gate`**: Acts as a gating mechanism with `true_steps` and `false_steps` based on a test. `ConditionGate` evaluates a component-agnostic JSON condition (see `chai/gate.py`); `ValueTestGate`, `MetadataTestGate`, `ThresholdGate`, and `FileTypeGate` are convenience subclasses; `LabelTestGate` tests labels registered by a classifier.
 - **`Transcriber`**: Extracts text from images or audio.
@@ -44,10 +44,10 @@ python experiment.py
 - **`Reducer`**: Combines multiple results into one. Branches converge two ways: a parent's `steps` fan out and its `next_steps` (e.g. `MergeDictReducer`, `TextJoinReducer`) receive the merged list; or `CollectReducer` gathers everything specific components produced anywhere in the input subtree (gate branches, iterator entries). `FlattenReducer` collapses nested lists; `fanout.FanOut` is the explicit fan-out node.
 - **`Annotator`**: Renders results as human-reviewable artifacts (e.g., `ImageBoxAnnotator` burns detection boxes into the source image via supervision; `TextHighlightAnnotator` highlights extracted values in their source text).
 - **`Translator`**: Translates linguistic content into different languages.
-- **`Storage`**: Persists input somewhere (e.g., `FileSystemStorage`, `PostgresStorage`, `SqliteStorage`).
+- **`Storage`**: Persists input somewhere (e.g., `FileSystemStorage`, `PostgresStorage`, `SqliteStorage`). `JsonLinesStorage` appends each result to one `.jsonl` file the moment it is produced, so a long run writes nothing at the end and holds nothing in memory; pair it with an `Iterator` set to `retain_results: false`. `ParquetStorage` collects a whole run into one `.parquet` file (written when the workflow finishes) for bulk loading into a remote database; `jsonl_to_parquet` converts a streamed `.jsonl` run into the same thing afterwards. `PostgresStorage` writes the same `results`/`derivatives` shape as `SqliteStorage` into PostgreSQL (jsonb columns, database and tables created on first use), and `parquet_to_postgres` loads a Parquet run into a table there -- the two routes produce identical rows (see `examples/experiment-postgres-parquet.py`).
 - **`Embedder`**: Embeddings + vector search (`VectorIndexer`, `VectorRetriever` over a SQLite `VectorStore` that lives in `chai/storage.py`; services: hash/gemini/ollama/openai-compatible).
 
-Every component supports an error policy via settings (`retries`, `retry_delay`, `on_error: skip`) and an `error_steps` config branch. `Iterator` adds `workers` (thread-pool concurrency) and `continue_on_error`.
+Every component supports an error policy via settings (`retries`, `retry_delay`, `on_error: skip`) and an `error_steps` config branch. `Iterator` adds `workers` (thread-pool concurrency), `continue_on_error` and `retain_results`.
 
 ### AI Components (`chai/ai/`)
 
@@ -103,12 +103,15 @@ Workflows are defined as JSON trees with `steps` and `next_steps`:
 ### Running Tests
 
 ```bash
-# Run the unit tests
+# Run the unit tests (the PostgreSQL ones skip unless a server is reachable)
 python -m unittest discover -s tests
 
 # Run experiment.py as a live test case
 python experiment.py
 ```
+
+The `PostgresStorage` tests need a PostgreSQL server on localhost:5432 and use (creating it if
+necessary) a database called `chai`; they skip when there is no server to talk to.
 
 All components are real (no mocks): deterministic ones (`KeywordClassifier`,
 `TextSegmenter`, `StaticProvider`, `TextFileTranscriber`, `FileInfoDescriber`,

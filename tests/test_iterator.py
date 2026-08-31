@@ -52,6 +52,49 @@ class TestIterator(unittest.TestCase):
         self.assertEqual([i.value for i in items], LETTERS)
 
 
+class TestIteratorResultRetention(unittest.TestCase):
+    """The counts are always recorded; retain_results decides whether the results themselves are."""
+
+    def test_counts_in_metadata(self):
+        wf, it = make_iterator()
+        res = it.process(ListResult(LETTERS))
+        self.assertEqual(res.metadata["processed"], len(LETTERS))
+        self.assertEqual(res.metadata["errors"], 0)
+
+    def test_errors_are_counted(self):
+        wf, it = make_iterator(settings={"continue_on_error": True})
+        # DoubleExtractor cannot multiply None, so that entry becomes an ERROR result
+        res = it.process(ListResult(["a", None, "b", None]))
+        self.assertEqual(res.metadata["processed"], 4)
+        self.assertEqual(res.metadata["errors"], 2)
+
+    def test_retain_results_false_keeps_no_entries(self):
+        wf, it = make_iterator(settings={"retain_results": False})
+        res = it.process(ListResult(LETTERS))
+        self.assertEqual(res.value, [])
+        # the steps still ran for every entry -- only their results were let go
+        self.assertEqual(res.metadata["processed"], len(LETTERS))
+
+    def test_retain_results_false_still_counts_errors(self):
+        wf, it = make_iterator(settings={"retain_results": False, "continue_on_error": True})
+        res = it.process(ListResult(["a", None, "b"]))
+        self.assertEqual(res.value, [])
+        self.assertEqual((res.metadata["processed"], res.metadata["errors"]), (3, 1))
+
+    def test_retain_results_false_with_workers(self):
+        wf, it = make_iterator(settings={"retain_results": False, "workers": 4})
+        res = it.process(ListResult(LETTERS))
+        self.assertEqual(res.value, [])
+        self.assertEqual(res.metadata["processed"], len(LETTERS))
+
+    def test_slice_iterator_counts_only_its_slice(self):
+        wf, it = make_iterator(
+            "iterator.SliceIterator", {"slice": 1, "max_slices": 5, "retain_results": False}
+        )
+        res = it.process(ListResult(LETTERS))
+        self.assertEqual(res.metadata["processed"], 2)  # b and g
+
+
 class TestSliceIterator(unittest.TestCase):
     def slice_of(self, offset, max_slices, values=LETTERS):
         wf, it = make_iterator("iterator.SliceIterator", {"slice": offset, "max_slices": max_slices})

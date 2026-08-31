@@ -22,6 +22,8 @@ dependencies = [
     "openai>=1.40.0",
     "Pillow",
     "pi-heif",
+    "psycopg[binary]",
+    "pyarrow",
     "python-dotenv",
     "requests",
     "supervision",
