@@ -8,6 +8,7 @@ Talks to the Gemini API via the ``google-genai`` client, either directly (``GEMI
 import io
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Union
@@ -33,15 +34,20 @@ class GeminiComponent(Component):
     ``ItemResult`` whose value is the parsed JSON (when ``expected_output`` is 'json') or the raw text,
     with ``token_usage``/``duration``/``type`` metadata. Authentication comes from the environment:
     ``GOOGLE_CLOUD_PROJECT`` selects Vertex AI, otherwise ``GEMINI_API_KEY``/``GOOGLE_API_KEY`` is
-    required. For Gemini 2.5 models, thinking is disabled by default (budget 0, overridable via the
-    ``thinking_budget`` setting).
+    required.
+
+    Reasoning is configured per model generation. Gemini 2.5 models take a token budget
+    (``thinking_budget``, default 0 = thinking off). Gemini 3+ models (including 3.7) replace the
+    budget with ``thinking_level`` ('low' | 'medium' | 'high', default 'low' here to keep pipeline
+    latency and cost close to the old thinking-off default -- the API's own default is 'high').
 
     Settings:
         - model: Gemini model id (default 'gemini-3.1-flash-lite-preview')
         - prompt: prompt template; supports {step_name} and {text_input_<i>} substitutions (default '')
         - expected_output: 'json' to parse the reply as JSON, anything else for raw text (default 'json')
-        - temperature: sampling temperature (default 0.4)
-        - top_p: nucleus sampling threshold (default 0.9)
+        - temperature: sampling temperature (default 0.4 for pre-3 models; for Gemini 3+ no default
+          is sent -- Google recommends the API default -- but an explicit setting is always honored)
+        - top_p: nucleus sampling threshold (same per-generation rules as temperature; default 0.9)
         - max_output_tokens: response token cap (default 8192)
         - location: Vertex AI location when using a GCP project (default 'global')
         - hate_speech_safety: HARM_CATEGORY_HATE_SPEECH threshold (default 'OFF')
@@ -49,7 +55,10 @@ class GeminiComponent(Component):
         - sexually_explicit_safety: HARM_CATEGORY_SEXUALLY_EXPLICIT threshold (default 'OFF')
         - harassment_safety: HARM_CATEGORY_HARASSMENT threshold (default 'OFF')
         - tools: tool names to enable: 'search', 'url', 'code', 'maps' (default ['search']; pass [] to disable grounding)
-        - thinking_budget: thinking-token budget for 2.5 models (default 0 = thinking off)
+        - system_instruction: standing instructions sent in the model's system slot (default: none)
+        - response_mime_type: e.g. 'application/json' to make the API guarantee JSON (default: none)
+        - thinking_budget: thinking-token budget for 2.5 models only (default 0 = thinking off)
+        - thinking_level: reasoning effort for Gemini 3+ models: 'low', 'medium' or 'high' (default 'low')
     """
 
     def __init__(self, tree, workflow, parent=None):
@@ -66,6 +75,7 @@ class GeminiComponent(Component):
 
         self.location = self.settings.get("location", "global")
         self.model = self.settings.get("model", "gemini-3.1-flash-lite-preview")
+        self.model_version = self._model_version(self.model)
         self.temperature = self.settings.get("temperature", 0.4)
         self.top_p = self.settings.get("top_p", 0.9)
         self.max_output_tokens = self.settings.get("max_output_tokens", 8192)
@@ -84,12 +94,56 @@ class GeminiComponent(Component):
             types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold=harass),
         ]
 
-        self.base_config = types.GenerateContentConfig(
-            temperature=self.temperature,
-            top_p=self.top_p,
-            max_output_tokens=self.max_output_tokens,
-            safety_settings=self.safety_settings,
-        )
+        # A system instruction is not the same thing as a longer prompt: it is
+        # the slot the model treats as standing instructions, and it is what a
+        # finetuning export preserves separately from the user turn.
+        self.system_instruction = self.settings.get("system_instruction", "") or None
+        # Ask the API itself to guarantee JSON rather than hoping the reply
+        # parses; the model may otherwise wrap it in prose or a code fence.
+        self.response_mime_type = self.settings.get("response_mime_type", "") or None
+
+        config_kwargs = {
+            "max_output_tokens": self.max_output_tokens,
+            "safety_settings": self.safety_settings,
+            "system_instruction": self.system_instruction,
+            "response_mime_type": self.response_mime_type,
+        }
+
+        # Gemini 3 models tune their own sampling and Google recommends leaving
+        # temperature at its API default, so for 3.x the knobs are sent only
+        # when the workflow explicitly sets them. An explicit setting is always
+        # honored (3.7-flash on Vertex accepts them, despite what the migration
+        # docs imply) -- a model that truly rejects them should fail loudly,
+        # never silently sample where the workflow asked for determinism.
+        if self.model_version < (3, 0):
+            config_kwargs["temperature"] = self.temperature
+            config_kwargs["top_p"] = self.top_p
+        else:
+            if "temperature" in self.settings:
+                config_kwargs["temperature"] = self.temperature
+            if "top_p" in self.settings:
+                config_kwargs["top_p"] = self.top_p
+
+        if self.model_version >= (3, 0):
+            if "thinking_budget" in self.settings and "thinking_level" not in self.settings:
+                logger.warning(
+                    "%s: %s takes `thinking_level` (low/medium/high), not `thinking_budget`; "
+                    "using the default level 'low'",
+                    self,
+                    self.model,
+                )
+            self.thinking_config = types.ThinkingConfig(
+                thinking_level=self.settings.get("thinking_level", "low")
+            )
+            config_kwargs["thinking_config"] = self.thinking_config
+        elif self.model_version == (2, 5):
+            # Default to turning off thinking, as it can go wild and ignore the budget
+            self.thinking_config = types.ThinkingConfig(
+                thinking_budget=self.settings.get("thinking_budget", 0)
+            )
+            config_kwargs["thinking_config"] = self.thinking_config
+
+        self.base_config = types.GenerateContentConfig(**config_kwargs)
 
         # Google Search grounding is on by default; disable with tools: [] or
         # pick the exact set with e.g. tools: ["search", "url"].
@@ -111,17 +165,22 @@ class GeminiComponent(Component):
 
         self.substitutions = {"ADDITIONAL_CONTEXT": ""}
 
-        if "2.5" in self.model:
-            # Default to turning off thinking, as it can go wild and ignore the budget
-            self.thinking_config = types.ThinkingConfig(
-                thinking_budget=self.settings.get("thinking_budget", 0)
-            )
-            self.base_config.thinking_config = self.thinking_config
-
         self.connect_to_client()
 
         # if telemetry:
         # self.run = task(name=name)(self.run)
+
+    @staticmethod
+    def _model_version(model: str) -> tuple:
+        """Parse the generation out of a Gemini model id: 'gemini-3.7-flash' -> (3, 7).
+
+        Ids that don't carry a version (custom endpoints, tuned models) come back as (0, 0), which
+        gets the legacy pre-Gemini-3 request shape.
+        """
+        m = re.search(r"gemini-(\d+)(?:\.(\d+))?", model)
+        if not m:
+            return (0, 0)
+        return (int(m.group(1)), int(m.group(2) or 0))
 
     def connect_to_client(self):
         """
@@ -135,19 +194,32 @@ class GeminiComponent(Component):
         else:
             self.client = genai.Client(api_key=self.api_key)
 
-    def generate_content(self, contents: Union[str, list]):
+    def request_config(self, system_instruction=None):
+        """The configured request, optionally with a per-call system instruction.
+
+        Components whose system instruction varies from call to call (a staged
+        pipeline, say) pass it here rather than rebuilding the component; when
+        it is None the configured one stands.
+        """
+        if system_instruction is None:
+            return self.base_config
+        return self.base_config.model_copy(update={"system_instruction": system_instruction})
+
+    def generate_content(self, contents: Union[str, list], system_instruction=None):
         """Synchronous wrapper for generate_content."""
         if not self.client:
             raise RuntimeError("Gemini client not initialized.")
 
-        return self.client.models.generate_content(model=self.model, contents=contents, config=self.base_config)
+        return self.client.models.generate_content(
+            model=self.model, contents=contents, config=self.request_config(system_instruction)
+        )
 
-    async def generate_content_async(self, contents: Union[str, list]):
+    async def generate_content_async(self, contents: Union[str, list], system_instruction=None):
         """Asynchronous wrapper for generate_content."""
         if not self.client:
             raise RuntimeError("Gemini client not initialized.")
         return await self.client.aio.models.generate_content(
-            model=self.model, contents=contents, config=self.base_config
+            model=self.model, contents=contents, config=self.request_config(system_instruction)
         )
 
     @staticmethod
