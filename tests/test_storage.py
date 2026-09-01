@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import shutil
@@ -11,6 +12,12 @@ from chai.result import FileItemResult, ItemResult, ListResult
 import pyarrow.parquet as pq
 
 from chai.storage import (
+    COMPUTED_FIELDS,
+    build_record,
+    content_md5,
+    correction_target,
+    input_reference,
+    result_md5,
     ParquetRecordWriter,
     PostgresStorage,
     _pg_connect,
@@ -24,6 +31,7 @@ from chai.storage import (
     parquet_to_postgres,
     postgres_params,
     save_correction,
+    save_postgres_correction,
     source_value,
 )
 from chai.workflow import Workflow
@@ -300,6 +308,119 @@ class TestJsonLinesStorage(unittest.TestCase):
         # the failure was handled by the error branch, so the iterator saw no error of its own
         self.assertEqual(res.metadata["processed"], 3)
         self.assertEqual(res.metadata["errors"], 0)
+
+
+class TestRecordFields(unittest.TestCase):
+    """The computed columns a record can carry beside the result: its input, and what it corrects."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.wf = Workflow({"id": "fields_wf", "type": "workflow.Workflow"})
+        self.provider = self.wf._make_step(
+            {"type": "provider.StaticProvider", "id": "prov", "settings": {"values": []}}, self.wf
+        )
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def file_result(self, name="page.txt", content="some page text"):
+        path = os.path.join(self.dir, name)
+        with open(path, "w") as fh:
+            fh.write(content)
+        return path, FileItemResult(path)
+
+    def test_input_uri_and_hash_come_from_the_file_a_result_was_made_from(self):
+        path, source = self.file_result()
+        transcript = ItemResult("some page text", input=source)
+        uri, digest = input_reference(transcript)
+        self.assertEqual(uri, path)
+        self.assertEqual(digest, hashlib.md5(b"some page text").hexdigest())
+
+    def test_the_uri_is_found_further_up_the_chain(self):
+        path, source = self.file_result()
+        segment = ItemResult("some page", input=source)
+        parsed = ItemResult({"words": 2}, input=segment)
+        uri, digest = input_reference(parsed)
+        self.assertEqual(uri, path)  # the file two steps back
+        self.assertEqual(digest, content_md5("some page"))  # the hash is of the immediate input
+
+    def test_the_raw_input_a_provider_was_given_counts_as_the_uri(self):
+        path, _ = self.file_result("people.csv", "name\nAda\n")
+        rows = ListResult([{"name": "Ada"}], input=path, processor=self.provider)
+        row = ItemResult({"name": "Ada"}, input=rows)
+        parsed = ItemResult({"first_name": "Ada"}, input=row)
+        uri, digest = input_reference(parsed)
+        self.assertEqual(uri, path)
+        self.assertEqual(digest, content_md5({"name": "Ada"}))
+        # a value that is not a path or a URI is content, not a location
+        self.assertIsNone(input_reference(ItemResult("x", input=ItemResult("just some text")))[0])
+        self.assertEqual(input_reference(ItemResult("x", input="https://example.org/a.json"))[0],
+                         "https://example.org/a.json")
+
+    def test_input_source_names_the_component_whose_result_is_the_input(self):
+        row = ItemResult({"name": "Ada"}, processor=self.provider)
+        name = ItemResult("Ada", input=row)
+        parsed = ItemResult({"first_name": "Ada"}, input=name)
+        self.assertEqual(input_reference(parsed)[1], content_md5("Ada"))  # the immediate input
+        self.assertEqual(input_reference(parsed, "prov")[1], content_md5({"name": "Ada"}))
+        self.assertEqual(input_reference(parsed, "no_such_component"), (None, None))
+
+    def test_no_input_means_nothing_to_record(self):
+        self.assertEqual(input_reference(ItemResult("standalone")), (None, None))
+        self.assertEqual(input_reference(ItemResult("x", input=ItemResult("y")), with_hash=False)[1], None)
+
+    def test_content_md5_does_not_depend_on_key_order(self):
+        self.assertEqual(content_md5({"a": 1, "b": 2}), content_md5({"b": 2, "a": 1}))
+        self.assertEqual(content_md5(b"bytes"), hashlib.md5(b"bytes").hexdigest())
+        self.assertEqual(content_md5("text"), hashlib.md5(b"text").hexdigest())
+        self.assertIsNone(content_md5(None))
+
+    def test_a_file_is_hashed_once_and_remembered(self):
+        path, source = self.file_result()
+        expected = hashlib.md5(b"some page text").hexdigest()
+        self.assertEqual(result_md5(source), expected)
+        os.remove(path)  # the digest is cached on the result, so it survives the file going away
+        self.assertEqual(result_md5(source), expected)
+        # and bytes a component put on the result are hashed instead of re-reading the file
+        crop = FileItemResult("/nonexistent/crop.png")
+        crop.file_bytes = b"cropped"
+        self.assertEqual(result_md5(crop), hashlib.md5(b"cropped").hexdigest())
+
+    def test_correction_target_reads_the_result_it_corrects(self):
+        original = ItemResult("first go")
+        self.assertIsNone(correction_target(original))
+        self.assertEqual(correction_target(ItemResult("fixed", extra={"corrects": original})), original.id)
+        self.assertEqual(correction_target(ItemResult("fixed", extra={"corrects": "an-id"})), "an-id")
+        self.assertEqual(correction_target(ItemResult("fixed", metadata={"corrects": "an-id"})), "an-id")
+
+    def test_build_record_computed_fields(self):
+        path, source = self.file_result()
+        original = ItemResult("frst go", input=source)
+        fixed = ItemResult("first go", input=source, extra={"corrects": original})
+        record = build_record(
+            fixed,
+            {
+                "id": "id",
+                "@record": "value_json",
+                "@input_uri": "input_uri",
+                "@input_hash": "input_hash",
+                "@corrects": "corrects_id",
+            },
+        )
+        self.assertEqual(list(record), ["id", "value_json", "input_uri", "input_hash", "corrects_id"])
+        self.assertEqual(record["value_json"]["value"], "first go")
+        self.assertEqual(record["input_uri"], path)
+        self.assertEqual(record["input_hash"], hashlib.md5(b"some page text").hexdigest())
+        self.assertEqual(record["corrects_id"], original.id)
+        self.assertEqual(record["value_json"]["extraInfo"], {"corrects": original.id})  # a Result, by id
+
+    def test_build_record_rejects_an_unknown_computed_field(self):
+        with self.assertRaises(ValueError) as caught:
+            build_record(ItemResult("x"), {"@nonsense": "col"})
+        self.assertIn("@nonsense", str(caught.exception))
+        self.assertIn("@input_uri", str(caught.exception))
+        for key in COMPUTED_FIELDS:
+            self.assertIn(key, COMPUTED_FIELDS)
 
 
 class TestParquetStorage(unittest.TestCase):
@@ -598,7 +719,7 @@ class TestSqliteStorage(unittest.TestCase):
         rows = list_results(self.db)
         self.assertEqual({r["id"] for r in rows}, {r1.id, r2.id, r3.id})
         for row in rows:
-            self.assertFalse(row["corrected"])
+            self.assertEqual(row["correction_count"], 0)
             self.assertIsNotNone(row["created_at"])
         by_proc = list_results(self.db, processor_id="comp_a")
         self.assertEqual({r["id"] for r in by_proc}, {r1.id, r2.id})
@@ -616,24 +737,61 @@ class TestSqliteStorage(unittest.TestCase):
         self.assertEqual(row["value"]["value"], "hello world")
         self.assertIsNone(get_result(self.db, "no-such-id"))
 
-    def test_save_correction(self):
+    def test_a_correction_is_an_entry_pointing_at_what_it_corrects(self):
         r1, _, _ = self.store_samples()
-        self.assertTrue(save_correction(self.db, r1.id, {"text": "hello world, corrected"}))
+        correction_id = save_correction(
+            self.db, r1.id, {"text": "hello world, corrected"}, agent="a.reviewer@example.org",
+            metadata={"reason": "typo", "agent_type": "human"},
+        )
+        self.assertIsNotNone(correction_id)
         row = get_result(self.db, r1.id)
+        self.assertEqual(row["value"]["value"], "hello world")  # the original is untouched
+        self.assertEqual(row["correction_count"], 1)
         self.assertTrue(row["corrected"])
-        self.assertEqual(row["corrected_value"], {"text": "hello world, corrected"})
-        self.assertIsNotNone(row["corrected_at"])
-        # the original value is untouched
-        self.assertEqual(row["value"]["value"], "hello world")
-        self.assertFalse(save_correction(self.db, "no-such-id", "x"))
 
-    def test_restoring_keeps_correction(self):
+        # the correction is a row of its own, with its own metadata about who made it
+        correction = row["corrections"][0]
+        self.assertEqual(correction["id"], correction_id)
+        self.assertEqual(correction["corrects_id"], r1.id)
+        self.assertEqual(correction["value"]["value"], {"text": "hello world, corrected"})
+        self.assertEqual(correction["value"]["type"], "Correction")
+        self.assertEqual(correction["value"]["input"], r1.id)  # its provenance is what it corrects
+        self.assertEqual(correction["metadata"]["agent"], "a.reviewer@example.org")
+        self.assertEqual(correction["metadata"]["reason"], "typo")
+        self.assertEqual(correction["correction_count"], 0)
+        # and it is reachable as a row in its own right, and by what it corrects
+        self.assertEqual(get_result(self.db, correction_id)["corrects_id"], r1.id)
+        self.assertEqual([c["id"] for c in list_results(self.db, corrects_id=r1.id)], [correction_id])
+        self.assertIsNone(save_correction(self.db, "no-such-id", "x"))
+
+    def test_a_result_can_be_corrected_more_than_once(self):
+        r1, _, _ = self.store_samples()
+        first = save_correction(self.db, r1.id, "fixed once", agent="reviewer")
+        second = save_correction(self.db, r1.id, "fixed again", agent="gpt-brand-x", metadata={"agent_type": "model"})
+        row = get_result(self.db, r1.id)
+        self.assertEqual(row["correction_count"], 2)
+        corrections = {c["id"]: c for c in row["corrections"]}
+        self.assertEqual(set(corrections), {first, second})
+        self.assertEqual(corrections[first]["metadata"]["agent"], "reviewer")
+        self.assertEqual(corrections[second]["metadata"], {"agent": "gpt-brand-x", "agent_type": "model"})
+        self.assertEqual(corrections[second]["value"]["value"], "fixed again")
+
+    def test_restoring_a_result_keeps_the_corrections_pointing_at_it(self):
         r1 = self.store(ItemResult("hello world"), self.comp_a)
-        save_correction(self.db, r1.id, "fixed")
+        correction_id = save_correction(self.db, r1.id, "fixed")
         self.store(r1)  # same result stored again (e.g. a re-run)
         row = get_result(self.db, r1.id)
-        self.assertTrue(row["corrected"])
-        self.assertEqual(row["corrected_value"], "fixed")
+        self.assertEqual([c["id"] for c in row["corrections"]], [correction_id])
+        self.assertEqual(row["value"]["value"], "hello world")
+
+    def test_a_correction_made_by_a_component_records_what_it_corrects(self):
+        r1, _, _ = self.store_samples()
+        # a component says what its result corrects by putting it in the result's extra
+        corrected = ItemResult("hello world, corrected", extra={"corrects": r1})
+        self.store(corrected, self.comp_a)
+        row = get_result(self.db, r1.id)
+        self.assertEqual([c["id"] for c in row["corrections"]], [corrected.id])
+        self.assertEqual(get_result(self.db, corrected.id)["corrects_id"], r1.id)
 
     def test_list_processors(self):
         self.store_samples()
@@ -656,23 +814,37 @@ class TestSqliteStorage(unittest.TestCase):
         self.assertEqual(row[1], "comp_a")
         self.assertEqual(json.loads(row[2])["value"], ["label"])
 
-    def test_upgrades_old_schema_in_place(self):
-        old_db = os.path.join(self.dir, "old.db")
-        conn = sqlite3.connect(old_db)
-        conn.execute(
-            """CREATE TABLE results (
-                id TEXT PRIMARY KEY, processor_id TEXT, workflow_id TEXT, value_json TEXT,
-                metadata_json TEXT, extra_json TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )"""
+    def test_rows_record_the_input_they_were_generated_from(self):
+        path = os.path.join(self.dir, "page.txt")
+        with open(path, "w") as fh:
+            fh.write("some page text")
+        source = FileItemResult(path)
+        transcript = ItemResult("some page text", input=source)
+        self.store(transcript, self.comp_a)
+        row = get_result(self.db, transcript.id)
+        self.assertEqual(row["input_uri"], path)
+        self.assertEqual(row["input_hash"], hashlib.md5(b"some page text").hexdigest())
+        # every entry made from the same input can be found by its hash
+        self.assertEqual([r["id"] for r in list_results(self.db, input_hash=row["input_hash"])], [transcript.id])
+
+    def test_a_result_with_no_input_has_nothing_to_record(self):
+        res = self.store(ItemResult("standalone"), self.comp_a)
+        row = get_result(self.db, res.id)
+        self.assertIsNone(row["input_uri"])
+        self.assertIsNone(row["input_hash"])
+
+    def test_hash_input_false_skips_the_digest(self):
+        path = os.path.join(self.dir, "page.txt")
+        with open(path, "w") as fh:
+            fh.write("some page text")
+        storage = self.wf._make_step(
+            {"type": "storage.SqliteStorage", "settings": {"database": self.db, "hash_input": False}}, self.wf
         )
-        conn.execute("INSERT INTO results (id, processor_id, value_json) VALUES ('old1', 'p1', '\"hi\"')")
-        conn.commit()
-        conn.close()
-        rows = list_results(old_db)  # must ALTER in the correction columns without complaint
-        self.assertEqual(rows[0]["id"], "old1")
-        self.assertFalse(rows[0]["corrected"])
-        self.assertTrue(save_correction(old_db, "old1", "hi there"))
-        self.assertEqual(get_result(old_db, "old1")["corrected_value"], "hi there")
+        res = ItemResult("some page text", input=FileItemResult(path))
+        storage.process(res)
+        row = get_result(self.db, res.id)
+        self.assertEqual(row["input_uri"], path)  # the path is free; the digest is the part that costs
+        self.assertIsNone(row["input_hash"])
 
 
 def postgres_available():
@@ -764,16 +936,21 @@ class TestPostgresStorage(unittest.TestCase):
         res = ItemResult("first", processor=self.comp_a)
         storage.process(res)
         created = self.query(f"SELECT created_at FROM {self.table}")[0][0]
-        self.execute(
-            f"UPDATE {self.table} SET corrected_value_json = %s::jsonb WHERE id = %s", ('"fixed"', res.id)
+        correction_id = save_postgres_correction(
+            res.id, "fixed", agent="a.reviewer@example.org", params=self.params, table=self.table
         )
         res.value = "second"
         storage.process(res)
-        rows = self.query(f"SELECT value_json, corrected_value_json, created_at FROM {self.table}")
+        rows = self.query(f"SELECT value_json, created_at FROM {self.table} WHERE id = %s", (res.id,))
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0][0]["value"], "second")
-        self.assertEqual(rows[0][1], "fixed")  # a human correction survives the result being re-stored
-        self.assertEqual(rows[0][2], created)
+        self.assertEqual(rows[0][1], created)
+        # the correction is its own row and still points at the result that was re-stored
+        corrections = self.query(
+            f"SELECT id, corrects_id, metadata_json FROM {self.table} WHERE corrects_id = %s", (res.id,)
+        )
+        self.assertEqual(corrections[0][0], correction_id)
+        self.assertEqual(corrections[0][2]["agent"], "a.reviewer@example.org")
 
     def test_derivatives_are_stored_against_their_source(self):
         storage = self.make_storage()
@@ -798,9 +975,12 @@ class TestPostgresStorage(unittest.TestCase):
             "id": "id",
             "processorId": "processor_id",
             "workflowId": "workflow_id",
-            "*": "value_json",
+            "@record": "value_json",
             "metadata": "metadata_json",
             "extraInfo": "extra_json",
+            "@input_uri": "input_uri",
+            "@input_hash": "input_hash",
+            "@corrects": "corrects_id",
         }
         parquet_schema = {
             "id": "string",
@@ -809,6 +989,9 @@ class TestPostgresStorage(unittest.TestCase):
             "value_json": "json",
             "metadata_json": "json",
             "extra_json": "json",
+            "input_uri": "string",
+            "input_hash": "string",
+            "corrects_id": "string",
         }
         tree = {
             "id": "pg_run_wf",
@@ -858,7 +1041,14 @@ class TestPostgresStorage(unittest.TestCase):
         ensure_postgres_schema(self.params, table=self.loaded_table)
         info = parquet_to_postgres(self.out, self.loaded_table, self.params)
         self.assertEqual(info["rows"], 6)
-        columns = "id, processor_id, workflow_id, value_json, metadata_json, extra_json"
+        # the run's rows say what they were made from: the CSV, and the md5 of the row itself
+        uris = self.query(f"SELECT DISTINCT input_uri FROM {self.table}")
+        self.assertEqual(uris, [(csv_path,)])
+        self.assertEqual(self.query(f"SELECT count(DISTINCT input_hash) FROM {self.table}")[0][0], 6)
+        columns = (
+            "id, processor_id, workflow_id, value_json, metadata_json, extra_json, "
+            "input_uri, input_hash, corrects_id"
+        )
         self.assertEqual(self.query(f"SELECT count(*) FROM {self.table}")[0][0], 6)
         self.assertEqual(self.query(f"SELECT count(*) FROM {self.loaded_table}")[0][0], 6)
         # what one route stored and the other loaded is the same set of rows, both ways round

@@ -17,6 +17,7 @@ is the load step for PostgreSQL, putting a run's file into a table there, and ``
 """
 
 import atexit
+import hashlib
 import logging
 import os
 import re
@@ -35,9 +36,17 @@ logger = logging.getLogger("chai")
 
 
 def _json_safe(value):
-    """Recursively replace bytes with a ``{"__bytes__": <len>}`` placeholder so *value* JSON-encodes."""
+    """Recursively make *value* JSON-encodable: bytes become a placeholder, Results become their id.
+
+    A Result found in a value, in metadata or in ``extra`` (``extra['corrects']``, say, naming the
+    result this one corrects) is stored as its id, the way ``result_to_json`` stores an input -- so
+    one result referring to another never drags the whole object graph into the row, or fails to
+    encode at all.
+    """
     if isinstance(value, bytes):
         return {"__bytes__": len(value)}
+    if isinstance(value, Result):
+        return value.id
     if isinstance(value, dict):
         return {k: _json_safe(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
@@ -95,37 +104,193 @@ def source_value(result: Result, component_id: str):
     Note that an ``Iterator`` stamps itself onto each entry it processes, so the entry a step ran on
     is found under the *iterator's* id rather than that of the component that first made it.
     """
-    while isinstance(result, Result):
-        processor = result.processor
+    found = _source_result(result, component_id)
+    if found is None:
+        return None
+    if isinstance(found, FileItemResult):
+        return found.file_name
+    return found.value
+
+
+_URI_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+
+_FILE_HASHES = {}
+_file_hash_guard = threading.Lock()
+
+
+def _file_md5(path):
+    """The md5 of a file's content, remembered while the file's size and mtime stay the same.
+
+    A run stores one result per page, per row or per crop of the same file, so the file is read and
+    hashed once rather than once per result.
+    """
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    key = (path, stat.st_size, stat.st_mtime_ns)
+    with _file_hash_guard:
+        digest = _FILE_HASHES.get(key)
+    if digest is not None:
+        return digest
+    digest = hashlib.md5()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    digest = digest.hexdigest()
+    with _file_hash_guard:
+        if len(_FILE_HASHES) >= 4096:  # a long run over many files should not grow without bound
+            _FILE_HASHES.clear()
+        _FILE_HASHES[key] = digest
+    return digest
+
+
+def content_md5(value):
+    """The md5 of *value*'s content: bytes as they are, text as UTF-8, anything else as sorted JSON.
+
+    Sorting the keys makes the digest of a dict (a CSV row, a parsed record) independent of the order
+    its keys happen to be in, so the same content always hashes the same way.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return hashlib.md5(value).hexdigest()
+    if not isinstance(value, str):
+        value = json.dumps(_json_safe(value), sort_keys=True, ensure_ascii=False)
+    return hashlib.md5(value.encode("utf-8")).hexdigest()
+
+
+def result_md5(value):
+    """The md5 of the content *value* holds -- a ``Result``, a file path or a plain value.
+
+    A ``FileItemResult`` hashes the file (or the bytes it is carrying), a path names its file's
+    content, and any other Result hashes its value. The digest is remembered on the Result, so a
+    result derived from the same input by several steps is only hashed once.
+    """
+    if isinstance(value, Result):
+        cached = getattr(value, "_content_md5", None)
+        if cached:
+            return cached
+        if isinstance(value, FileItemResult):
+            digest = content_md5(value.file_bytes) if value.file_bytes else _file_md5(value.file_name)
+        else:
+            digest = content_md5(value.value)
+        try:
+            value._content_md5 = digest
+        except AttributeError:  # pragma: no cover - Results are ordinary objects
+            pass
+        return digest
+    if isinstance(value, str) and os.path.isfile(value):
+        return _file_md5(value)
+    return content_md5(value)
+
+
+def _source_result(result: Result, component_id: str):
+    """The nearest result in *result*'s provenance chain that component *component_id* produced."""
+    for node in _provenance(result):
+        processor = node.processor
         if processor is not None and getattr(processor, "id", None) == component_id:
-            if isinstance(result, FileItemResult):
-                return result.file_name
-            return result.value
-        result = result.input
+            return node
     return None
 
 
-def build_record(result: Result, fields=None, sources=None):
+def _provenance(result):
+    """Yield *result* and each Result up its ``input`` chain, stopping if the chain loops back."""
+    seen = set()
+    while isinstance(result, Result) and id(result) not in seen:
+        seen.add(id(result))
+        yield result
+        result = result.input
+
+
+def _uri_for(node):
+    """Walk *node*'s provenance chain for the file or URI it came from, or ``None`` if there is none."""
+    last = None
+    for last in _provenance(node):
+        if isinstance(last, FileItemResult) and last.file_name:
+            return last.file_name
+    # The end of the chain is the raw input a provider was given: a path or a URI, but not text
+    raw = last.input if isinstance(last, Result) else node
+    if isinstance(raw, str) and (_URI_SCHEME.match(raw) or os.path.exists(raw)):
+        return raw
+    return None
+
+
+def input_reference(result: Result, source_id=None, with_hash=True):
+    """``(input_uri, input_hash)`` for the input *result* was generated from.
+
+    The URI is the file or URI nearest in the provenance chain -- the image a transcription was made
+    from, the CSV a row was read from -- and the hash is the md5 of that input's content, so rows
+    produced from the same input can be found together whatever the run or the file name. *source_id*
+    names the component whose result counts as the input; without it the input is the result's
+    immediate ``input``. *with_hash* false skips the digest (and any file read it would need).
+    """
+    if source_id:
+        source = _source_result(result, source_id)
+        start = source
+    else:
+        source = result.input if isinstance(result, Result) else None
+        start = result
+    return _uri_for(start), (result_md5(source) if with_hash else None)
+
+
+def correction_target(result: Result):
+    """The id of the result *result* corrects, or ``None`` when it is not a correction.
+
+    A component that produces a corrected version of an earlier result says so by putting that
+    result (or its id) in the new result's ``extra['corrects']`` -- ``metadata['corrects']`` is read
+    too -- and the storages record it in the ``corrects_id`` column, which is what makes the
+    correction an entry in its own right rather than an overwrite of the original.
+    """
+    for holder in (getattr(result, "extra", None), getattr(result, "metadata", None)):
+        if isinstance(holder, dict) and holder.get("corrects"):
+            target = holder["corrects"]
+            return target.id if isinstance(target, Result) else str(target)
+    return None
+
+
+#: Keys usable in a record's ``fields`` that are computed from the result rather than read off its
+#: JSON -- the columns the tabular storages fill in beside the result itself.
+COMPUTED_FIELDS = ("@record", "@input_uri", "@input_hash", "@corrects")
+
+
+def build_record(result: Result, fields=None, sources=None, input_source=None):
     """The flat, JSON-safe record for *result*: its selected fields plus any configured sources.
 
     Shared by the storage components that write one record per result (``JsonLinesStorage``,
     ``ParquetStorage``) so a run can be streamed to JSON-Lines or packed into Parquet with the same
     columns. *fields* selects keys of the ``result_to_json`` representation -- a list to keep them as
-    they are, a ``{key: name}`` dict to keep and rename them (with ``"*"`` as the key naming a column
-    that holds the whole result JSON); ``None`` keeps all of them. *sources* is
-    a ``{key: component id}`` dict, each recording the value of the nearest ancestor result that
-    component produced (see ``source_value``).
+    they are, a ``{key: name}`` dict to keep and rename them; ``None`` keeps all of them.
+
+    In the dict form a key may also be one of the computed ``COMPUTED_FIELDS``, which is how a record
+    can carry the same columns ``SqliteStorage`` and ``PostgresStorage`` write:
+
+    * ``@record`` -- the whole result JSON (their ``value_json``)
+    * ``@input_uri`` / ``@input_hash`` -- the file or URI the entry was generated from and the md5 of
+      that input's content (see ``input_reference``; *input_source* names the component whose result
+      counts as the input)
+    * ``@corrects`` -- the id of the result this one corrects (see ``correction_target``)
+
+    *sources* is a ``{key: component id}`` dict, each recording the value of the nearest ancestor
+    result that component produced (see ``source_value``).
     """
     whole = result_to_json(result)
     js = whole
     if fields:
         if isinstance(fields, dict):
-            # "*" names a column holding the whole result JSON -- what SqliteStorage and
-            # PostgresStorage put in value_json, so a record can carry the same thing
+            computed = {"@record": whole}
+            if "@input_uri" in fields or "@input_hash" in fields:
+                uri, digest = input_reference(result, input_source, with_hash="@input_hash" in fields)
+                computed["@input_uri"] = uri
+                computed["@input_hash"] = digest
+            if "@corrects" in fields:
+                computed["@corrects"] = correction_target(result)
             js = {}
             for key, name in fields.items():
-                if key == "*":
-                    js[name] = whole
+                if key.startswith("@"):
+                    if key not in COMPUTED_FIELDS:
+                        raise ValueError(f"Unknown computed field {key!r}; use one of {', '.join(COMPUTED_FIELDS)}")
+                    js[name] = computed[key]
                 elif key in whole:
                     js[name] = whole[key]
         else:
@@ -319,12 +484,15 @@ class JsonLinesStorage(Storage):
         - mode: 'append' (default) adds to whatever the file already holds; 'truncate' empties it
           when the component is built, so re-running replaces the previous run's lines
         - fields: which parts of the result JSON to record -- a list of keys to keep, or a
-          ``{key: name}`` dict that keeps and renames them, in which ``"*"`` as a key names a column
-          holding the whole result JSON (default: the whole result JSON split into its own columns,
-          i.e. id, type, workflowId, processorId, metadata, extraInfo, input and value)
+          ``{key: name}`` dict that keeps and renames them, in which a key from ``COMPUTED_FIELDS``
+          (``@record``, ``@input_uri``, ``@input_hash``, ``@corrects``) names a column computed from
+          the result rather than read off its JSON (default: the whole result JSON split into its own
+          columns, i.e. id, type, workflowId, processorId, metadata, extraInfo, input and value)
         - sources: ``{key: component id}`` dict; for each entry, the value of the nearest ancestor
           result that component produced is recorded under *key* (see ``source_value``). This is how
           a line can carry the input it was derived from next to the value derived from it
+        - input_source: component id whose result counts as the input for ``@input_uri``/
+          ``@input_hash`` (default: the result's immediate input)
     """
 
     def __init__(self, tree, workflow, parent=None):
@@ -344,7 +512,12 @@ class JsonLinesStorage(Storage):
 
     def build_json(self, input: Result):
         """The record for one line: the selected result fields plus any configured source values."""
-        return build_record(input, self.settings.get("fields", None), self.settings.get("sources", None))
+        return build_record(
+            input,
+            self.settings.get("fields", None),
+            self.settings.get("sources", None),
+            self.settings.get("input_source", None),
+        )
 
     def _process(self, input: Result) -> Result:
         """Append the result to the JSON-Lines file, then pass it through unchanged."""
@@ -532,11 +705,14 @@ class ParquetStorage(Storage):
           string, json, int, float, bool, timestamp. Columns not listed are inferred; listed columns
           missing from the data become null columns, so every run yields the same table
         - fields: which parts of the result JSON to record -- a list of keys to keep, or a
-          ``{key: name}`` dict that keeps and renames them, in which ``"*"`` as a key names a column
-          holding the whole result JSON (default: the whole result JSON split into its own columns,
-          i.e. id, type, workflowId, processorId, metadata, extraInfo, input and value)
+          ``{key: name}`` dict that keeps and renames them, in which a key from ``COMPUTED_FIELDS``
+          (``@record``, ``@input_uri``, ``@input_hash``, ``@corrects``) names a column computed from
+          the result rather than read off its JSON (default: the whole result JSON split into its own
+          columns, i.e. id, type, workflowId, processorId, metadata, extraInfo, input and value)
         - sources: ``{column: component id}`` dict; for each entry, the value of the nearest ancestor
           result that component produced is recorded in that column (see ``source_value``)
+        - input_source: component id whose result counts as the input for ``@input_uri``/
+          ``@input_hash`` (default: the result's immediate input)
         - null_if_empty: write an empty dict, list or string as null rather than as ``{}``/``[]``/``""``
           (default false) -- which is what a table that treats "nothing here" as NULL wants, and what
           ``SqliteStorage`` and ``PostgresStorage`` do with an empty ``metadata``
@@ -594,7 +770,9 @@ class ParquetStorage(Storage):
 
     def build_json(self, input: Result):
         """The row for one result: the selected result fields, the constants and the run columns."""
-        js = build_record(input, self.settings.get("fields"), self.settings.get("sources"))
+        js = build_record(
+            input, self.settings.get("fields"), self.settings.get("sources"), self.settings.get("input_source")
+        )
         if self.settings.get("null_if_empty"):
             js = {column: (None if value in ({}, [], "") else value) for column, value in js.items()}
         for column, value in (self.settings.get("constants") or {}).items():
@@ -794,7 +972,12 @@ def ensure_postgres_database(params=None, **overrides):
 
 
 def _pg_ensure_schema(conn, table="results", derivatives_table=None):
-    """Create the results/derivatives tables and their indexes in PostgreSQL if they are missing."""
+    """Create the results/derivatives tables and their indexes in PostgreSQL if they are missing.
+
+    The same tabular shape ``_ensure_schema`` builds for SQLite, with ``jsonb`` for the JSON columns.
+    There is no migration from earlier layouts -- a database from before a schema change is dropped
+    and rebuilt.
+    """
     table = _pg_identifier(table)
     derivatives = _pg_identifier(derivatives_table or f"{table}_derivatives")
     cursor = conn.cursor()
@@ -806,8 +989,9 @@ def _pg_ensure_schema(conn, table="results", derivatives_table=None):
             value_json JSONB,
             metadata_json JSONB,
             extra_json JSONB,
-            corrected_value_json JSONB,
-            corrected_at TIMESTAMPTZ,
+            input_uri TEXT,
+            input_hash TEXT,
+            corrects_id TEXT,
             created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -820,11 +1004,10 @@ def _pg_ensure_schema(conn, table="results", derivatives_table=None):
             created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # Bring a database made before the correction columns existed up to date
-    for column, coltype in (("corrected_value_json", "JSONB"), ("corrected_at", "TIMESTAMPTZ")):
-        cursor.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {coltype}")
     cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_processor ON {table}(processor_id)")
     cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_workflow ON {table}(workflow_id)")
+    cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_corrects ON {table}(corrects_id)")
+    cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_input_hash ON {table}(input_hash)")
     cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{derivatives}_source ON {derivatives}(source_id)")
     conn.commit()
     return table, derivatives
@@ -852,13 +1035,16 @@ class PostgresStorage(Storage):
     Writes the input Result into a ``results`` table and each of its ``derivative_results`` into a
     ``results_derivatives`` table keyed by source result and component. ``value_json`` holds the full
     bytes-safe ``to_json(recurse=False)`` representation (id, type, value, metadata, provenance), with
-    ``metadata_json``/``extra_json`` as dedicated columns for querying and the nullable
-    ``corrected_value_json``/``corrected_at`` columns for human corrections -- the JSON columns are
-    ``jsonb``, so they can be indexed and queried in place. The ``processor_id``/``workflow_id``
-    columns are the ones in ``value_json``, so a result made by a component of a workflow counts as
-    that workflow's even when nothing stamped the workflow onto the result itself. Storing a result
-    again is an upsert that keeps any correction and the original ``created_at``. The input is
-    returned unchanged.
+    ``metadata_json``/``extra_json`` as dedicated columns for querying -- the JSON columns are
+    ``jsonb``, so they can be indexed and queried in place. ``input_uri`` and ``input_hash`` record
+    the file or URI the result was generated from and the md5 of that input's content, and
+    ``corrects_id`` points at the row this result corrects, if it is a correction of one (see
+    ``correction_target`` and ``save_correction``) -- corrections are entries in the table like any
+    other, so the agent that made one, human or model, is described by that entry's own metadata. The
+    ``processor_id``/``workflow_id`` columns are the ones in ``value_json``, so a result made by a
+    component of a workflow counts as that workflow's even when nothing stamped the workflow onto the
+    result itself. Storing a result again is an upsert that keeps the original ``created_at`` and the
+    rows correcting it. The input is returned unchanged.
 
     The database and the tables are created on first use if they are missing, so a workflow can be
     pointed at a fresh server. One connection is held per component and shared by the run's threads
@@ -875,6 +1061,10 @@ class PostgresStorage(Storage):
         - table: name of the results table (default 'results')
         - derivatives_table: name of the derivatives table (default '<table>_derivatives')
         - create_database: create the database if the server does not have it yet (default true)
+        - input_source: component id whose result counts as the input the row was generated from
+          (default: the result's immediate input)
+        - hash_input: fill in ``input_hash`` (default true); false skips the digest, and any file
+          read it would need
     """
 
     def __init__(self, tree, workflow, parent=None):
@@ -923,17 +1113,24 @@ class PostgresStorage(Storage):
         # The dedicated columns come out of the stored JSON, so a row cannot say one thing in
         # value_json and another in the column a query filters on
         js = self.build_json(input)
+        input_uri, input_hash = input_reference(
+            input, self.settings.get("input_source"), self.settings.get("hash_input", True)
+        )
         cursor.execute(
             f"""
             INSERT INTO {self.table}
-            (id, processor_id, workflow_id, value_json, metadata_json, extra_json)
-            VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb)
+            (id, processor_id, workflow_id, value_json, metadata_json, extra_json,
+             input_uri, input_hash, corrects_id)
+            VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s, %s)
             ON CONFLICT (id) DO UPDATE SET
                 processor_id = excluded.processor_id,
                 workflow_id = excluded.workflow_id,
                 value_json = excluded.value_json,
                 metadata_json = excluded.metadata_json,
-                extra_json = excluded.extra_json
+                extra_json = excluded.extra_json,
+                input_uri = excluded.input_uri,
+                input_hash = excluded.input_hash,
+                corrects_id = excluded.corrects_id
             """,
             (
                 input.id,
@@ -942,6 +1139,9 @@ class PostgresStorage(Storage):
                 json.dumps(js),
                 json.dumps(_json_safe(input.metadata)) if input.metadata else None,
                 json.dumps(_json_safe(input.extra)) if input.extra else None,
+                input_uri,
+                input_hash,
+                correction_target(input),
             ),
         )
         for component, results in input.derivative_results.items():
@@ -976,6 +1176,62 @@ class PostgresStorage(Storage):
                     pass
                 self._store(input)
         return input
+
+
+def save_postgres_correction(
+    result_id,
+    corrected_value,
+    agent=None,
+    metadata=None,
+    processor_id=None,
+    params=None,
+    table="results",
+    **overrides,
+):
+    """Record a correction of *result_id* in PostgreSQL as a new row pointing back at it.
+
+    The PostgreSQL counterpart of ``save_correction``: the original row is never touched, the
+    correction is an entry of its own whose ``corrects_id`` is the corrected row and whose metadata
+    says who made it -- *agent* (the person or model, recorded as ``metadata['agent']``) plus
+    anything else in *metadata*. The correction inherits the original's ``input_uri``/``input_hash``.
+    Returns the new row's id, or ``None`` if *result_id* is not in the table.
+    """
+    table = _pg_identifier(table)
+    conn = _pg_connect(postgres_params(params, **overrides))
+    try:
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT workflow_id, input_uri, input_hash FROM {table} WHERE id = %s", (result_id,))
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        workflow_id, input_uri, input_hash = row
+        metadata = dict(metadata or {})
+        if agent is not None:
+            metadata.setdefault("agent", agent)
+        correction_id, value_json = correction_json(
+            result_id, corrected_value, metadata=metadata, processor_id=processor_id, workflow_id=workflow_id
+        )
+        cursor.execute(
+            f"""
+            INSERT INTO {table}
+            (id, processor_id, workflow_id, value_json, metadata_json, input_uri, input_hash, corrects_id)
+            VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s)
+            """,
+            (
+                correction_id,
+                processor_id,
+                workflow_id,
+                json.dumps(value_json),
+                json.dumps(_json_safe(metadata)) if metadata else None,
+                input_uri,
+                input_hash,
+                result_id,
+            ),
+        )
+        conn.commit()
+        return correction_id
+    finally:
+        conn.close()
 
 
 _PG_TYPES = {
@@ -1101,7 +1357,13 @@ def _pg_copy_rows(cursor, table, quoted, names, records, kinds):
 
 
 def _ensure_schema(conn):
-    """Create the ``results``/``derivatives`` tables and indexes if missing; add new columns to old DBs."""
+    """Create the ``results``/``derivatives`` tables and their indexes if they are missing.
+
+    The results table is the tabular shape both SQLite and PostgreSQL storage use: one row per
+    result, ``input_uri``/``input_hash`` saying what it was generated from, and ``corrects_id``
+    pointing at the row this one corrects (see ``save_correction``). There is no migration from
+    earlier layouts -- a database from before a schema change is deleted and rebuilt.
+    """
     cursor = conn.cursor()
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS results (
@@ -1111,9 +1373,12 @@ def _ensure_schema(conn):
             value_json TEXT,
             metadata_json TEXT,
             extra_json TEXT,
-            corrected_value_json TEXT,
-            corrected_at TIMESTAMP,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            input_uri TEXT,
+            input_hash TEXT,
+            corrects_id TEXT,
+            -- millisecond resolution, so results (and the corrections of one) sort in the order
+            -- they were made rather than tying on the second
+            created_at TIMESTAMP DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now'))
         )
     """)
     cursor.execute("""
@@ -1125,17 +1390,10 @@ def _ensure_schema(conn):
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
-    # Upgrade pre-correction databases in place; the ALTERs fail harmlessly once the columns exist
-    for ddl in (
-        "ALTER TABLE results ADD COLUMN corrected_value_json TEXT",
-        "ALTER TABLE results ADD COLUMN corrected_at TIMESTAMP",
-    ):
-        try:
-            cursor.execute(ddl)
-        except sqlite3.OperationalError:
-            pass
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_results_processor ON results(processor_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_results_workflow ON results(workflow_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_results_corrects ON results(corrects_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_results_input_hash ON results(input_hash)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_derivatives_source ON derivatives(source_id)")
     conn.commit()
 
@@ -1160,18 +1418,23 @@ def _loads(text):
 
 def _row_to_dict(row):
     """Convert a ``results`` row into the dict shape returned by the viewer helpers."""
-    return {
+    keys = row.keys()
+    js = {
         "id": row["id"],
         "processor_id": row["processor_id"],
         "workflow_id": row["workflow_id"],
         "value": _loads(row["value_json"]),
         "metadata": _loads(row["metadata_json"]),
         "extra": _loads(row["extra_json"]),
-        "corrected": row["corrected_value_json"] is not None,
-        "corrected_value": _loads(row["corrected_value_json"]),
-        "corrected_at": row["corrected_at"],
+        "input_uri": row["input_uri"],
+        "input_hash": row["input_hash"],
+        "corrects_id": row["corrects_id"],
         "created_at": row["created_at"],
     }
+    if "correction_count" in keys:
+        js["correction_count"] = row["correction_count"]
+        js["corrected"] = row["correction_count"] > 0
+    return js
 
 
 def ensure_database(database):
@@ -1186,25 +1449,39 @@ def ensure_database(database):
     return database
 
 
-def store_json_result(database, result_id, value, processor_id=None, workflow_id=None, metadata=None):
+def store_json_result(
+    database,
+    result_id,
+    value,
+    processor_id=None,
+    workflow_id=None,
+    metadata=None,
+    input_uri=None,
+    input_hash=None,
+    corrects_id=None,
+):
     """Insert/refresh one result row from already-serialized JSON values.
 
     The viewer-side counterpart of ``SqliteStorage._process`` for callers that hold a run's
     serialized output (dicts) rather than live ``Result`` objects -- e.g. a front-end persisting
-    run results into its app-local database. Re-storing keeps any human correction and the
-    original ``created_at``.
+    run results into its app-local database. Re-storing a result keeps its original ``created_at``
+    and leaves any correction rows pointing at it untouched.
     """
     conn = _connect(database)
     try:
         conn.execute(
             """
-            INSERT INTO results (id, processor_id, workflow_id, value_json, metadata_json)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO results
+            (id, processor_id, workflow_id, value_json, metadata_json, input_uri, input_hash, corrects_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 processor_id = excluded.processor_id,
                 workflow_id = excluded.workflow_id,
                 value_json = excluded.value_json,
-                metadata_json = excluded.metadata_json
+                metadata_json = excluded.metadata_json,
+                input_uri = excluded.input_uri,
+                input_hash = excluded.input_hash,
+                corrects_id = excluded.corrects_id
             """,
             (
                 result_id,
@@ -1212,6 +1489,9 @@ def store_json_result(database, result_id, value, processor_id=None, workflow_id
                 workflow_id,
                 json.dumps(_json_safe(value)),
                 json.dumps(_json_safe(metadata)) if metadata else None,
+                input_uri,
+                input_hash,
+                corrects_id,
             ),
         )
         conn.commit()
@@ -1220,24 +1500,38 @@ def store_json_result(database, result_id, value, processor_id=None, workflow_id
     return True
 
 
-def list_results(database, processor_id=None, workflow_id=None, limit=100, offset=0):
+#: Every results column plus the number of rows correcting each one, for the viewer helpers.
+_RESULTS_SELECT = (
+    "SELECT r.*, (SELECT COUNT(*) FROM results c WHERE c.corrects_id = r.id) AS correction_count FROM results r"
+)
+
+
+def list_results(
+    database, processor_id=None, workflow_id=None, input_hash=None, corrects_id=None, limit=100, offset=0
+):
     """Return stored results as a list of dicts, newest first.
 
     Each dict has ``id``, ``processor_id``, ``workflow_id``, ``value`` (parsed JSON), ``metadata``,
-    ``extra``, ``corrected`` (bool), ``corrected_value``, ``corrected_at`` and ``created_at``.
-    Optionally filter by *processor_id* and/or *workflow_id*; page with *limit*/*offset*.
+    ``extra``, ``input_uri``, ``input_hash``, ``corrects_id``, ``created_at``, and the
+    ``correction_count``/``corrected`` pair saying how many rows correct this one. Corrections are
+    rows like any other, so they are listed too; pass *corrects_id* to list only the corrections of
+    one result, or *input_hash* for every entry generated from the same input content. Optionally
+    filter by *processor_id* and/or *workflow_id*; page with *limit*/*offset*.
     """
-    sql = "SELECT * FROM results"
+    sql = _RESULTS_SELECT
     clauses, params = [], []
-    if processor_id is not None:
-        clauses.append("processor_id = ?")
-        params.append(processor_id)
-    if workflow_id is not None:
-        clauses.append("workflow_id = ?")
-        params.append(workflow_id)
+    for column, value in (
+        ("processor_id", processor_id),
+        ("workflow_id", workflow_id),
+        ("input_hash", input_hash),
+        ("corrects_id", corrects_id),
+    ):
+        if value is not None:
+            clauses.append(f"r.{column} = ?")
+            params.append(value)
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
-    sql += " ORDER BY created_at DESC, id LIMIT ? OFFSET ?"
+    sql += " ORDER BY r.created_at DESC, r.id LIMIT ? OFFSET ?"
     params.extend([limit, offset])
     conn = _connect(database)
     try:
@@ -1247,30 +1541,90 @@ def list_results(database, processor_id=None, workflow_id=None, limit=100, offse
         conn.close()
 
 
-def get_result(database, result_id):
-    """Return a single stored result as a dict (see ``list_results``), or ``None`` if not found."""
+def get_result(database, result_id, with_corrections=True):
+    """Return a single stored result as a dict (see ``list_results``), or ``None`` if not found.
+
+    Unless *with_corrections* is false the dict also has ``corrections``: the rows that correct this
+    one, oldest first, each carrying the metadata of whoever made it.
+    """
     conn = _connect(database)
     try:
-        row = conn.execute("SELECT * FROM results WHERE id = ?", (result_id,)).fetchone()
-        return _row_to_dict(row) if row is not None else None
+        row = conn.execute(f"{_RESULTS_SELECT} WHERE r.id = ?", (result_id,)).fetchone()
+        if row is None:
+            return None
+        js = _row_to_dict(row)
+        if with_corrections:
+            corrections = conn.execute(
+                f"{_RESULTS_SELECT} WHERE r.corrects_id = ? ORDER BY r.created_at, r.id", (result_id,)
+            ).fetchall()
+            js["corrections"] = [_row_to_dict(correction) for correction in corrections]
+        return js
     finally:
         conn.close()
 
 
-def save_correction(database, result_id, corrected_value):
-    """Store a human-corrected value for *result_id* alongside the original.
+def correction_json(result_id, corrected_value, metadata=None, processor_id=None, workflow_id=None):
+    """The ``(id, value_json)`` pair for a correction of *result_id*, shaped like a stored result.
 
-    The value is JSON-encoded into ``corrected_value_json`` (bytes-safe) and ``corrected_at`` is set
-    to the current time. Returns ``True`` if a row was updated, ``False`` if the id is unknown.
+    A correction is an entry in its own right: its ``input`` is the result it corrects, its ``value``
+    is what that result should have said, and its ``metadata`` says who made it -- so the shape a
+    viewer reads for a result works unchanged for a correction of one.
+    """
+    correction_id = str(uuid.uuid4())
+    return correction_id, {
+        "id": correction_id,
+        "type": "Correction",
+        "workflowId": workflow_id,
+        "processorId": processor_id,
+        "metadata": _json_safe(metadata or {}),
+        "extraInfo": {"corrects": result_id},
+        "input": result_id,
+        "value": _json_safe(corrected_value),
+    }
+
+
+def save_correction(database, result_id, corrected_value, agent=None, metadata=None, processor_id=None):
+    """Record a correction of *result_id* as a new row pointing back at it; returns the new row's id.
+
+    The original is never touched: the correction is stored as its own entry whose ``corrects_id`` is
+    the corrected row, so a result can be corrected more than once and each correction keeps its own
+    metadata -- *agent* (the person or model that made it, recorded as ``metadata['agent']``) and
+    anything else in *metadata*, e.g. who reviewed it, why, or which model and prompt produced it.
+    The correction inherits the original's ``input_uri``/``input_hash``, since it is a correction of
+    what was made from that same input. Returns ``None`` if *result_id* is not in the database.
     """
     conn = _connect(database)
     try:
-        cursor = conn.execute(
-            "UPDATE results SET corrected_value_json = ?, corrected_at = CURRENT_TIMESTAMP WHERE id = ?",
-            (json.dumps(_json_safe(corrected_value)), result_id),
+        row = conn.execute(
+            "SELECT workflow_id, input_uri, input_hash FROM results WHERE id = ?", (result_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        metadata = dict(metadata or {})
+        if agent is not None:
+            metadata.setdefault("agent", agent)
+        correction_id, value_json = correction_json(
+            result_id, corrected_value, metadata=metadata, processor_id=processor_id, workflow_id=row["workflow_id"]
+        )
+        conn.execute(
+            """
+            INSERT INTO results
+            (id, processor_id, workflow_id, value_json, metadata_json, input_uri, input_hash, corrects_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                correction_id,
+                processor_id,
+                row["workflow_id"],
+                json.dumps(value_json),
+                json.dumps(_json_safe(metadata)) if metadata else None,
+                row["input_uri"],
+                row["input_hash"],
+                result_id,
+            ),
         )
         conn.commit()
-        return cursor.rowcount > 0
+        return correction_id
     finally:
         conn.close()
 
@@ -1297,13 +1651,20 @@ class SqliteStorage(Storage):
     ``derivatives`` table keyed by source result and component. ``value_json`` holds the full
     bytes-safe ``to_json(recurse=False)`` representation (id, type, value, metadata, provenance), so a
     viewer app can reconstruct what was produced; ``metadata_json``/``extra_json`` are kept as
-    dedicated columns for querying. The nullable ``corrected_value_json``/``corrected_at`` columns
-    hold human corrections written via ``save_correction``. The schema is created (and old databases
-    upgraded) lazily on first use, a fresh connection is opened per operation (thread-safe for use
-    from e.g. Flask), and the input is returned unchanged.
+    dedicated columns for querying. ``input_uri`` and ``input_hash`` record the file or URI the
+    result was generated from and the md5 of that input's content, and ``corrects_id`` points at the
+    row this result corrects, if it is a correction of one (see ``correction_target`` and
+    ``save_correction``) -- corrections are entries in the table like any other, so the agent that
+    made one, human or model, is described by that entry's own metadata. The schema is created lazily
+    on first use, a fresh connection is opened per operation (thread-safe for use from e.g. Flask),
+    and the input is returned unchanged.
 
     Settings:
         - database: path of the SQLite database file (default 'results.db')
+        - input_source: component id whose result counts as the input the row was generated from
+          (default: the result's immediate input)
+        - hash_input: fill in ``input_hash`` (default true); false skips the digest, and any file
+          read it would need
     """
 
     def __init__(self, tree, workflow, parent=None):
@@ -1318,31 +1679,41 @@ class SqliteStorage(Storage):
             cursor = conn.cursor()
 
             # Build JSON representations (bytes-safe; FileItemResults store their file_name)
-            value_json = json.dumps(self.build_json(input))
+            js = self.build_json(input)
             metadata_json = json.dumps(_json_safe(input.metadata)) if input.metadata else None
             extra_json = json.dumps(_json_safe(input.extra)) if input.extra else None
+            input_uri, input_hash = input_reference(
+                input, self.settings.get("input_source"), self.settings.get("hash_input", True)
+            )
 
-            # Insert result -- an upsert (not OR REPLACE) so re-storing a result keeps any
-            # human correction and the original created_at
+            # Insert result -- an upsert (not OR REPLACE) so re-storing a result keeps the original
+            # created_at, and the rows correcting it go on pointing at it
             cursor.execute(
                 """
                 INSERT INTO results
-                (id, processor_id, workflow_id, value_json, metadata_json, extra_json)
-                VALUES (?, ?, ?, ?, ?, ?)
+                (id, processor_id, workflow_id, value_json, metadata_json, extra_json,
+                 input_uri, input_hash, corrects_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     processor_id = excluded.processor_id,
                     workflow_id = excluded.workflow_id,
                     value_json = excluded.value_json,
                     metadata_json = excluded.metadata_json,
-                    extra_json = excluded.extra_json
+                    extra_json = excluded.extra_json,
+                    input_uri = excluded.input_uri,
+                    input_hash = excluded.input_hash,
+                    corrects_id = excluded.corrects_id
             """,
                 (
                     input.id,
-                    input.processor.id if input.processor else None,
-                    input.workflow.id if input.workflow else None,
-                    value_json,
+                    js.get("processorId"),
+                    js.get("workflowId"),
+                    json.dumps(js),
                     metadata_json,
                     extra_json,
+                    input_uri,
+                    input_hash,
+                    correction_target(input),
                 ),
             )
 

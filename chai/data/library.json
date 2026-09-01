@@ -91,9 +91,12 @@
         "id": "id",
         "processorId": "processor_id",
         "workflowId": "workflow_id",
-        "*": "value_json",
+        "@record": "value_json",
         "metadata": "metadata_json",
-        "extraInfo": "extra_json"
+        "extraInfo": "extra_json",
+        "@input_uri": "input_uri",
+        "@input_hash": "input_hash",
+        "@corrects": "corrects_id"
       },
       "schema": {
         "id": "string",
@@ -101,7 +104,10 @@
         "workflow_id": "string",
         "value_json": "json",
         "metadata_json": "json",
-        "extra_json": "json"
+        "extra_json": "json",
+        "input_uri": "string",
+        "input_hash": "string",
+        "corrects_id": "string"
       },
       "null_if_empty": true,
       "run_columns": false

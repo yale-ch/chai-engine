@@ -288,7 +288,8 @@ class Component(BaseThing):
             # Ensure the result always knows its input -- including a raw
             # first-step input (e.g. text typed into a test run), so the
             # provenance chain always bottoms out at the original input
-            if new_result.input is None and input is not None:
+            # (a pass-through step returns its own input, which must not become its own provenance)
+            if new_result.input is None and input is not None and new_result is not input:
                 new_result.input = input
             # ... And which component created it
             if new_result.processor is None:

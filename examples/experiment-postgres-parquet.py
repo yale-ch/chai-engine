@@ -8,8 +8,10 @@ The workflow reads a CSV of people, pulls the name out of each row, and stores e
   ``parquet_to_postgres`` then bulk loads that file into ``people_parquet`` -- the way a run that
   cannot reach the database (or should not hold a connection open for hours) hands its results over.
 
-The Parquet steps are configured to produce exactly the columns ``PostgresStorage`` writes: ``"*"``
-puts the whole result JSON in ``value_json``, and ``null_if_empty`` matches the storage convention of
+The Parquet steps are configured to produce exactly the columns ``PostgresStorage`` writes:
+``@record`` puts the whole result JSON in ``value_json``, ``@input_uri``/``@input_hash`` record the
+CSV each row came from and the md5 of the row itself, ``@corrects`` carries the pointer a correction
+entry has back to the entry it corrects, and ``null_if_empty`` matches the storage convention of
 writing an absent ``metadata``/``extraInfo`` as NULL rather than as ``{}``. The target table is
 created by ``ensure_postgres_schema``, so both tables have the same DDL.
 
@@ -39,19 +41,26 @@ from chai.storage import (  # noqa: E402
 )
 from chai.workflow import Workflow  # noqa: E402
 
-# The columns both routes fill in: PostgresStorage's own, minus the ones the database itself sets
-# (created_at) and the ones only a human correction touches.
-SHARED_COLUMNS = "id, processor_id, workflow_id, value_json, metadata_json, extra_json"
+# The columns both routes fill in: PostgresStorage's own, minus created_at, which the database sets.
+SHARED_COLUMNS = (
+    "id, processor_id, workflow_id, value_json, metadata_json, extra_json, "
+    "input_uri, input_hash, corrects_id"
+)
 
 # The Parquet row, shaped to match those columns: the keys are the result JSON's, the values the
-# column names, and "*" is the whole result JSON -- what PostgresStorage puts in value_json.
+# column names, and the @ keys are computed -- @record is the whole result JSON (what PostgresStorage
+# puts in value_json), @input_uri/@input_hash say what the result was generated from, and @corrects
+# is the row this one corrects, if it is a correction of one.
 PARQUET_FIELDS = {
     "id": "id",
     "processorId": "processor_id",
     "workflowId": "workflow_id",
-    "*": "value_json",
+    "@record": "value_json",
     "metadata": "metadata_json",
     "extraInfo": "extra_json",
+    "@input_uri": "input_uri",
+    "@input_hash": "input_hash",
+    "@corrects": "corrects_id",
 }
 PARQUET_SCHEMA = {
     "id": "string",
@@ -60,6 +69,9 @@ PARQUET_SCHEMA = {
     "value_json": "json",
     "metadata_json": "json",
     "extra_json": "json",
+    "input_uri": "string",
+    "input_hash": "string",
+    "corrects_id": "string",
 }
 
 
