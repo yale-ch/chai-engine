@@ -10,8 +10,9 @@ The workflow reads a CSV of people, pulls the name out of each row, and stores e
 
 The Parquet steps are configured to produce exactly the columns ``PostgresStorage`` writes:
 ``@record`` puts the whole result JSON in ``value_json``, ``@input_uri``/``@input_hash`` record the
-CSV each row came from and the md5 of the row itself, ``@corrects`` carries the pointer a correction
-entry has back to the entry it corrects, and ``null_if_empty`` matches the storage convention of
+CSV each row came from (the provider is marked ``source: true``) and the md5 of the row itself,
+``@input_locator`` says where in that source the row is, ``@corrects`` carries the pointer a
+correction entry has back to the entry it corrects, and ``null_if_empty`` matches the convention of
 writing an absent ``metadata``/``extraInfo`` as NULL rather than as ``{}``. The target table is
 created by ``ensure_postgres_schema``, so both tables have the same DDL.
 
@@ -44,7 +45,7 @@ from chai.workflow import Workflow  # noqa: E402
 # The columns both routes fill in: PostgresStorage's own, minus created_at, which the database sets.
 SHARED_COLUMNS = (
     "id, processor_id, workflow_id, value_json, metadata_json, extra_json, "
-    "input_uri, input_hash, corrects_id"
+    "input_uri, input_hash, input_locator, corrects_id"
 )
 
 # The Parquet row, shaped to match those columns: the keys are the result JSON's, the values the
@@ -60,6 +61,7 @@ PARQUET_FIELDS = {
     "extraInfo": "extra_json",
     "@input_uri": "input_uri",
     "@input_hash": "input_hash",
+    "@input_locator": "input_locator",
     "@corrects": "corrects_id",
 }
 PARQUET_SCHEMA = {
@@ -71,6 +73,7 @@ PARQUET_SCHEMA = {
     "extra_json": "json",
     "input_uri": "string",
     "input_hash": "string",
+    "input_locator": "json",
     "corrects_id": "string",
 }
 
@@ -90,6 +93,9 @@ def build_workflow(csv_path, limit, parquet_file, direct_table, connection):
                     {
                         "id": "people_rows",
                         "type": "iterator.Iterator",
+                        # Each row this iterator hands out is a recorded source: every result made
+                        # from it, however many steps later, records that row as its input
+                        "source": True,
                         # The results are persisted as they are produced, so nothing needs keeping
                         "settings": {"retain_results": False, "workers": 4},
                         "steps": [

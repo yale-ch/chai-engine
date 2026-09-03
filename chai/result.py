@@ -26,7 +26,9 @@ class Result(BaseThing):
     * ``processor`` -- the ``Component`` that produced this result.
     * ``metadata`` -- run information: a ``timestamp`` is always added; components add e.g. ``type``
       (TEXT/IMAGE/AUDIO/DATA), ``token_usage``, ``duration``, ``confidence``, ``bbox``.
-    * ``extra`` -- free-form extra information not interpreted by the engine.
+    * ``extra`` -- free-form extra information not interpreted by the engine, with two conventional
+      keys read by ``chai.storage``: ``locator`` (see below) and ``corrects`` (the result this one is
+      a correction of).
     * ``derivative_results`` -- ``{component: [results]}`` registered via ``register_result``; this is
       how ``register_on`` makes e.g. a classifier's labels for a result discoverable by a later
       ``LabelTestGate``.
@@ -63,6 +65,22 @@ class Result(BaseThing):
 
     def __repr__(self):
         return f"{self.__class__.__name__}(value={self.value!r})"
+
+    @property
+    def locator(self):
+        """Where this result sits inside the thing it was made from, or ``None`` if it does not say.
+
+        A component that carves a piece out of something -- a region of a page, a sentence of a
+        transcript -- records how to find that piece rather than materializing it: a bounding box, a
+        character range, a page number, whatever locates it. Storage rows collect the locators along
+        the chain into ``input_locator``, so a UI holding a stored row can point at the part of the
+        original the row came from without a file per sentence ever existing.
+        """
+        return self.extra.get("locator", None)
+
+    @locator.setter
+    def locator(self, value):
+        self.extra["locator"] = dict(value) if value is not None else None
 
     def set_value(self, value):
         """Assign the payload; subclasses hook this to normalize values (e.g. sorting file lists)."""

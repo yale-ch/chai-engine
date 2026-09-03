@@ -96,6 +96,7 @@
         "extraInfo": "extra_json",
         "@input_uri": "input_uri",
         "@input_hash": "input_hash",
+        "@input_locator": "input_locator",
         "@corrects": "corrects_id"
       },
       "schema": {
@@ -107,6 +108,7 @@
         "extra_json": "json",
         "input_uri": "string",
         "input_hash": "string",
+        "input_locator": "json",
         "corrects_id": "string"
       },
       "null_if_empty": true,

@@ -108,6 +108,13 @@ class Component(BaseThing):
     registers the new result as a derivative on each ancestor result produced by one of those
     components, so later steps (e.g. ``LabelTestGate``) can look up what this component said about an
     earlier result.
+
+    ``source: true`` in the config marks a component as the run's *recorded source*: the results it
+    produces are what stored rows say they were generated from (``input_uri``/``input_hash``), rather
+    than the raw input at the very bottom of the chain. In a run over a directory of scans that
+    iterates pages, segments regions and segments sentences, marking the page iterator makes every
+    row -- however many steps later -- record the page it came from. See ``chai.storage`` for how
+    that is resolved and for the locators that say where in the source a result is.
     """
 
     parent: Optional["Component"] = None
@@ -118,6 +125,7 @@ class Component(BaseThing):
     settings: dict = {}
     register_on: list = []
     config: dict = {}
+    is_source: bool = False
 
     def _make_step(self, tree, wf):
         """Build one child component from its config dict.
@@ -182,6 +190,7 @@ class Component(BaseThing):
         self.input = tree.get("input", None)
         self.settings = tree.get("settings", {})
         self.config = tree
+        self.is_source = bool(tree.get("source", False))
 
         cids = tree.get("register_on", [])
         comps = []

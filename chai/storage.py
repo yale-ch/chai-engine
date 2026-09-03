@@ -216,22 +216,68 @@ def _uri_for(node):
     return None
 
 
-def input_reference(result: Result, source_id=None, with_hash=True):
-    """``(input_uri, input_hash)`` for the input *result* was generated from.
+def recorded_source(result: Result, source_id=None):
+    """The result a stored row should name as what it was generated from, or ``None`` if unmarked.
 
-    The URI is the file or URI nearest in the provenance chain -- the image a transcription was made
-    from, the CSV a row was read from -- and the hash is the md5 of that input's content, so rows
-    produced from the same input can be found together whatever the run or the file name. *source_id*
-    names the component whose result counts as the input; without it the input is the result's
-    immediate ``input``. *with_hash* false skips the digest (and any file read it would need).
+    A run's real source is rarely the raw input at the bottom of the chain -- that may be a directory
+    of scans, iterated into pages, segmented into regions and iterated again. The component whose
+    results are the source is marked ``source: true`` in the config (see ``Component``), and this
+    returns the nearest such result up *result*'s provenance chain, so every row a page gives rise to,
+    however many steps later, records that page. *source_id* names a component explicitly instead.
     """
     if source_id:
-        source = _source_result(result, source_id)
-        start = source
-    else:
+        return _source_result(result, source_id)
+    for node in _provenance(result):
+        if getattr(node.processor, "is_source", False):
+            return node
+    return None
+
+
+def input_locator(result: Result, source=None):
+    """How to find *result* inside its source: the locators between it and *source*, outermost first.
+
+    Each component that carves a piece out of something records where that piece is (``Result.locator``
+    -- a bounding box, a character range), and this collects those frames along the chain, so a stored
+    row says where in the source it came from without any of the pieces being materialized. A region
+    of a page whose transcript was split into sentences yields two frames,
+    ``[{"bbox": [...]}, {"start": 120, "end": 168}]``: the region within the page, then the sentence
+    within the region's text. ``None`` when nothing on the way asserted a position.
+    """
+    frames = []
+    for node in _provenance(result):
+        if node is source:
+            break
+        locator = node.extra.get("locator", None) if isinstance(node.extra, dict) else None
+        if locator:
+            frames.append(_json_safe(locator))
+    frames.reverse()  # outermost (nearest the source) first, so they read source -> result
+    return frames or None
+
+
+def input_provenance(result: Result, source_id=None, with_hash=True):
+    """What a stored row records about the input *result* was generated from.
+
+    Returns ``{"uri", "hash", "locator"}``: the file or URI of the recorded source (see
+    ``recorded_source``), the md5 of that source's content, so rows made from the same input can be
+    found together whatever the run or the file name, and the locators saying where in it this result
+    is (see ``input_locator``). With no component marked as the source, the input is the result's
+    immediate ``input`` and the URI is the nearest file or URI up the chain; a *source_id* naming a
+    component that made nothing in this chain records nothing at all. *with_hash* false skips the
+    digest, and any file read it would need.
+    """
+    source = recorded_source(result, source_id)
+    start = source
+    if source is None and not source_id:
+        # Nothing marked, and no component named: the input is what the result was made from, and the
+        # nearest file to the result itself is the best URI there is. A *named* source that is not in
+        # the chain records nothing rather than quietly standing in something else.
         source = result.input if isinstance(result, Result) else None
         start = result
-    return _uri_for(start), (result_md5(source) if with_hash else None)
+    return {
+        "uri": _uri_for(start),
+        "hash": result_md5(source) if with_hash else None,
+        "locator": input_locator(result, source),
+    }
 
 
 def correction_target(result: Result):
@@ -251,7 +297,7 @@ def correction_target(result: Result):
 
 #: Keys usable in a record's ``fields`` that are computed from the result rather than read off its
 #: JSON -- the columns the tabular storages fill in beside the result itself.
-COMPUTED_FIELDS = ("@record", "@input_uri", "@input_hash", "@corrects")
+COMPUTED_FIELDS = ("@record", "@input_uri", "@input_hash", "@input_locator", "@corrects")
 
 
 def build_record(result: Result, fields=None, sources=None, input_source=None):
@@ -266,9 +312,10 @@ def build_record(result: Result, fields=None, sources=None, input_source=None):
     can carry the same columns ``SqliteStorage`` and ``PostgresStorage`` write:
 
     * ``@record`` -- the whole result JSON (their ``value_json``)
-    * ``@input_uri`` / ``@input_hash`` -- the file or URI the entry was generated from and the md5 of
-      that input's content (see ``input_reference``; *input_source* names the component whose result
-      counts as the input)
+    * ``@input_uri`` / ``@input_hash`` / ``@input_locator`` -- the file or URI the entry was generated
+      from, the md5 of that input's content, and where in it this entry is (see ``input_provenance``;
+      *input_source* names the component whose result counts as the input, overriding the component
+      marked ``source: true``)
     * ``@corrects`` -- the id of the result this one corrects (see ``correction_target``)
 
     *sources* is a ``{key: component id}`` dict, each recording the value of the nearest ancestor
@@ -279,10 +326,11 @@ def build_record(result: Result, fields=None, sources=None, input_source=None):
     if fields:
         if isinstance(fields, dict):
             computed = {"@record": whole}
-            if "@input_uri" in fields or "@input_hash" in fields:
-                uri, digest = input_reference(result, input_source, with_hash="@input_hash" in fields)
-                computed["@input_uri"] = uri
-                computed["@input_hash"] = digest
+            if any(key in fields for key in ("@input_uri", "@input_hash", "@input_locator")):
+                provenance = input_provenance(result, input_source, with_hash="@input_hash" in fields)
+                computed["@input_uri"] = provenance["uri"]
+                computed["@input_hash"] = provenance["hash"]
+                computed["@input_locator"] = provenance["locator"]
             if "@corrects" in fields:
                 computed["@corrects"] = correction_target(result)
             js = {}
@@ -991,6 +1039,7 @@ def _pg_ensure_schema(conn, table="results", derivatives_table=None):
             extra_json JSONB,
             input_uri TEXT,
             input_hash TEXT,
+            input_locator JSONB,
             corrects_id TEXT,
             created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
         )
@@ -1061,8 +1110,9 @@ class PostgresStorage(Storage):
         - table: name of the results table (default 'results')
         - derivatives_table: name of the derivatives table (default '<table>_derivatives')
         - create_database: create the database if the server does not have it yet (default true)
-        - input_source: component id whose result counts as the input the row was generated from
-          (default: the result's immediate input)
+        - input_source: component id whose result counts as the input the row was generated from,
+          overriding the component marked ``source: true`` (default: the marked component's result,
+          or the result's immediate input when nothing is marked)
         - hash_input: fill in ``input_hash`` (default true); false skips the digest, and any file
           read it would need
     """
@@ -1113,15 +1163,15 @@ class PostgresStorage(Storage):
         # The dedicated columns come out of the stored JSON, so a row cannot say one thing in
         # value_json and another in the column a query filters on
         js = self.build_json(input)
-        input_uri, input_hash = input_reference(
+        provenance = input_provenance(
             input, self.settings.get("input_source"), self.settings.get("hash_input", True)
         )
         cursor.execute(
             f"""
             INSERT INTO {self.table}
             (id, processor_id, workflow_id, value_json, metadata_json, extra_json,
-             input_uri, input_hash, corrects_id)
-            VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s, %s)
+             input_uri, input_hash, input_locator, corrects_id)
+            VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s, %s::jsonb, %s)
             ON CONFLICT (id) DO UPDATE SET
                 processor_id = excluded.processor_id,
                 workflow_id = excluded.workflow_id,
@@ -1130,6 +1180,7 @@ class PostgresStorage(Storage):
                 extra_json = excluded.extra_json,
                 input_uri = excluded.input_uri,
                 input_hash = excluded.input_hash,
+                input_locator = excluded.input_locator,
                 corrects_id = excluded.corrects_id
             """,
             (
@@ -1139,8 +1190,9 @@ class PostgresStorage(Storage):
                 json.dumps(js),
                 json.dumps(_json_safe(input.metadata)) if input.metadata else None,
                 json.dumps(_json_safe(input.extra)) if input.extra else None,
-                input_uri,
-                input_hash,
+                provenance["uri"],
+                provenance["hash"],
+                json.dumps(provenance["locator"]) if provenance["locator"] else None,
                 correction_target(input),
             ),
         )
@@ -1200,11 +1252,14 @@ def save_postgres_correction(
     conn = _pg_connect(postgres_params(params, **overrides))
     try:
         cursor = conn.cursor()
-        cursor.execute(f"SELECT workflow_id, input_uri, input_hash FROM {table} WHERE id = %s", (result_id,))
+        cursor.execute(
+            f"SELECT workflow_id, input_uri, input_hash, input_locator FROM {table} WHERE id = %s",
+            (result_id,),
+        )
         row = cursor.fetchone()
         if row is None:
             return None
-        workflow_id, input_uri, input_hash = row
+        workflow_id, input_uri, input_hash, locator = row
         metadata = dict(metadata or {})
         if agent is not None:
             metadata.setdefault("agent", agent)
@@ -1214,8 +1269,9 @@ def save_postgres_correction(
         cursor.execute(
             f"""
             INSERT INTO {table}
-            (id, processor_id, workflow_id, value_json, metadata_json, input_uri, input_hash, corrects_id)
-            VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s)
+            (id, processor_id, workflow_id, value_json, metadata_json,
+             input_uri, input_hash, input_locator, corrects_id)
+            VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s::jsonb, %s)
             """,
             (
                 correction_id,
@@ -1225,6 +1281,7 @@ def save_postgres_correction(
                 json.dumps(_json_safe(metadata)) if metadata else None,
                 input_uri,
                 input_hash,
+                json.dumps(locator) if locator else None,
                 result_id,
             ),
         )
@@ -1360,8 +1417,9 @@ def _ensure_schema(conn):
     """Create the ``results``/``derivatives`` tables and their indexes if they are missing.
 
     The results table is the tabular shape both SQLite and PostgreSQL storage use: one row per
-    result, ``input_uri``/``input_hash`` saying what it was generated from, and ``corrects_id``
-    pointing at the row this one corrects (see ``save_correction``). There is no migration from
+    result, ``input_uri``/``input_hash``/``input_locator`` saying what it was generated from and
+    where in that input it is, and ``corrects_id`` pointing at the row this one corrects (see
+    ``save_correction``). There is no migration from
     earlier layouts -- a database from before a schema change is deleted and rebuilt.
     """
     cursor = conn.cursor()
@@ -1375,6 +1433,7 @@ def _ensure_schema(conn):
             extra_json TEXT,
             input_uri TEXT,
             input_hash TEXT,
+            input_locator TEXT,
             corrects_id TEXT,
             -- millisecond resolution, so results (and the corrections of one) sort in the order
             -- they were made rather than tying on the second
@@ -1428,6 +1487,7 @@ def _row_to_dict(row):
         "extra": _loads(row["extra_json"]),
         "input_uri": row["input_uri"],
         "input_hash": row["input_hash"],
+        "input_locator": _loads(row["input_locator"]),
         "corrects_id": row["corrects_id"],
         "created_at": row["created_at"],
     }
@@ -1458,6 +1518,7 @@ def store_json_result(
     metadata=None,
     input_uri=None,
     input_hash=None,
+    input_locator=None,
     corrects_id=None,
 ):
     """Insert/refresh one result row from already-serialized JSON values.
@@ -1472,8 +1533,9 @@ def store_json_result(
         conn.execute(
             """
             INSERT INTO results
-            (id, processor_id, workflow_id, value_json, metadata_json, input_uri, input_hash, corrects_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (id, processor_id, workflow_id, value_json, metadata_json,
+             input_uri, input_hash, input_locator, corrects_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 processor_id = excluded.processor_id,
                 workflow_id = excluded.workflow_id,
@@ -1481,6 +1543,7 @@ def store_json_result(
                 metadata_json = excluded.metadata_json,
                 input_uri = excluded.input_uri,
                 input_hash = excluded.input_hash,
+                input_locator = excluded.input_locator,
                 corrects_id = excluded.corrects_id
             """,
             (
@@ -1491,6 +1554,7 @@ def store_json_result(
                 json.dumps(_json_safe(metadata)) if metadata else None,
                 input_uri,
                 input_hash,
+                json.dumps(_json_safe(input_locator)) if input_locator else None,
                 corrects_id,
             ),
         )
@@ -1596,7 +1660,8 @@ def save_correction(database, result_id, corrected_value, agent=None, metadata=N
     conn = _connect(database)
     try:
         row = conn.execute(
-            "SELECT workflow_id, input_uri, input_hash FROM results WHERE id = ?", (result_id,)
+            "SELECT workflow_id, input_uri, input_hash, input_locator FROM results WHERE id = ?",
+            (result_id,),
         ).fetchone()
         if row is None:
             return None
@@ -1609,8 +1674,9 @@ def save_correction(database, result_id, corrected_value, agent=None, metadata=N
         conn.execute(
             """
             INSERT INTO results
-            (id, processor_id, workflow_id, value_json, metadata_json, input_uri, input_hash, corrects_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (id, processor_id, workflow_id, value_json, metadata_json,
+             input_uri, input_hash, input_locator, corrects_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 correction_id,
@@ -1620,6 +1686,7 @@ def save_correction(database, result_id, corrected_value, agent=None, metadata=N
                 json.dumps(_json_safe(metadata)) if metadata else None,
                 row["input_uri"],
                 row["input_hash"],
+                row["input_locator"],
                 result_id,
             ),
         )
@@ -1661,8 +1728,9 @@ class SqliteStorage(Storage):
 
     Settings:
         - database: path of the SQLite database file (default 'results.db')
-        - input_source: component id whose result counts as the input the row was generated from
-          (default: the result's immediate input)
+        - input_source: component id whose result counts as the input the row was generated from,
+          overriding the component marked ``source: true`` (default: the marked component's result,
+          or the result's immediate input when nothing is marked)
         - hash_input: fill in ``input_hash`` (default true); false skips the digest, and any file
           read it would need
     """
@@ -1682,7 +1750,7 @@ class SqliteStorage(Storage):
             js = self.build_json(input)
             metadata_json = json.dumps(_json_safe(input.metadata)) if input.metadata else None
             extra_json = json.dumps(_json_safe(input.extra)) if input.extra else None
-            input_uri, input_hash = input_reference(
+            provenance = input_provenance(
                 input, self.settings.get("input_source"), self.settings.get("hash_input", True)
             )
 
@@ -1692,8 +1760,8 @@ class SqliteStorage(Storage):
                 """
                 INSERT INTO results
                 (id, processor_id, workflow_id, value_json, metadata_json, extra_json,
-                 input_uri, input_hash, corrects_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 input_uri, input_hash, input_locator, corrects_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     processor_id = excluded.processor_id,
                     workflow_id = excluded.workflow_id,
@@ -1702,6 +1770,7 @@ class SqliteStorage(Storage):
                     extra_json = excluded.extra_json,
                     input_uri = excluded.input_uri,
                     input_hash = excluded.input_hash,
+                    input_locator = excluded.input_locator,
                     corrects_id = excluded.corrects_id
             """,
                 (
@@ -1711,8 +1780,9 @@ class SqliteStorage(Storage):
                     json.dumps(js),
                     metadata_json,
                     extra_json,
-                    input_uri,
-                    input_hash,
+                    provenance["uri"],
+                    provenance["hash"],
+                    json.dumps(provenance["locator"]) if provenance["locator"] else None,
                     correction_target(input),
                 ),
             )

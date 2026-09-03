@@ -173,8 +173,11 @@ Every component accepts an error policy in `settings`:
 - **Provenance** — any result's `.input` chain answers "where did this come
   from"; `processor` answers "who made it".
 - **Storage + corrections** — `SqliteStorage` and `PostgresStorage` keep the
-  full JSON of every result, with the file or URI it was generated from and
-  the md5 of that input; `chai.storage` viewer helpers (`list_results`,
+  full JSON of every result, with the file or URI it was generated from (the
+  component marked `source: true`, e.g. the page, not the directory), the md5
+  of that input, and a locator saying where in it the row is — a bounding box
+  or a character range — so millions of sentences or regions need no files of
+  their own; `chai.storage` viewer helpers (`list_results`,
   `save_correction`, …) let an app show stored rows and record corrections.
   A correction is an entry of its own pointing back at the row it corrects,
   so originals are never overwritten and each correction carries the metadata

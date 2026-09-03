@@ -16,7 +16,8 @@ from chai.storage import (
     build_record,
     content_md5,
     correction_target,
-    input_reference,
+    input_provenance,
+    recorded_source,
     result_md5,
     ParquetRecordWriter,
     PostgresStorage,
@@ -332,42 +333,102 @@ class TestRecordFields(unittest.TestCase):
     def test_input_uri_and_hash_come_from_the_file_a_result_was_made_from(self):
         path, source = self.file_result()
         transcript = ItemResult("some page text", input=source)
-        uri, digest = input_reference(transcript)
-        self.assertEqual(uri, path)
-        self.assertEqual(digest, hashlib.md5(b"some page text").hexdigest())
+        provenance = input_provenance(transcript)
+        self.assertEqual(provenance["uri"], path)
+        self.assertEqual(provenance["hash"], hashlib.md5(b"some page text").hexdigest())
+        self.assertIsNone(provenance["locator"])  # nothing on the way said where it sits
 
     def test_the_uri_is_found_further_up_the_chain(self):
         path, source = self.file_result()
         segment = ItemResult("some page", input=source)
         parsed = ItemResult({"words": 2}, input=segment)
-        uri, digest = input_reference(parsed)
-        self.assertEqual(uri, path)  # the file two steps back
-        self.assertEqual(digest, content_md5("some page"))  # the hash is of the immediate input
+        provenance = input_provenance(parsed)
+        self.assertEqual(provenance["uri"], path)  # the file two steps back
+        self.assertEqual(provenance["hash"], content_md5("some page"))  # the hash is of the input
 
     def test_the_raw_input_a_provider_was_given_counts_as_the_uri(self):
         path, _ = self.file_result("people.csv", "name\nAda\n")
         rows = ListResult([{"name": "Ada"}], input=path, processor=self.provider)
         row = ItemResult({"name": "Ada"}, input=rows)
         parsed = ItemResult({"first_name": "Ada"}, input=row)
-        uri, digest = input_reference(parsed)
-        self.assertEqual(uri, path)
-        self.assertEqual(digest, content_md5({"name": "Ada"}))
+        provenance = input_provenance(parsed)
+        self.assertEqual(provenance["uri"], path)
+        self.assertEqual(provenance["hash"], content_md5({"name": "Ada"}))
         # a value that is not a path or a URI is content, not a location
-        self.assertIsNone(input_reference(ItemResult("x", input=ItemResult("just some text")))[0])
-        self.assertEqual(input_reference(ItemResult("x", input="https://example.org/a.json"))[0],
-                         "https://example.org/a.json")
+        self.assertIsNone(input_provenance(ItemResult("x", input=ItemResult("just some text")))["uri"])
+        self.assertEqual(
+            input_provenance(ItemResult("x", input="https://example.org/a.json"))["uri"],
+            "https://example.org/a.json",
+        )
 
     def test_input_source_names_the_component_whose_result_is_the_input(self):
         row = ItemResult({"name": "Ada"}, processor=self.provider)
         name = ItemResult("Ada", input=row)
         parsed = ItemResult({"first_name": "Ada"}, input=name)
-        self.assertEqual(input_reference(parsed)[1], content_md5("Ada"))  # the immediate input
-        self.assertEqual(input_reference(parsed, "prov")[1], content_md5({"name": "Ada"}))
-        self.assertEqual(input_reference(parsed, "no_such_component"), (None, None))
+        self.assertEqual(input_provenance(parsed)["hash"], content_md5("Ada"))  # the immediate input
+        self.assertEqual(input_provenance(parsed, "prov")["hash"], content_md5({"name": "Ada"}))
+        self.assertEqual(input_provenance(parsed, "no_such_component")["hash"], None)
 
     def test_no_input_means_nothing_to_record(self):
-        self.assertEqual(input_reference(ItemResult("standalone")), (None, None))
-        self.assertEqual(input_reference(ItemResult("x", input=ItemResult("y")), with_hash=False)[1], None)
+        self.assertEqual(input_provenance(ItemResult("standalone")), {"uri": None, "hash": None, "locator": None})
+        self.assertIsNone(input_provenance(ItemResult("x", input=ItemResult("y")), with_hash=False)["hash"])
+
+    def test_a_marked_component_is_the_recorded_source(self):
+        path, page = self.file_result("page.txt", "One. Two! Three?")
+        # a workflow marks the component whose results are the source of everything downstream
+        pages = self.wf._make_step(
+            {"type": "iterator.Iterator", "id": "pages", "source": True, "steps": []}, self.wf
+        )
+        page.processor = pages
+        page.input = ListResult([path], input=os.path.dirname(path))
+        transcript = ItemResult("One. Two! Three?", input=page)
+        sentence = ItemResult("Two!", input=transcript)
+        parsed = ItemResult({"words": 1}, input=sentence)
+        # four steps later the row still records the page, not the sentence it came from
+        self.assertIs(recorded_source(parsed), page)
+        provenance = input_provenance(parsed)
+        self.assertEqual(provenance["uri"], path)
+        self.assertEqual(provenance["hash"], content_md5("One. Two! Three?"))
+        # ... and without the mark it would record the sentence it happens to sit behind
+        pages.is_source = False
+        self.assertIsNone(recorded_source(parsed))
+        self.assertEqual(input_provenance(parsed)["hash"], content_md5("Two!"))
+
+    def test_locators_stack_from_the_source_down_to_the_result(self):
+        path, page = self.file_result("scan.png", "not really an image")
+        page.processor = self.wf._make_step(
+            {"type": "iterator.Iterator", "id": "scans", "source": True, "steps": []}, self.wf
+        )
+        region = ItemResult("region bytes", input=page)
+        region.locator = {"bbox": [10, 20, 300, 80]}  # where the region is on the page
+        transcript = ItemResult("A sentence. And another.", input=region)
+        sentence = ItemResult("And another.", input=transcript)
+        sentence.locator = {"start": 12, "end": 24}  # where the sentence is in that region's text
+        provenance = input_provenance(sentence)
+        self.assertEqual(provenance["uri"], path)  # the page, which is all that was materialized
+        self.assertEqual(
+            provenance["locator"], [{"bbox": [10, 20, 300, 80]}, {"start": 12, "end": 24}]
+        )
+        # the region's own row carries only its own frame
+        self.assertEqual(input_provenance(region)["locator"], [{"bbox": [10, 20, 300, 80]}])
+
+    def test_a_segmenter_records_where_each_segment_was(self):
+        text = "One. Two!  Three?"
+        segmenter = self.wf._make_step(
+            {"type": "segmenter.TextSegmenter", "id": "sentences", "settings": {"mode": "sentence", "locate": True}},
+            self.wf,
+        )
+        segments = segmenter.process(ItemResult(text))
+        self.assertEqual([s.value for s in segments.value], ["One.", "Two!", "Three?"])
+        for segment in segments.value:
+            start, end = segment.locator["start"], segment.locator["end"]
+            # the offsets address the segment's own characters in the text it was cut from
+            self.assertEqual(text[start:end], segment.value)
+        # off by default, so the segments stay plain strings
+        plain = self.wf._make_step(
+            {"type": "segmenter.TextSegmenter", "id": "plain", "settings": {"mode": "sentence"}}, self.wf
+        )
+        self.assertEqual(plain.process(ItemResult(text)).value, ["One.", "Two!", "Three?"])
 
     def test_content_md5_does_not_depend_on_key_order(self):
         self.assertEqual(content_md5({"a": 1, "b": 2}), content_md5({"b": 2, "a": 1}))
@@ -404,10 +465,14 @@ class TestRecordFields(unittest.TestCase):
                 "@record": "value_json",
                 "@input_uri": "input_uri",
                 "@input_hash": "input_hash",
+                "@input_locator": "input_locator",
                 "@corrects": "corrects_id",
             },
         )
-        self.assertEqual(list(record), ["id", "value_json", "input_uri", "input_hash", "corrects_id"])
+        self.assertEqual(
+            list(record),
+            ["id", "value_json", "input_uri", "input_hash", "input_locator", "corrects_id"],
+        )
         self.assertEqual(record["value_json"]["value"], "first go")
         self.assertEqual(record["input_uri"], path)
         self.assertEqual(record["input_hash"], hashlib.md5(b"some page text").hexdigest())
@@ -826,6 +891,75 @@ class TestSqliteStorage(unittest.TestCase):
         self.assertEqual(row["input_hash"], hashlib.md5(b"some page text").hexdigest())
         # every entry made from the same input can be found by its hash
         self.assertEqual([r["id"] for r in list_results(self.db, input_hash=row["input_hash"])], [transcript.id])
+
+    def test_a_run_records_the_document_and_where_in_it_each_row_is(self):
+        docs = os.path.join(self.dir, "docs")
+        os.makedirs(docs)
+        text = "Ada wrote it. Babbage built it."
+        with open(os.path.join(docs, "note.txt"), "w") as fh:
+            fh.write(text)
+        tree = {
+            "id": "locator_wf",
+            "type": "workflow.Workflow",
+            "steps": [
+                {
+                    "id": "dir",
+                    "type": "provider.DirFileProvider",
+                    "input": docs,
+                    "steps": [
+                        {
+                            "id": "each_doc",
+                            "type": "iterator.Iterator",
+                            "source": True,  # every row downstream records the document
+                            "steps": [
+                                {
+                                    "id": "read",
+                                    "type": "transcriber.TextFileTranscriber",
+                                    "next_steps": [
+                                        {
+                                            "id": "sentences",
+                                            "type": "segmenter.TextSegmenter",
+                                            "settings": {"mode": "sentence", "locate": True},
+                                            "next_steps": [
+                                                {
+                                                    "id": "each_sentence",
+                                                    "type": "iterator.Iterator",
+                                                    "steps": [
+                                                        {
+                                                            "id": "words",
+                                                            "type": "classifier.KeywordClassifier",
+                                                            "settings": {"labels": {"who": ["ada", "babbage"]}},
+                                                            "next_steps": [
+                                                                {
+                                                                    "type": "storage.SqliteStorage",
+                                                                    "settings": {"database": self.db},
+                                                                }
+                                                            ],
+                                                        }
+                                                    ],
+                                                }
+                                            ],
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+        Workflow(tree).run()
+        rows = [r for r in list_results(self.db, processor_id="words") if r["input_locator"]]
+        self.assertEqual(len(rows), 2)  # one per sentence, and no sentence was written anywhere
+        located = {}
+        for row in rows:
+            # every row names the document, not the sentence or the transcript it sat behind
+            self.assertEqual(row["input_uri"], os.path.join(docs, "note.txt"))
+            self.assertEqual(row["input_hash"], hashlib.md5(text.encode()).hexdigest())
+            frame = row["input_locator"][0]
+            located[text[frame["start"] : frame["end"]]] = row["value"]["value"]
+        # the offsets read back out of the document as the sentences the labels were assigned to
+        self.assertEqual(located, {"Ada wrote it.": ["who"], "Babbage built it.": ["who"]})
 
     def test_a_result_with_no_input_has_nothing_to_record(self):
         res = self.store(ItemResult("standalone"), self.comp_a)
