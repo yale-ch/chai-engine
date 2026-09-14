@@ -34,6 +34,7 @@ from chai.storage import (
     save_correction,
     save_postgres_correction,
     source_value,
+    token_usage_summary,
 )
 from chai.workflow import Workflow
 
@@ -1283,3 +1284,83 @@ class TestPostgresIdentifiers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTokenUsageSummary(unittest.TestCase):
+    """Totalling the token usage an AI run recorded in its JSON-Lines log."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.log = os.path.join(self.dir, "run.jsonl")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def write(self, records):
+        with open(self.log, "w") as fh:
+            for record in records:
+                fh.write(json.dumps(record) + "\n")
+
+    def usage(self, total=1000, prompt=200, images=700, thinking=50, result=50):
+        return {
+            "type": "TEXT",
+            "duration": 1.5,
+            "token_usage": {
+                "total": total,
+                "prompt": prompt,
+                "images": images,
+                "thinking": thinking,
+                "result": result,
+            },
+        }
+
+    def test_totals_per_component_and_overall(self):
+        self.write(
+            [
+                {"processorId": "transcribe", "metadata": self.usage()},
+                {"processorId": "transcribe", "metadata": self.usage()},
+                {"processorId": "translate", "metadata": self.usage(500, 400, 0, 0, 100)},
+            ]
+        )
+        summary = token_usage_summary(self.log)
+        self.assertEqual(summary["records"], 3)
+        self.assertEqual(summary["components"]["transcribe"]["calls"], 2)
+        self.assertEqual(summary["components"]["transcribe"]["input"], 1800)
+        self.assertEqual(summary["components"]["transcribe"]["images"], 1400)
+        self.assertEqual(summary["components"]["translate"]["input"], 400)
+        self.assertEqual(summary["total"]["total"], 2500)
+        self.assertEqual(summary["total"]["duration"], 4.5)
+
+    def test_results_without_usage_are_counted_not_ignored(self):
+        self.write(
+            [
+                {"processorId": "transcribe", "metadata": self.usage()},
+                {"processorId": "save_text", "metadata": {"type": "TEXT"}},
+            ]
+        )
+        summary = token_usage_summary(self.log)
+        self.assertEqual(summary["without_usage"], 1)
+        self.assertEqual(summary["total"]["calls"], 1)
+        self.assertNotIn("save_text", summary["components"])
+
+    def test_missing_modality_breakdown_falls_back_to_the_total(self):
+        # The API did not break the prompt down by modality; what is left of the total went in
+        self.write([{"processorId": "t", "metadata": self.usage(1000, -1, -1, 100, 200)}])
+        summary = token_usage_summary(self.log)
+        self.assertEqual(summary["total"]["input"], 700)
+        self.assertEqual(summary["total"]["total"], 1000)
+
+    def test_prices_give_a_cost_with_thinking_billed_as_output(self):
+        self.write([{"processorId": "t", "metadata": self.usage(1_000_000, 1_000_000, 0, 500_000, 500_000)}])
+        summary = token_usage_summary(self.log, input_price=1.0, output_price=10.0)
+        # 1M in at $1, and 0.5M thinking + 0.5M output at $10
+        self.assertAlmostEqual(summary["total"]["cost"], 11.0)
+
+    def test_reads_usage_from_a_whole_result_column(self):
+        self.write([{"step": "t", "@record": {"id": "x", "metadata": self.usage()}}])
+        summary = token_usage_summary(self.log)
+        self.assertEqual(summary["components"]["t"]["calls"], 1)
+
+    def test_renamed_step_column(self):
+        self.write([{"step": "transcribe", "metadata": self.usage()}])
+        self.assertIn("transcribe", token_usage_summary(self.log)["components"])

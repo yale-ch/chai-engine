@@ -507,6 +507,79 @@ class FileSystemStorage(Storage):
         return input
 
 
+class TextFileStorage(Storage):
+    """Writes each Result's text to a file of its own, named after the input it was made from.
+
+    Where ``FileSystemStorage`` keeps the whole result as JSON in a pairtree, this keeps just the
+    text, under a name a person can find: a run over a directory of page images that transcribes and
+    translates each page writes ``f0007r.txt`` per page in each of its two output directories, one
+    file per page rather than one file per run. The name comes from the nearest file up the result's
+    provenance chain (or the result named by ``name_from``), so it survives however many steps sit
+    between the page and the text. Values that are not text are written as JSON. Returns the input
+    unchanged.
+
+    Settings:
+        - directory: where to write the files (default 'results'); created if it does not exist
+        - name_from: id of the component whose result in the chain names the file; its value (or file
+          name) is used (default: the nearest file up the chain)
+        - suffix: appended to the name, e.g. '-en' for 'f0007r-en.txt' (default '')
+        - extension: file extension including the dot (default '.txt')
+        - encoding: text encoding to write with (default 'utf-8')
+        - overwrite: overwrite an existing file (default true); false adds a '.1', '.2', ... suffix
+    """
+
+    def __init__(self, tree, workflow, parent=None):
+        super().__init__(tree, workflow, parent)
+        self.directory = self.settings.get("directory", "results")
+        self.name_from = self.settings.get("name_from", "") or ""
+        self.suffix = self.settings.get("suffix", "")
+        self.extension = self.settings.get("extension", ".txt")
+        self.encoding = self.settings.get("encoding", "utf-8")
+        self.overwrite = bool(self.settings.get("overwrite", True))
+        os.makedirs(self.directory, exist_ok=True)
+
+    def result_text(self, input: Result):
+        """The text to write: the value itself, decoded if it is bytes, or JSON if it is neither."""
+        value = input.value
+        if isinstance(value, (bytes, bytearray)):
+            return value.decode(self.encoding, "replace")
+        if isinstance(value, str):
+            return value
+        return json.dumps(_json_safe(value), indent=2)
+
+    def result_name(self, input: Result):
+        """The base name (no extension) for *input*'s file, from the input it was generated from."""
+        source = None
+        if self.name_from:
+            source = _source_result(input, self.name_from)
+            if source is None:
+                logger.warning(f"{self} found no result from '{self.name_from}' to name the file after")
+        name = ""
+        if source is not None:
+            name = source.file_name if isinstance(source, FileItemResult) else str(source.value)
+        else:
+            name = _uri_for(input) or ""
+        if not name:
+            # Nothing in the chain says where this came from; the result's own id at least is unique
+            return input.id
+        return os.path.splitext(os.path.basename(name.rstrip("/")))[0]
+
+    def _process(self, input: Result) -> Result:
+        if isinstance(input, FileItemResult):
+            # Writing a file result's text would mean reading the file back off disk to copy it
+            logger.warning(f"{self} was given a file result and wrote nothing: {input!r}")
+            return input
+        fn = os.path.join(self.directory, f"{self.result_name(input)}{self.suffix}{self.extension}")
+        if not self.overwrite and os.path.exists(fn):
+            version = 1
+            while os.path.exists(f"{fn}.{version}"):
+                version += 1
+            fn = f"{fn}.{version}"
+        with open(fn, "w", encoding=self.encoding) as fh:
+            fh.write(self.result_text(input))
+        return input
+
+
 class JsonLinesStorage(Storage):
     """Append each Result to one JSON-Lines file as soon as it is produced.
 
@@ -915,6 +988,108 @@ def jsonl_to_parquet(jsonl_file, parquet_file, schema=None, batch_size=50000, co
             if line:
                 writer.add(json.loads(line))
     return writer.close()
+
+
+#: The zero value of a usage total, and the order the counts are reported in.
+_USAGE_FIELDS = ("calls", "input", "text", "images", "thinking", "output", "total", "duration")
+
+
+def _usage_of(record, metadata_key="metadata"):
+    """The ``token_usage`` dict and duration recorded on one stored record, or ``None``.
+
+    Reads the metadata an AI component puts on its result (see ``GeminiComponent.get_usage``),
+    wherever the storage put it: the record's own ``metadata``, or the whole-result ``@record``
+    column the tabular storages write.
+    """
+    for holder in (record.get(metadata_key), record.get("@record"), record.get("value_json")):
+        if isinstance(holder, str):
+            try:
+                holder = json.loads(holder)
+            except ValueError:
+                continue
+        if isinstance(holder, dict):
+            meta = holder.get("metadata", holder) if "token_usage" not in holder else holder
+            if isinstance(meta, dict) and isinstance(meta.get("token_usage"), dict):
+                return meta["token_usage"], meta.get("duration", 0) or 0
+    return None
+
+
+def _add_usage(totals, usage, duration):
+    """Add one call's counts to a running total, filling in what the API did not break down."""
+    def count(key):
+        value = usage.get(key, 0)
+        return value if isinstance(value, (int, float)) and value > 0 else 0
+
+    text, images = count("prompt"), count("images")
+    thinking, output, total = count("thinking"), count("result"), count("total")
+    sent = text + images
+    if not sent and total:
+        # No per-modality breakdown in the response: what is left of the total is what went in
+        sent = max(total - thinking - output, 0)
+    if not total:
+        total = sent + thinking + output
+    totals["calls"] += 1
+    totals["input"] += sent
+    totals["text"] += text
+    totals["images"] += images
+    totals["thinking"] += thinking
+    totals["output"] += output
+    totals["total"] += total
+    totals["duration"] += duration
+
+
+def token_usage_summary(
+    jsonl_file, step_key=None, metadata_key="metadata", input_price=None, output_price=None
+):
+    """Total the tokens (and optionally the cost) an AI run recorded, per component and overall.
+
+    Every AI component records what a call used in its result's ``token_usage`` metadata, so a run
+    that persisted its results -- ``JsonLinesStorage`` is the cheapest way, one line per result as it
+    is produced -- can be totalled afterwards without re-reading anything from the API. Lines with no
+    token usage (deterministic steps, and calls whose response carried no usage metadata) are counted
+    in ``without_usage`` rather than silently ignored, so a suspiciously cheap-looking run is visible.
+
+    Returns ``{"components": {id: counts}, "total": counts, "records", "without_usage"}``, where each
+    counts dict holds ``calls``, ``input`` (everything sent: ``text`` + ``images``), ``thinking``,
+    ``output``, ``total`` and ``duration`` in seconds. *input_price* and *output_price*, in dollars
+    per million tokens, add a ``cost`` to each: thinking tokens are billed as output. Take the prices
+    from the provider's own pricing page for the exact model -- they are not guessed here.
+    """
+    components = {}
+    records = 0
+    without_usage = 0
+    with open(jsonl_file, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            records += 1
+            record = json.loads(line)
+            found = _usage_of(record, metadata_key)
+            if found is None:
+                without_usage += 1
+                continue
+            step = record.get(step_key) if step_key else None
+            if step is None:
+                step = record.get("processorId", record.get("step", "unknown"))
+            totals = components.setdefault(str(step), dict.fromkeys(_USAGE_FIELDS, 0))
+            _add_usage(totals, *found)
+
+    total = dict.fromkeys(_USAGE_FIELDS, 0)
+    for counts in components.values():
+        for key in _USAGE_FIELDS:
+            total[key] += counts[key]
+    if input_price is not None or output_price is not None:
+        for counts in list(components.values()) + [total]:
+            counts["cost"] = (counts["input"] * (input_price or 0) / 1_000_000) + (
+                (counts["output"] + counts["thinking"]) * (output_price or 0) / 1_000_000
+            )
+    return {
+        "components": components,
+        "total": total,
+        "records": records,
+        "without_usage": without_usage,
+    }
 
 
 _PG_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
