@@ -16,7 +16,8 @@ tables have different shapes; a directory of typed files keeps each table's colu
 RESULT and ANNOTATION are the payload; the rows they point at come with them, so the bundle can be
 loaded into an empty central database without a foreign key failing:
 
-* the WORKFLOW of every exported result, and that workflow's ``previous_id`` chain
+* the WORKFLOW_RUN of every exported result, the WORKFLOW that run belongs to, and that
+  workflow's ``previous_id`` chain
 * the PROJECT of every exported workflow
 * the USER named by an exported result's ``editor_user_id`` or an annotation's ``user_id``
 * every result in an exported result's ``previous_id`` chain, and every annotation in an exported
@@ -40,6 +41,7 @@ Needs ``pyarrow`` (as the other Parquet paths do) and ``psycopg``.
 """
 
 import argparse
+import contextlib
 import datetime
 import json
 import logging
@@ -64,7 +66,7 @@ MANIFEST = "manifest.json"
 MANIFEST_VERSION = 1
 
 # The tables a results-and-annotations export carries, parents before children.
-EXPORT_ORDER = ["PROJECT", "USER", "WORKFLOW", "RESULT", "ANNOTATION"]
+EXPORT_ORDER = ["PROJECT", "USER", "WORKFLOW", "WORKFLOW_RUN", "RESULT", "ANNOTATION"]
 
 # Added to it by --include-permissions, keeping the same parents-first order.
 PERMISSION_ORDER = ["ROLE", "WF_PERMISSION", "PJ_PERMISSION"]
@@ -75,6 +77,7 @@ PERMISSION_ORDER = ["ROLE", "WF_PERMISSION", "PJ_PERMISSION"]
 KINDS = {
     "UUID": "string",
     "TEXT": "string",
+    "BOOLEAN": "bool",
     "INTEGER": "int",
     "DOUBLE PRECISION": "float",
     "JSONB": "json",
@@ -123,7 +126,8 @@ SELECT_RESULTS = """
 CREATE TEMP TABLE sel_results AS
 WITH RECURSIVE chain AS (
     SELECT r.id, r.previous_id FROM {RESULT} r
-    WHERE r.workflow_id IN (SELECT id FROM sel_wf_seed)
+    JOIN {WORKFLOW_RUN} wr ON wr.id = r.workflow_run_id
+    WHERE wr.workflow_id IN (SELECT id FROM sel_wf_seed)
       AND (%(since)s::timestamptz IS NULL OR r.md_timestamp >= %(since)s::timestamptz)
   UNION
     SELECT r.id, r.previous_id FROM {RESULT} r JOIN chain c ON r.id = c.previous_id
@@ -160,12 +164,21 @@ WITH RECURSIVE chain AS (
 SELECT DISTINCT id FROM chain WHERE id NOT IN (SELECT id FROM sel_results)
 """
 
+# Every run an exported result belongs to; RESULT.workflow_run_id is NOT NULL, so the run has to
+# travel with it. Runs of a named workflow come too, so an empty run reaches the central database.
+SELECT_WORKFLOW_RUNS = """
+CREATE TEMP TABLE sel_workflow_runs AS
+SELECT DISTINCT wr.id FROM {WORKFLOW_RUN} wr
+WHERE wr.id IN (SELECT workflow_run_id FROM {RESULT} WHERE id IN (SELECT id FROM sel_results))
+   OR wr.workflow_id IN (SELECT id FROM sel_wf_seed)
+"""
+
 SELECT_WORKFLOWS = """
 CREATE TEMP TABLE sel_workflows AS
 WITH RECURSIVE chain AS (
     SELECT w.id, w.previous_id FROM {WORKFLOW} w
     WHERE w.id IN (SELECT id FROM sel_wf_seed)
-       OR w.id IN (SELECT workflow_id FROM {RESULT} WHERE id IN (SELECT id FROM sel_results))
+       OR w.id IN (SELECT workflow_id FROM {WORKFLOW_RUN} WHERE id IN (SELECT id FROM sel_workflow_runs))
   UNION
     SELECT w.id, w.previous_id FROM {WORKFLOW} w JOIN chain c ON w.id = c.previous_id
 )
@@ -228,6 +241,7 @@ SELECTIONS = {
     "USER": "sel_users",
     "ROLE": "sel_roles",
     "WORKFLOW": "sel_workflows",
+    "WORKFLOW_RUN": "sel_workflow_runs",
     "WF_PERMISSION": "sel_wf_permissions",
     "PJ_PERMISSION": "sel_pj_permissions",
     "RESULT": "sel_results",
@@ -239,7 +253,7 @@ def _select(cursor, names, since=None, project=None, workflow=None, include_perm
     """Build the temporary id tables for one export; returns ``{entity: rows selected}``."""
     filters = {"since": since, "project": project, "workflow": workflow}
     statements = [SELECT_WORKFLOW_SEED, SELECT_RESULTS, SELECT_ANNOTATIONS, EXPAND_RESULTS]
-    statements += [SELECT_WORKFLOWS, SELECT_PROJECTS]
+    statements += [SELECT_WORKFLOW_RUNS, SELECT_WORKFLOWS, SELECT_PROJECTS]
     if include_permissions:
         statements += SELECT_PERMISSIONS
     statements.append(SELECT_USERS)
@@ -398,6 +412,29 @@ def read_manifest(directory):
     return {"chai_tea_export": MANIFEST_VERSION, "tables": tables}
 
 
+@contextlib.contextmanager
+def _triggers_suspended(cursor, table):
+    """Turn off *table*'s own triggers for the duration of a load, if this account may.
+
+    A transfer copies rows verbatim, ``modified`` included -- but the schema's ``modified`` trigger
+    would stamp every updated row with the load time instead, so a row that crossed unchanged would
+    come out looking edited. Disabling the trigger is transactional, so a failed load leaves it
+    enabled either way. An account that does not own the table cannot disable them; the load still
+    runs, and only ``modified`` is affected.
+    """
+    disabled = False
+    try:
+        cursor.execute(f"ALTER TABLE {table} DISABLE TRIGGER USER")
+        disabled = True
+    except Exception as e:
+        logger.debug("Could not disable triggers on %s (%s); modified will be restamped", table, e)
+    try:
+        yield
+    finally:
+        if disabled:
+            cursor.execute(f"ALTER TABLE {table} ENABLE TRIGGER USER")
+
+
 def load_parquet(
     directory,
     params=None,
@@ -473,11 +510,12 @@ def load_parquet(
                 assignments = ", ".join(
                     f"{_pg_identifier(c)} = EXCLUDED.{_pg_identifier(c)}" for c in columns if c != "id"
                 )
-                cursor.execute(
-                    f"INSERT INTO {table} ({quoted}) "
-                    f"SELECT {quoted} FROM (SELECT DISTINCT ON (id) {quoted} FROM {stage} ORDER BY id) s "
-                    f"ON CONFLICT (id) DO UPDATE SET {assignments}"
-                )
+                with _triggers_suspended(cursor, table):
+                    cursor.execute(
+                        f"INSERT INTO {table} ({quoted}) "
+                        f"SELECT {quoted} FROM (SELECT DISTINCT ON (id) {quoted} FROM {stage} ORDER BY id) s "
+                        f"ON CONFLICT (id) DO UPDATE SET {assignments}"
+                    )
             else:
                 # No conflict target, so a row already there is left alone whichever constraint says so
                 cursor.execute(

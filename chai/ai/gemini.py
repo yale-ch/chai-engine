@@ -32,7 +32,7 @@ class GeminiComponent(Component):
     values are formatted into ``{text_input_<i>}`` prompt slots or attached as text parts, IMAGE
     entries are attached as image parts (other binary types are not supported yet). Output is an
     ``ItemResult`` whose value is the parsed JSON (when ``expected_output`` is 'json') or the raw text,
-    with ``token_usage``/``duration``/``type`` metadata. Authentication comes from the environment:
+    with ``token_usage``/``duration``/``type``/``engine``/``model`` metadata. Authentication comes from the environment:
     ``GOOGLE_CLOUD_PROJECT`` selects Vertex AI, otherwise ``GEMINI_API_KEY``/``GOOGLE_API_KEY`` is
     required.
 
@@ -60,6 +60,8 @@ class GeminiComponent(Component):
         - thinking_budget: thinking-token budget for 2.5 models only (default 0 = thinking off)
         - thinking_level: reasoning effort for Gemini 3+ models: 'low', 'medium' or 'high' (default 'low')
     """
+
+    ENGINE_NAME: str = "gemini"
 
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)
@@ -389,6 +391,12 @@ class GeminiComponent(Component):
 
         toks = self.get_usage(resp)
 
-        metadata = {"token_usage": toks, "duration": duration, "type": data_type}
+        metadata = {
+            "token_usage": toks,
+            "duration": duration,
+            "type": data_type,
+            "engine": self.ENGINE_NAME,
+            "model": self.model,
+        }
         r = ItemResult(result, metadata=metadata)
         return r

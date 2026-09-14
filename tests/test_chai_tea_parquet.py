@@ -62,7 +62,8 @@ class TestSchemaColumns(unittest.TestCase):
     def test_export_order_puts_parents_first(self):
         for order in (chai_tea_parquet.export_order(), chai_tea_parquet.export_order(True)):
             self.assertLess(order.index("PROJECT"), order.index("WORKFLOW"))
-            self.assertLess(order.index("WORKFLOW"), order.index("RESULT"))
+            self.assertLess(order.index("WORKFLOW"), order.index("WORKFLOW_RUN"))
+            self.assertLess(order.index("WORKFLOW_RUN"), order.index("RESULT"))
             self.assertLess(order.index("RESULT"), order.index("ANNOTATION"))
             self.assertLess(order.index("USER"), order.index("RESULT"))
         self.assertNotIn("WF_PERMISSION", chai_tea_parquet.export_order())
@@ -140,14 +141,19 @@ class TestChaiTeaParquet(unittest.TestCase):
             "INSERT INTO pj_permissions (user_id, project_id, role_id) VALUES (%s,%s,%s)",
             (ids["admin"], ids["project"], ids["role"]),
         )
+        for key in ("wf1", "wf2", "wf3"):
+            ids[f"run_{key}"] = one(
+                "INSERT INTO workflow_runs (workflow_id, was_successful) VALUES (%s, true) RETURNING id",
+                (ids[key],),
+            )
         ids["old"] = one(
-            """INSERT INTO results (workflow_id, process_id, input, input_hash, input_segment,
+            """INSERT INTO results (workflow_run_id, process_id, input, input_hash, input_segment,
                                     input_sequence, value, metadata, extra_data, md_cost, md_duration,
                                     md_timestamp)
                VALUES (%s,'transcriber','page1.png','abc','[{"bbox": [1, 2, 3, 4]}]',1,%s,%s,%s,
                        0.01,2.5,'2026-01-15T10:00:00Z') RETURNING id""",
             (
-                ids["wf1"],
+                ids["run_wf1"],
                 json.dumps({"text": "olde ledger"}),
                 json.dumps({"model": "gemini"}),
                 json.dumps({"note": "x"}),
@@ -155,18 +161,18 @@ class TestChaiTeaParquet(unittest.TestCase):
         )
         # the correction of it, in the workflow that superseded the one that made it
         ids["new"] = one(
-            """INSERT INTO results (workflow_id, value, previous_id, editor_user_id, md_timestamp)
+            """INSERT INTO results (workflow_run_id, value, previous_id, editor_user_id, md_timestamp)
                VALUES (%s,%s,%s,%s,'2026-09-05T09:00:00Z') RETURNING id""",
-            (ids["wf2"], json.dumps({"text": "old ledger"}), ids["old"], ids["editor"]),
+            (ids["run_wf2"], json.dumps({"text": "old ledger"}), ids["old"], ids["editor"]),
         )
         ids["recent"] = one(
-            """INSERT INTO results (workflow_id, value, previous_id, md_timestamp)
+            """INSERT INTO results (workflow_run_id, value, previous_id, md_timestamp)
                VALUES (%s,%s,%s,'2026-09-06T09:00:00Z') RETURNING id""",
-            (ids["wf2"], json.dumps({"text": "old ledger!"}), ids["new"]),
+            (ids["run_wf2"], json.dumps({"text": "old ledger!"}), ids["new"]),
         )
         ids["elsewhere"] = one(
-            "INSERT INTO results (workflow_id, value, md_timestamp) VALUES (%s,%s,'2026-09-07T09:00:00Z') RETURNING id",
-            (ids["wf3"], json.dumps({"boxes": [[1, 2, 3, 4]]})),
+            "INSERT INTO results (workflow_run_id, value, md_timestamp) VALUES (%s,%s,'2026-09-07T09:00:00Z') RETURNING id",
+            (ids["run_wf3"], json.dumps({"boxes": [[1, 2, 3, 4]]})),
         )
         ids["flag"] = one(
             """INSERT INTO annotations (target_result_id, user_id, flag, comment, metadata, md_timestamp)
@@ -211,10 +217,10 @@ class TestChaiTeaParquet(unittest.TestCase):
         manifest = self.export()
         self.assertEqual({t["file"] for t in manifest["tables"]} | {"manifest.json"}, set(os.listdir(self.bundle)))
         counts = {t["entity"]: t["rows"] for t in manifest["tables"]}
-        self.assertEqual(counts, {"PROJECT": 2, "USER": 2, "WORKFLOW": 3, "RESULT": 4, "ANNOTATION": 3})
+        self.assertEqual(counts, {"PROJECT": 2, "USER": 2, "WORKFLOW": 3, "WORKFLOW_RUN": 3, "RESULT": 4, "ANNOTATION": 3})
 
         loaded = self.load()
-        self.assertEqual(sum(t["written"] for t in loaded.values()), 14)
+        self.assertEqual(sum(t["written"] for t in loaded.values()), 17)
         # the values, the jsonb, the timestamps and the links all come across unchanged
         self.assert_same_rows(["PROJECT", "WORKFLOW", "RESULT", "ANNOTATION"])
         self.assertEqual(
@@ -285,7 +291,7 @@ class TestChaiTeaParquet(unittest.TestCase):
     def test_a_project_filter_leaves_the_other_project_behind(self):
         manifest = self.export(project="Photos")
         counts = {t["entity"]: t["rows"] for t in manifest["tables"]}
-        self.assertEqual(counts, {"PROJECT": 1, "USER": 1, "WORKFLOW": 1, "RESULT": 1, "ANNOTATION": 1})
+        self.assertEqual(counts, {"PROJECT": 1, "USER": 1, "WORKFLOW": 1, "WORKFLOW_RUN": 1, "RESULT": 1, "ANNOTATION": 1})
         self.load()
         self.assertEqual(self.query(self.central, "SELECT name FROM projects"), [("Photos",)])
 

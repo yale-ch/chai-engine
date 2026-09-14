@@ -27,7 +27,7 @@ class OllamaComponent(Component):
     Input is an ``ItemResult`` or list-shaped Result whose entries carry ``type`` metadata: TEXT/DATA
     values fill ``{text_input_<i>}`` prompt slots, IMAGE entries are attached as raw image bytes.
     Output is an ``ItemResult`` whose value is parsed JSON (when ``expected_output`` is 'json') or raw
-    text, with ``token_usage``/``duration``/``type`` metadata. A ``</think>`` block at the start of
+    text, with ``token_usage``/``duration``/``type``/``engine``/``model`` metadata. A ``</think>`` block at the start of
     the reply (reasoning models) is stripped. An unreachable server is logged at construction time and
     raises only when the component actually runs.
 
@@ -40,6 +40,8 @@ class OllamaComponent(Component):
         - top_p: nucleus sampling threshold (default 0.9)
         - max_output_tokens: response token cap, mapped to num_predict (default 20000)
     """
+
+    ENGINE_NAME: str = "ollama"
 
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)
@@ -183,6 +185,12 @@ class OllamaComponent(Component):
 
         toks = self.get_usage(resp)
 
-        metadata = {"token_usage": toks, "duration": duration, "type": data_type}
+        metadata = {
+            "token_usage": toks,
+            "duration": duration,
+            "type": data_type,
+            "engine": self.ENGINE_NAME,
+            "model": self.model,
+        }
         r = ItemResult(result, metadata=metadata)
         return r

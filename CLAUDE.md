@@ -60,6 +60,8 @@ Every component supports an error policy via settings (`retries`, `retry_delay`,
 
 AI components are typically mixed with base components (e.g., `GeminiTranscriber` extends both `Transcriber` and `GeminiComponent`).
 
+Every AI component records the same metadata on the result of a call: `token_usage` (`total`, `prompt`, `images`, `thinking`, `result` -- a provider that did not break a modality down writes `-1` for it, not 0), `duration` in seconds, `type`, plus `engine` (the component's `ENGINE_NAME`) and `model` (the model actually used). Storage keeps that dict whole, so a run can be totalled by model afterwards without re-reading anything from the API -- see `token_usage_summary` and `chai_tea_import.py`.
+
 ### Workflow Definition
 
 Workflows are defined as JSON trees with `steps` and `next_steps`:
@@ -96,6 +98,17 @@ Workflows are defined as JSON trees with `steps` and `next_steps`:
 - `chai/ai/gemini.py`, `chai/ai/lm_studio.py`, `chai/ai/ollama.py`: AI component implementations.
 - `chai/transcriber.py`: Transcriber components with AI mixins.
 - `chai/ai_utils.py`: JSON extraction utilities for LLM responses.
+
+### CHAI-TEA database (top level, not part of the `chai` package)
+
+The shared PostgreSQL schema a run's results are published into, defined by the ER diagram in `mermaid-er-database.md`: PROJECT -> WORKFLOW -> WORKFLOW_RUN -> RESULT, with ANNOTATION, USER, ROLE and the two permission tables.
+
+- `chai_tea_schema.sql`: the DDL as a plain file, for `psql -f` against Amazon RDS or any PostgreSQL server. Verified to build the same schema as the Python builder.
+- `chai_tea_schema.py`: the same schema built from Python (`--sql` prints the DDL, `--drop` rebuilds). `column_types(entity)` is the single description of each table's columns, read by everything that has to agree with the schema.
+- `chai_tea_import.py`: loads a run out of **any** storage layer (`.jsonl`, `.parquet`, SQLite, a `PostgresStorage` table) into the schema, one RESULT row per stored result under a WORKFLOW_RUN row. The AI metadata dict goes into `metadata` jsonb whole; `md_duration` and `md_timestamp` are promoted to columns, and `md_cost` is worked out from `--price MODEL=IN/OUT` rates given per million tokens.
+- `chai_tea_parquet.py`: moves CHAI-TEA rows from a local instance to a central one via a Parquet bundle, carrying the parent rows each exported row needs so nothing dangles.
+
+Editing a table's columns in `chai_tea_schema.py` means editing `chai_tea_schema.sql` to match; `tests/test_chai_tea_parquet.py` and `tests/test_chai_tea_import.py` cover both.
 
 ### Common Patterns
 

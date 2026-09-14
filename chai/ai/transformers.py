@@ -24,7 +24,7 @@ class TransformersComponent(Component):
     Input is an ``ItemResult`` or list-shaped Result whose TEXT/DATA entries fill ``{text_input_<i>}``
     prompt slots (a TEXT/DATA entry without a matching slot raises; images are not supported). Output
     is an ``ItemResult`` whose value is parsed JSON ('json'), parsed YAML ('yaml') or raw text,
-    depending on ``expected_output``, with ``token_usage``/``duration``/``type`` metadata. The chat
+    depending on ``expected_output``, with ``token_usage``/``duration``/``type``/``engine``/``model`` metadata. The chat
     template is applied with thinking disabled.
 
     Settings:
@@ -35,12 +35,16 @@ class TransformersComponent(Component):
         - tie_word_embeddings: passed to from_pretrained (default true)
     """
 
+    ENGINE_NAME: str = "transformers"
+
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)
         model = self.settings.get("model", None)
         twe = self.settings.get("tie_word_embeddings", True)
         if model is None:
             raise ValueError(f"model setting not found for {self}")
+        # self.model is the loaded model object, so the name it was loaded from is kept separately
+        self.model_name = model
         self.tokenizer = AutoTokenizer.from_pretrained(model)
         self.model = AutoModelForCausalLM.from_pretrained(
             model, tie_word_embeddings=twe, torch_dtype="auto", device_map="auto"
@@ -139,5 +143,11 @@ class TransformersComponent(Component):
             data_type = "TEXT"
 
         toks = self.get_usage(resp)
-        metadata = {"token_usage": toks, "duration": duration, "type": data_type}
+        metadata = {
+            "token_usage": toks,
+            "duration": duration,
+            "type": data_type,
+            "engine": self.ENGINE_NAME,
+            "model": self.model_name,
+        }
         return ItemResult(result, metadata=metadata)

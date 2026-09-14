@@ -28,7 +28,7 @@ class LMStudioComponent(Component):
     Input is an ``ItemResult`` or list-shaped Result whose entries carry ``type`` metadata: TEXT/DATA
     values fill ``{text_input_<i>}`` prompt slots, IMAGE entries are uploaded as image attachments
     (optionally downscaled first). Output is an ``ItemResult`` whose value is parsed JSON (when
-    ``expected_output`` is 'json') or raw text, with ``token_usage``/``duration``/``type`` metadata.
+    ``expected_output`` is 'json') or raw text, with ``token_usage``/``duration``/``type``/``engine``/``model`` metadata.
     A ``</think>`` block at the start of the reply (reasoning models) is stripped.
 
     Settings:
@@ -42,6 +42,8 @@ class LMStudioComponent(Component):
         - max_output_tokens: response token cap (default 32000)
         - max_image_size: long-edge pixel limit; images are downscaled before upload if set (default 0 = off)
     """
+
+    ENGINE_NAME: str = "lm-studio"
 
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)
@@ -194,6 +196,12 @@ class LMStudioComponent(Component):
 
         toks = self.get_usage(resp)
 
-        metadata = {"token_usage": toks, "duration": duration, "type": data_type}
+        metadata = {
+            "token_usage": toks,
+            "duration": duration,
+            "type": data_type,
+            "engine": self.ENGINE_NAME,
+            "model": self.model,
+        }
         r = ItemResult(result, metadata=metadata)
         return r
