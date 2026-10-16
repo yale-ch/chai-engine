@@ -251,6 +251,14 @@ Default prompts live in `chai/data/prompts.json`; reusable step templates in
   theme it (Yale palette by default), and **Export** a standalone Flask app
   runnable with `uv run app.py`.
 
+## Examples
+
+`examples/` holds runnable scripts and workflow JSON. `examples/reconcile_wikidata.py` is the
+end-to-end shape chai is built for: NER with an LLM, candidate records from Wikidata (plain
+Python), and a System One style selection -- which candidate does this mention refer to, or none
+-- with every model call priced. `examples/workflow-system1.json` is the selection step alone as
+workflow JSON.
+
 ## Where chai is going
 
 [docs/roadmap.md](docs/roadmap.md) lists what the engine still needs to reach its goals, drawn

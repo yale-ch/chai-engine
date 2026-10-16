@@ -112,8 +112,8 @@ Workflows are defined as JSON trees with `steps` and `next_steps`:
 # Run the unit tests (no API keys, no network)
 python -m unittest discover -s tests
 
-# Run an example as a live test case (needs credentials in .env)
-python examples/experiment.py
+# Run an example as a live test case (needs credentials in .env; network for Wikidata)
+python examples/reconcile_wikidata.py
 ```
 
 All components are real (no mock components): deterministic ones (`KeywordClassifier`,

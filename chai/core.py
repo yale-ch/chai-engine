@@ -305,12 +305,17 @@ class Component(BaseThing):
                 # list of processors, on to which we register the new result for the input
                 inp = input
                 targets = self.register_on[:]
-                while targets:
+                # The chain ends at the raw run input (or None); a target that never
+                # appears in it -- e.g. this component run outside the iterator it
+                # registers on, as a test or a one-off -- is simply not registered.
+                while targets and isinstance(inp, Result):
                     if inp.processor in targets:
                         inp.register_result(self, new_result)
                         targets.remove(inp.processor)
                     # walk up one step
                     inp = inp.input
+                if targets:
+                    logger.debug(f"{self}: register_on target(s) {targets} not found in the input chain")
 
         # and call process_out to get to the next step
         return self.process_out(new_result)

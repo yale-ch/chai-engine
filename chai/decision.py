@@ -102,7 +102,8 @@ class DecisionBase:
           {text} as the input text (default: the input text, or a dict's state/context_text/text field)
         - layout: described (default) | in_state | bare -- where option descriptions go: on the
           options, listed in the state (Laya's best layout), or nowhere
-        - options_heading: heading over the options listed in the state for layout in_state (default 'Options:')
+        - options_heading: heading over the options listed in the state for layout in_state; {field}
+          placeholders are filled from a dict input (default 'Options:')
         - max_options: cap on options sent to the model, before any none option (default 0 = all)
         - the model's own settings pass through: api_key, api_base, timeout, device, subfolder,
           use_instruction, temperature, pricing, litellm_params, ... (see chai.ai.system1)
@@ -122,6 +123,9 @@ class DecisionBase:
 
     def fields_for(self, input) -> dict:
         return {**input_fields(input), "step_name": self.name}
+
+    def heading_for(self, input) -> str:
+        return render_template(self.options_heading, self.fields_for(input))
 
     def build_options(self, spec: dict, input) -> List[dict]:
         """Options for one question spec: static ``options``, or ``options_from`` a list in the input."""
@@ -223,7 +227,7 @@ class DecisionClassifier(DecisionBase, Classifier):
                 answer["expected"] = 0.0
             meta = {"model": self.model.model, "provider": self.model.provider.name, "skipped": "no options"}
         else:
-            answers, meta = self.model.decide(state, {"q": question}, self.layout, self.options_heading)
+            answers, meta = self.model.decide(state, {"q": question}, self.layout, self.heading_for(input))
             answer = answers["q"]
         label = self.label_for(answer)
         metadata = {
@@ -334,7 +338,7 @@ class DecisionExtractor(DecisionBase, Extractor):
     def _process(self, input):
         state = self.state_for(input)
         questions = {name: self.build_question(spec, input) for name, spec in self.question_specs.items()}
-        answers, meta = self.model.decide(state, questions, self.layout, self.options_heading)
+        answers, meta = self.model.decide(state, questions, self.layout, self.heading_for(input))
         metadata = {
             "type": "DATA",
             **self.usage_metadata(meta),

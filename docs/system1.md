@@ -98,6 +98,14 @@ on the gate's `component_end` event.
 Output: `ItemResult({"team": {...}, "urgent": {...}, "tone": {...}})`. Jev answers all questions in
 one call; the other providers loop.
 
+## A complete example
+
+`examples/reconcile_wikidata.py` runs the whole reconciliation shape: an LLM extractor finds the
+entities, plain Python (outside chai) searches Wikidata for each name, and a `DecisionClassifier`
+asks the model which candidate the mention refers to -- candidates listed in the state, a "none"
+option added -- then prints each entity's chosen record, its probability and what the run cost.
+`tests/test_example_reconcile.py` runs the same functions offline.
+
 ## Cost and usage
 
 Every decision result carries `model`, `token_usage` and `cost`, so the workflow's usage ledger
