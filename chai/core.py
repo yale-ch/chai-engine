@@ -241,9 +241,10 @@ class Component(BaseThing):
         """Run this component on *input* and forward the output to ``next_steps``.
 
         Wraps ``_process`` with lifecycle events (``component_start`` / ``component_end``, or
-        ``component_error``), back-fills ``input``/``processor`` on the new result, performs
-        ``register_on`` derivative registration by walking up the input chain, and returns
-        ``process_out``'s result. Returns ``None`` when ``_process`` produced no result.
+        ``component_error``), back-fills ``input``/``processor`` on the new result, hands any
+        ``token_usage``/``cost`` metadata to the workflow's usage ledger, performs ``register_on``
+        derivative registration by walking up the input chain, and returns ``process_out``'s result.
+        Returns ``None`` when ``_process`` produced no result.
 
         Error policy (every component, via settings):
 
@@ -294,6 +295,11 @@ class Component(BaseThing):
             if new_result.processor is None:
                 new_result.processor = self
             # ... so that we can walk up the hierarchy to link results
+
+            # Model-backed components report what their call consumed (token_usage,
+            # cost, duration, model); the workflow keeps the run-wide tally.
+            if self.workflow is not None and self.workflow is not self:
+                self.workflow.record_usage(self, new_result.metadata)
 
             if isinstance(input, Result) and self.register_on:
                 # list of processors, on to which we register the new result for the input
