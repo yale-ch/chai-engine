@@ -140,7 +140,8 @@ Settings that are not set are not sent (the provider's defaults apply); a settin
 always sent, so a model that rejects it fails loudly instead of being silently ignored. In-process
 backends: `TransformersComponent` (text) and `MLXVLMComponent` (vision, Apple Silicon).
 
-**System One decision models** (Jev, Laya, GLiNER2.5-Decide, or any chat model as a baseline) are a
+**System One decision models** (the Jev API, and Jev-Omni, Laya and GLiNER2.5-Decide in process, or
+any chat model as a baseline) are a
 different kind of backend -- they answer typed questions with calibrated probabilities instead of
 text -- and have their own roles in `chai/decision.py`; see [docs/system1.md](docs/system1.md).
 
@@ -256,8 +257,9 @@ Default prompts live in `chai/data/prompts.json`; reusable step templates in
 `examples/` holds runnable scripts and workflow JSON. `examples/reconcile_wikidata.py` is the
 end-to-end shape chai is built for: NER with an LLM, candidate records from Wikidata (plain
 Python), and a System One style selection -- which candidate does this mention refer to, or none
--- with every model call priced. `examples/workflow-system1.json` is the selection step alone as
-workflow JSON.
+-- with every model call priced. `examples/system1_models.py` runs every available System One
+model side by side on the same decisions and reports accuracy, time and cost per model.
+`examples/workflow-system1.json` is the selection step alone as workflow JSON.
 
 ## Where chai is going
 

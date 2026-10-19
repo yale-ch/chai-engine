@@ -18,13 +18,15 @@ Every answer comes back in one canonical shape (see ``normalize_answer``)::
 ``System1Model`` picks its provider from the model id prefix, the way LiteLLM does for chat models:
 
     jev/jev-latest                      TypeSafe's Jev via POST /v1/systemone (TYPESAFE_API_KEY)
+    jev-omni/akhilaaa3/Jev-Omni         Jev-Omni, open weights (Gemma 4 12B), in process; ~48 GB of
+                                        weights and ~25 GB of accelerator memory
     laya/convaiinnovations/laya         Laya, open weights, in process (pip install laya)
     gliner/fastino/GLiNER2.5-Decide     GLiNER2.5-Decide, open weights, in process (pip install gliner2)
     <any LiteLLM chat model id>         a generative model asked for the same JSON -- a baseline for
                                         comparison; its probabilities are self-reported, not calibrated
 
-Models that only answer choice questions natively (GLiNER) get score and noul as a choice over the
-levels / over true-false, exactly as the bench's ``as_choice`` approaches do. ``apply_layout``
+Models that only answer choice questions natively (GLiNER, Jev-Omni) get score and noul as a choice
+over the levels / over true-false, exactly as the bench's ``as_choice`` approaches do. ``apply_layout``
 implements the bench's inference-time prompt approaches (``described`` / ``in_state`` / ``bare``), so
 the layout a model scored best with is one setting away.
 
@@ -365,7 +367,12 @@ class LayaProvider(DecisionProvider):
         answers = res.get("answers") if isinstance(res, dict) else None
         if not isinstance(answers, dict):
             raise RuntimeError(f"Laya returned no answers: {str(res)[:300]}")
-        return answers, {"model": (res.get("model") if isinstance(res, dict) else None) or self.model, "token_usage": _usage_from(res.get("usage")), "cost": 0.0}
+        return answers, {
+            "model": (res.get("model") if isinstance(res, dict) else None) or self.model,
+            "token_usage": _usage_from(res.get("usage")),
+            "cost": 0.0,
+            "device": str(getattr(agent, "device", "") or "") or None,
+        }
 
 
 _GLINER_RUNTIMES: dict = {}
@@ -385,10 +392,11 @@ class GlinerProvider(DecisionProvider):
     """GLiNER2.5-Decide (``fastino/GLiNER2.5-Decide``), a 340M encoder classifier, in process.
 
     Each question becomes one single-label classification over the state: choice options are the
-    labels (with their descriptions, this model's best layout), a score is a choice over the levels,
-    a noul is a choice over true/false with the statement as the instruction. Settings: ``device``
-    ('cuda', 'mps' or 'cpu'; default: first available) and ``use_instruction`` (pass choice/score
-    instructions to the model too; default false -- measured worse on reconciliation).
+    labels (with their descriptions, this model's best layout), a score is a choice over the levels
+    with the question as the instruction, a noul is a choice over true/false with the statement as
+    the instruction. Settings: ``device`` ('cuda', 'mps' or 'cpu'; default: first available) and
+    ``use_instruction`` (send a choice question's instructions too; default false -- measured worse
+    on reconciliation, so the state must name what is being decided, e.g. a ``Mention:`` line).
     """
 
     name = "gliner"
@@ -399,25 +407,13 @@ class GlinerProvider(DecisionProvider):
         self.device = settings.get("device") or None
         self.use_instruction = bool(settings.get("use_instruction", False))
 
-    @staticmethod
-    def pick_device(requested=None) -> str:
-        if requested:
-            return requested
-        import torch
-
-        if torch.cuda.is_available():
-            return "cuda"
-        if torch.backends.mps.is_available():
-            return "mps"
-        return "cpu"
-
     def classifier(self):
         key = (self.model, self.device or "")
         with _GLINER_LOCK, DEVICE_LOCK:
             if key not in _GLINER_RUNTIMES:
                 from gliner2.classification import Classifier  # heavy import, deferred
 
-                device = self.pick_device(self.device)
+                device = pick_device(self.device)
                 logger.info(f"Loading GLiNER2.5-Decide {self.model} on {device} (~1.9 GB)")
                 _GLINER_RUNTIMES[key] = (Classifier.from_pretrained(self.model).to(device).eval(), device)
             return _GLINER_RUNTIMES[key]
@@ -437,7 +433,9 @@ class GlinerProvider(DecisionProvider):
         classifier, device = self.classifier()
         answers = {}
         for name, q in questions.items():
-            instruction = q["instructions"] if (self.use_instruction or q["type"] == "noul") else None
+            # A choice's options usually say what they mean; score levels ("not at all", "partly")
+            # and true/false mean nothing without the question, so those always carry it.
+            instruction = q["instructions"] if (self.use_instruction or q["type"] != "choice") else None
             kw = {"instruction": gliner_sanitize(instruction)} if instruction else {}
             schema = ClassificationSchema().single(self.TASK, self.labels_for(q), **kw)
             with DEVICE_LOCK:
@@ -446,6 +444,173 @@ class GlinerProvider(DecisionProvider):
             choice = result.value(self.TASK)
             answers[name] = {"type": q["type"], "choice": choice, "probabilities": probs, "confidence": probs.get(choice, 0.0)}
         return answers, {"model": self.model, "token_usage": None, "cost": 0.0, "device": device}
+
+
+JEV_OMNI_FILES = [
+    "backbone/*",
+    "head.pt",
+    "runtime_buffers.pt",
+    "decision_config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "chat_template.jinja",
+]
+JEV_OMNI_MAX_OPTIONS = 256
+_JEV_OMNI_RUNTIMES: dict = {}
+_JEV_OMNI_LOCK = threading.Lock()
+
+
+def jev_omni_prompt(state: str, question: str, options: List[str]) -> str:
+    """The exact prompt Jev-Omni was trained on (the model repo's ``_prompt``)."""
+    choices = "\n".join(f"{i + 1}. {value}" for i, value in enumerate(options))
+    return (
+        f"{state}\n\n---\n\nQUESTION: {question}\n\nOPTIONS:\n{choices}\n\n"
+        f"Reply with only the number of the correct option (1-{len(options)}).\n"
+        "Output a single number and nothing else."
+    )
+
+
+def pick_device(requested=None) -> str:
+    """The torch device to load a local model on: *requested*, else CUDA, else Apple MPS, else CPU."""
+    if requested:
+        return requested
+    import torch
+
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+class JevOmniRuntime:
+    """A loaded Jev-Omni text classifier (Gemma 4 12B IT fine-tuned with a 256-way option head).
+
+    Follows the model repo's recipe, device-agnostic: the merged backbone is loaded in FP32 from
+    ``backbone/``, ``nn.Linear`` weights are cast to BF16, the runtime buffers and the FP32 head are
+    restored, and the forward pass runs under BF16 autocast. Only the text files are fetched; the
+    repo's multimodal copy and the Gemma base are not.
+    """
+
+    def __init__(self, model_id: str, device=None):
+        import importlib
+
+        import torch
+        from huggingface_hub import snapshot_download
+        from transformers import AutoTokenizer
+
+        from pathlib import Path
+
+        self.torch = torch
+        self.device = pick_device(device)
+        path = Path(snapshot_download(model_id, allow_patterns=JEV_OMNI_FILES))
+        cfg = json.loads((path / "decision_config.json").read_text())
+        if not cfg["backbone_module"].startswith("transformers.models."):
+            raise RuntimeError(f"unexpected Jev-Omni backbone module {cfg['backbone_module']!r}")
+        cls = getattr(importlib.import_module(cfg["backbone_module"]), cfg["backbone_class"])
+        model = cls.from_pretrained(path / "backbone", dtype=torch.float32, attn_implementation="sdpa").eval()
+        for module in model.modules():  # the reference recipe: BF16 Linear weights, everything else FP32
+            if isinstance(module, torch.nn.Linear):
+                module.weight.data = module.weight.data.to(torch.bfloat16)
+        model.to(self.device)
+        buffers = torch.load(path / "runtime_buffers.pt", map_location="cpu", weights_only=True)
+        for name, value in buffers.items():
+            parent, _, attr = name.rpartition(".")
+            setattr(model.get_submodule(parent) if parent else model, attr, value.to(self.device))
+        self.model = model
+        self.head = self._make_head(cfg["hidden_size"]).to(self.device).eval()
+        self.head.load_state_dict(torch.load(path / "head.pt", map_location=self.device, weights_only=True))
+        self.tokenizer = AutoTokenizer.from_pretrained(path)
+        if not self.tokenizer.chat_template:
+            raise RuntimeError("Jev-Omni tokenizer has no chat template")
+
+    def _make_head(self, hidden: int):
+        torch = self.torch
+
+        class Head256(torch.nn.Module):  # the module layout of the repo's load_model.Head256
+            def __init__(self):
+                super().__init__()
+                self.register_buffer("mu", torch.zeros(1, hidden))
+                self.register_buffer("sd", torch.ones(1, hidden))
+                self.linear = torch.nn.Linear(hidden, JEV_OMNI_MAX_OPTIONS, dtype=torch.float32)
+
+            def forward(self, features, counts):
+                z = self.linear((features.float() - self.mu) / self.sd)
+                mask = torch.arange(JEV_OMNI_MAX_OPTIONS, device=z.device)[None] >= counts[:, None]
+                return z.masked_fill(mask, -1e30)
+
+        return Head256()
+
+    def encode(self, prompt: str) -> List[int]:
+        msgs = [{"role": "user", "content": prompt}]
+        for kw in ({"enable_thinking": False}, {}):
+            for m in (msgs, [{"role": "user", "content": [{"type": "text", "text": prompt}]}]):
+                try:
+                    ids = self.tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=True, **kw)
+                except (TypeError, ValueError):
+                    continue
+                if hasattr(ids, "keys"):
+                    ids = ids["input_ids"]
+                if ids and isinstance(ids[0], list):
+                    ids = ids[0]
+                return list(ids)
+        raise ValueError("could not format the Jev-Omni prompt")
+
+    def predict(self, state: str, question: str, options: List[str]) -> dict:
+        """``{"probabilities": [p per option], "index", "input_tokens"}``."""
+        torch = self.torch
+        if not 2 <= len(options) <= JEV_OMNI_MAX_OPTIONS:
+            raise ValueError(f"Jev-Omni needs 2 to {JEV_OMNI_MAX_OPTIONS} options, got {len(options)}")
+        ids = self.encode(jev_omni_prompt(state, question, options))
+        with DEVICE_LOCK, torch.inference_mode():
+            x = torch.tensor([ids], device=self.device)
+            autocast = self.device if self.device in ("cuda", "mps") else "cpu"
+            with torch.autocast(autocast, dtype=torch.bfloat16):
+                out = self.model(input_ids=x, attention_mask=torch.ones_like(x), use_cache=False)
+            hidden = out.last_hidden_state if hasattr(out, "last_hidden_state") else out[0]
+            z = self.head(hidden[:, -1].float(), torch.tensor([len(options)], device=self.device))
+            probs = z.softmax(-1)[0, : len(options)].float().cpu().tolist()
+        return {"probabilities": probs, "index": max(range(len(probs)), key=probs.__getitem__), "input_tokens": len(ids)}
+
+
+class JevOmniProvider(DecisionProvider):
+    """Jev-Omni (``akhilaaa3/Jev-Omni``), the open-weights Jev, in process on CUDA, Apple MPS or CPU.
+
+    Loaded once per process (first use downloads ~48 GB; needs ~25 GB of accelerator memory). Each
+    question is one forward pass over "state + question + numbered option texts": a choice's options
+    are its descriptions (or keys when bare), a score is a choice over the levels, a noul is a
+    choice over true/false with the statement as the question. The model card recommends at most 20
+    options. Setting: ``device`` ('cuda', 'mps' or 'cpu'; default: first available).
+    """
+
+    name = "jev-omni"
+
+    def __init__(self, model: str, settings: dict):
+        self.model = model or "akhilaaa3/Jev-Omni"
+        self.device = settings.get("device") or None
+
+    def runtime(self) -> JevOmniRuntime:
+        key = (self.model, self.device or "")
+        with _JEV_OMNI_LOCK, DEVICE_LOCK:  # never load weights onto the GPU while another model runs
+            if key not in _JEV_OMNI_RUNTIMES:
+                logger.info(f"Loading Jev-Omni {self.model} on {pick_device(self.device)}")
+                _JEV_OMNI_RUNTIMES[key] = JevOmniRuntime(self.model, self.device)
+            return _JEV_OMNI_RUNTIMES[key]
+
+    def decide(self, state, questions):
+        runtime = self.runtime()
+        answers = {}
+        tokens = 0
+        for name, q in questions.items():
+            options = NOUL_OPTIONS if q["type"] == "noul" else q["options"]
+            keys = [o["key"] for o in options]
+            res = runtime.predict(state, q["instructions"], [o["text"] or o["key"] for o in options])
+            probs = dict(zip(keys, res["probabilities"]))
+            choice = keys[res["index"]]
+            answers[name] = {"type": q["type"], "choice": choice, "probabilities": probs, "confidence": probs[choice]}
+            tokens += res["input_tokens"]
+        usage = {"total": tokens, "prompt": tokens, "result": 0, "thinking": None, "images": None}
+        return answers, {"model": self.model, "token_usage": usage, "cost": 0.0, "device": runtime.device}
 
 
 SYSTEM1_PROMPT = """You are a System One decision model: you answer typed questions about a state with calibrated probabilities, not prose.
@@ -529,7 +694,7 @@ class GenerativeProvider(DecisionProvider):
         }
 
 
-PROVIDERS = {"jev": JevProvider, "typesafe": JevProvider, "laya": LayaProvider, "gliner": GlinerProvider}
+PROVIDERS = {"jev": JevProvider, "typesafe": JevProvider, "jev-omni": JevOmniProvider, "laya": LayaProvider, "gliner": GlinerProvider}
 
 
 def make_provider(model: str, settings: dict) -> DecisionProvider:

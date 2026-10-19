@@ -13,6 +13,7 @@ from chai.ai import system1
 from chai.ai.system1 import (
     GenerativeProvider,
     GlinerProvider,
+    JevOmniProvider,
     JevProvider,
     LayaProvider,
     System1Model,
@@ -132,6 +133,10 @@ class TestProviders(unittest.TestCase):
         self.assertIsInstance(System1Model({"model": "laya/convaiinnovations/laya"}).provider, LayaProvider)
         self.assertIsInstance(System1Model({"model": "gliner/fastino/GLiNER2.5-Decide", "device": "cpu"}).provider, GlinerProvider)
         self.assertIsInstance(System1Model({"model": "typesafe/jev-latest", "api_key": "k"}).provider, JevProvider)
+        omni = System1Model({"model": "jev-omni/akhilaaa3/Jev-Omni", "device": "cpu"}).provider
+        self.assertIsInstance(omni, JevOmniProvider)  # nothing is loaded until the first decision
+        self.assertEqual((omni.model, omni.device), ("akhilaaa3/Jev-Omni", "cpu"))
+        self.assertEqual(System1Model({"model": "jev-omni/"}).provider.model, "akhilaaa3/Jev-Omni")
         self.assertIsInstance(System1Model({"model": MODEL}).provider, GenerativeProvider)
         with self.assertRaises(ValueError):
             System1Model({})
@@ -145,6 +150,15 @@ class TestProviders(unittest.TestCase):
         self.assertEqual(p.labels_for(make_question("choice", "?", ["a", "b"])), ["a", "b"])
         self.assertEqual(set(p.labels_for(make_question("noul", "so"))), {"true", "false"})
         self.assertEqual(system1.gliner_sanitize("x [L] (y)"), "x [y]")
+
+    def test_jev_omni_prompt_matches_the_model_repo(self):
+        got = system1.jev_omni_prompt("The meeting starts at 10 AM. It is now 9 AM.", "Has the meeting started?", ["Yes", "No"])
+        self.assertEqual(
+            got,
+            "The meeting starts at 10 AM. It is now 9 AM.\n\n---\n\nQUESTION: Has the meeting started?\n\n"
+            "OPTIONS:\n1. Yes\n2. No\n\nReply with only the number of the correct option (1-2).\n"
+            "Output a single number and nothing else.",
+        )
 
     def test_generative_prompt_lists_every_question(self):
         p = GenerativeProvider(MODEL, {})

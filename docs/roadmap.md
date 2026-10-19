@@ -108,11 +108,12 @@ instead of Vertex" one edit.
 
 ## 14. More in-process decision models
 
-v2 ships Jev (API), Laya and GLiNER2.5-Decide (in process) and a generative baseline. The
-reconciler's Jev-Omni runtime (Gemma 4 12B decision classifier, custom loader) and the bench's
-other adapter families (pointer, letter-slot, per-candidate yes/no, NLI, slot heads) are the
-remaining System One models; a `System1Model` provider that loads a bench checkpoint (`best/` +
-`s1bench.json`) directly would let a fine-tuned model go straight into a workflow.
+v2 ships Jev (API), Jev-Omni, Laya and GLiNER2.5-Decide (in process) and a generative baseline,
+and a fine-tuned GLiNER loads from its folder. The bench's other adapter families (pointer,
+letter-slot, per-candidate yes/no, NLI, slot heads) are the remaining System One models; a
+`System1Model` provider that loads a bench checkpoint (`best/` + `s1bench.json`) directly would let
+any fine-tuned model go straight into a workflow. Laya's `predict_batch` (many states per forward
+pass) is unused so far; see item 8.
 
 ## 15. Dataset providers
 

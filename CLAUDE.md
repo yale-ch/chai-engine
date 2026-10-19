@@ -57,7 +57,7 @@ Every model-backed result carries `token_usage`, `cost` (USD; `None` when unpric
 - **`LLMComponent`** (`chai/ai/llm.py`): the one backend for hosted and served chat models, built on LiteLLM. The provider is part of the model id (`gemini/...`, `vertex_ai/...`, `openai/...`, `anthropic/...`, `ollama_chat/...`, `lm_studio/...`, `hosted_vllm/...`). Builds the `litellm.completion` call once (`base_kwargs`; `request_kwargs(input)` shows the whole call), normalizes usage and prices the call. Settings that are not set are not sent; a set one is always sent (fail loudly, never silently drop).
 - **`GeminiComponent`**, **`OllamaComponent`**, **`LMStudioComponent`**, **`OpenAIComponent`**, **`VLLMComponent`**, **`SGLangComponent`**: thin subclasses that keep each provider's prefix, host and defaults so existing workflow JSON keeps working. Gemini: Vertex AI when `GOOGLE_CLOUD_PROJECT` is set, else the Gemini API; grounding on by default; `thinking_level` (3+) / `thinking_budget` (2.5) rules live in `build_base_kwargs`.
 - **`TransformersComponent`**, **`MLXVLMComponent`**: in-process models, unchanged.
-- **`system1.System1Model`** (`chai/ai/system1.py`): decision models, provider by prefix (`jev/`, `laya/`, `gliner/`, else generative via `LLMComponent`); canonical questions/answers, layouts, `normalize_answer`.
+- **`system1.System1Model`** (`chai/ai/system1.py`): decision models, provider by prefix (`jev/` API, `jev-omni/`, `laya/`, `gliner/` in process, else generative via `LLMComponent`); canonical questions/answers, layouts, `normalize_answer`. Local models load lazily, once per process, and share `DEVICE_LOCK` (concurrent MPS submissions abort the process). `laya` and `gliner2` are optional installs (see `docs/system1.md`).
 
 AI components are typically mixed with role components by `chai.ai.create_all_components` (e.g. `GeminiTranscriber`, `LLMExtractor`). `litellm` is imported lazily, when a component is built.
 
@@ -122,3 +122,7 @@ All components are real (no mock components): deterministic ones (`KeywordClassi
 LiteLLM's own local mock replies -- `"litellm_params": {"mock_response": "..."}` in a component's
 settings makes LiteLLM answer with that text, with real usage and pricing, without a network. The
 Jev System One provider is tested against a throwaway HTTP server in the test process.
+`tests/test_system1_models.py` runs the real decision models where they can run and skips
+otherwise: Laya and GLiNER when installed and cached (Hub forced offline, so nothing downloads),
+Jev-Omni only with `CHAI_TEST_JEV_OMNI=1` (~25 GB of memory), the Jev API only with
+`TYPESAFE_API_KEY`. `python examples/system1_models.py --offline` compares them side by side.

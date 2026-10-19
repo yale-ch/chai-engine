@@ -23,6 +23,7 @@ The `model` setting picks the provider by prefix, the way LiteLLM ids do for cha
 | `model` | Runs | Needs |
 |---|---|---|
 | `jev/jev-latest` | TypeSafe's Jev, `POST /v1/systemone`, all questions in one call | `TYPESAFE_API_KEY` (or `api_key`), optional `api_base` |
+| `jev-omni/akhilaaa3/Jev-Omni` | Jev-Omni, the open-weights Jev (Gemma 4 12B classifier), in process on CUDA, Apple MPS or CPU | ~48 GB of weights on first use, ~25 GB of accelerator memory; setting `device` |
 | `laya/convaiinnovations/laya` | Laya, in process (about 850 MB on first use) | `pip install laya`; settings `subfolder`, `device` |
 | `gliner/fastino/GLiNER2.5-Decide` | GLiNER2.5-Decide, 340M encoder classifier, in process | `pip install gliner2`; settings `device`, `use_instruction` |
 | any LiteLLM chat id, e.g. `gemini-3.1-flash-lite`, `openai/gpt-4o-mini`, `ollama_chat/llama3.2` | a generative baseline asked for the same JSON | that provider's credentials |
@@ -31,8 +32,44 @@ The generative baseline exists so a decision model can be compared like for like
 probabilities are self-reported, not calibrated. Local models cost 0; Jev's price is unknown to
 chai (`cost: null`, counted as unpriced in the ledger) unless you set `pricing`.
 
-Models that only classify (GLiNER) answer `score` as a choice over the levels and `noul` as a
-choice over true/false, as the bench's `as_choice` approaches do.
+Models that only classify (GLiNER, Jev-Omni) answer `score` as a choice over the levels and `noul`
+as a choice over true/false, as the bench's `as_choice` approaches do. GLiNER is sent a choice
+question's instructions only with `use_instruction: true` (measured worse on reconciliation), so its
+state must say what is being decided, e.g. a `Mention: {name}` line; score and noul questions always
+carry theirs. Any `gliner/` or `laya/` model id may also be a local folder, e.g. a fine-tuned
+checkpoint: `gliner//path/to/checkpoint`.
+
+### Installing the local models
+
+Laya and GLiNER2 are not chai dependencies; install the ones you use. `gliner2` declares
+`transformers<5` but runs GLiNER2.5-Decide correctly on transformers 5, which chai needs, so
+override that pin:
+
+```bash
+pip install laya
+```
+
+```bash
+uv pip install "gliner2[local]" --override <(echo "transformers>=5.5")
+```
+
+Jev-Omni needs nothing beyond chai's own dependencies.
+
+### Measured
+
+`examples/system1_models.py` runs every available model on five reconciliation decisions (real
+Wikidata search hits, a none option, "Theo" has no right candidate) and on a noul and a score
+question about two texts. On an Apple M4 Max, each model in its best layout:
+
+| Model | Layout | Correct | Time for 7 decisions | Cost |
+|---|---|---|---|---|
+| Laya | `in_state` | 2/5 | ~2 s | 0 |
+| GLiNER2.5-Decide | `described`, mention in the state | 3/5 | ~6 s | 0 |
+| Jev-Omni | `described` | 4/5 | ~9 s after a ~20 s load | 0 |
+| Gemini 3.1 Flash Lite, generative baseline | `in_state` | 5/5 | ~24 s | ~$0.004 |
+
+Only the generative baseline answers "none" for Theo; the others pick a given-name record or Theo
+van Doesburg. The hosted Jev API was not measured: no key was available.
 
 ## Layouts
 
@@ -122,4 +159,17 @@ Every decision result carries `model`, `token_usage` and `cost`, so the workflow
 | `selector_name` | the component `id` |
 | `candidates[].summary` as option text | `options_from: candidates`, `option_text: "{summary}"` |
 
-Jev-Omni (`jev_omni_runtime.py`) has no provider yet; see `docs/roadmap.md`.
+| `JevOmniSelector` | `model: jev-omni/akhilaaa3/Jev-Omni` (setting `device`) |
+| `GlinerDecideTunedSelector` | `model: gliner/<checkpoint folder>`, `state: "Mention: {name}\nEntity type: {type}\nText: {context_text}"` |
+
+## Tests
+
+`tests/test_decision.py` covers the data model, the roles and the Jev request shape offline (a
+throwaway HTTP server stands in for the API). `tests/test_system1_models.py` runs the real models:
+Laya and GLiNER whenever they are installed and cached (loaded from the cache only), Jev-Omni with
+`CHAI_TEST_JEV_OMNI=1`, the hosted Jev API with `TYPESAFE_API_KEY`. Each skips with the reason
+otherwise.
+
+```bash
+CHAI_TEST_JEV_OMNI=1 python -m unittest tests.test_system1_models -v
+```
