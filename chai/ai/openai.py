@@ -193,7 +193,7 @@ class OpenAIComponent(Component):
                     if slot in prompt_text:
                         format_vars[f"text_input_{i}"] = value
                 elif typ == "IMAGE":
-                    inputs.append(self.image_to_part(item))
+                    inputs.append(self.image_to_part(item if isinstance(item, FileItemResult) else value))
                 else:
                     raise NotImplementedError(
                         f"Unsupported result type {typ!r} for {self.ENGINE_NAME}: {item}"
