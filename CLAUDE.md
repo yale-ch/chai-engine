@@ -35,7 +35,8 @@ python experiment.py
 ### Component Types
 
 - **`Provider`**: Generates a `Result` from raw input (e.g., `DirFileProvider` reads files from a directory; `CsvFileProvider` reads a CSV file into one dict-valued `ItemResult` per row).
-- **`Iterator`**: Calls further components for each entry in a `Result` to make a new result. `SliceIterator` processes only every nth entry (`slice`/`max_slices`), so one input can be divided between parallel runs.
+- **`Iterator`**: Calls further components for each entry in a `Result` to make a new result; `retain_results: false` drops each entry's results once its steps are done (for runs whose results are persisted as they go) and reports only the `processed`/`errors` counts in its output's metadata. `SliceIterator` processes only every nth entry (`slice`/`max_slices`), so one input can be divided between parallel runs.
+- **`ContextWindow`**: Carries text from one entry of an `Iterator` into the next (`chai/context.py`). It runs its `steps` with what it kept from the previous entry injected as a TEXT result alongside the input -- so a prompt can address the context as `{text_input_0}` and the input as `{text_input_1}` -- then captures a slice of what they produced (`capture`: `last_line`, `last_lines`, `first_line`, `all`, `tail_chars`; `capture_from` names the component to capture from) for the next entry. Used for work that is not entry-independent: transcribing a page with the last line of the page before it, translating a page with the previous page's text. The carry-over makes the run sequential -- the surrounding iterator must keep `workers: 1` and the input cannot be split with a `SliceIterator`.
 - **`Classifier`**: Assigns one or more labels to input (e.g., `KeywordClassifier`, `FileTypeClassifier`, `YoloClassifier`).
 - **`Gate`**: Acts as a gating mechanism with `true_steps` and `false_steps` based on a test. `ConditionGate` evaluates a component-agnostic JSON condition (see `chai/gate.py`); `ValueTestGate`, `MetadataTestGate`, `ThresholdGate`, and `FileTypeGate` are convenience subclasses; `LabelTestGate` tests labels registered by a classifier.
 - **`Transcriber`**: Extracts text from images or audio.
@@ -44,22 +45,22 @@ python experiment.py
 - **`Reducer`**: Combines multiple results into one. Branches converge two ways: a parent's `steps` fan out and its `next_steps` (e.g. `MergeDictReducer`, `TextJoinReducer`) receive the merged list; or `CollectReducer` gathers everything specific components produced anywhere in the input subtree (gate branches, iterator entries). `FlattenReducer` collapses nested lists; `fanout.FanOut` is the explicit fan-out node.
 - **`Annotator`**: Renders results as human-reviewable artifacts (e.g., `ImageBoxAnnotator` burns detection boxes into the source image via supervision; `TextHighlightAnnotator` highlights extracted values in their source text).
 - **`Translator`**: Translates linguistic content into different languages.
-- **`Storage`**: Persists input somewhere (e.g., `FileSystemStorage`, `PostgresStorage`, `SqliteStorage`).
-- **`Embedder`**: Embeddings + vector search (`VectorIndexer`, `VectorRetriever` over a SQLite `VectorStore` that lives in `chai/storage.py`; services: hash, or gemini/ollama/openai-compatible through LiteLLM).
-- **Decision roles** (`chai/decision.py`): System One questions -- `choice`, `score`, `noul` -- answered with probabilities by a decision model (`chai/ai/system1.py`: Jev API, Laya and GLiNER2.5-Decide in process, or any LiteLLM chat model as a generative baseline). `DecisionClassifier` asks one question and labels the input with the answer; `DecisionGate` branches on a noul question; `DecisionExtractor` asks several questions and returns one record. Options can come from a list in the input (`options_from`), descriptions can be laid out in the options or in the state (`layout`). See `docs/system1.md`.
+- **`Storage`**: Persists input somewhere (e.g., `FileSystemStorage`, `PostgresStorage`, `SqliteStorage`). `TextFileStorage` writes each result's text to a file of its own, named after the input it was made from (the nearest file up the chain, or `name_from`), so a run over page images leaves one `.txt` per page rather than one file per run. `JsonLinesStorage` appends each result to one `.jsonl` file the moment it is produced, so a long run writes nothing at the end and holds nothing in memory; pair it with an `Iterator` set to `retain_results: false`. `token_usage_summary` totals the `token_usage` metadata an AI run recorded in such a file, per component and overall, optionally costed at prices given per million tokens. `ParquetStorage` collects a whole run into one `.parquet` file (written when the workflow finishes) for bulk loading into a remote database; `jsonl_to_parquet` converts a streamed `.jsonl` run into the same thing afterwards. `PostgresStorage` writes the same `results`/`derivatives` shape as `SqliteStorage` into PostgreSQL (jsonb columns, database and tables created on first use), and `parquet_to_postgres` loads a Parquet run into a table there -- the two routes produce identical rows (see `examples/experiment-postgres-parquet.py`). Both tabular schemas record where a row came from -- `input_uri`/`input_hash` (the file or URI it was generated from and the md5 of that input's content) and `input_locator` (where in that input it is: `[{"bbox": [...]}, {"start": 120, "end": 168}]`, outermost frame first, so a sentence of a region of a page needs no file of its own) -- and hold corrections as entries of their own: a correction row's `corrects_id` points at the row it corrects and its own metadata says which agent, human or model, made it (`save_correction`, `save_postgres_correction`, or a component putting `corrects` in a result's `extra`). Schema changes are not migrated -- delete the database and re-run.
+- **`Embedder`**: Embeddings + vector search (`VectorIndexer`, `VectorRetriever` over a SQLite `VectorStore` that lives in `chai/storage.py`; services: hash/gemini/ollama/openai-compatible).
 
-Every component supports an error policy via settings (`retries`, `retry_delay`, `on_error: skip`) and an `error_steps` config branch. `Iterator` adds `workers` (thread-pool concurrency) and `continue_on_error`.
+`source: true` on a component marks its results as the run's recorded source, so rows made further downstream record *that* (the page, the CSV row) rather than the raw input at the bottom of the chain; a component that carves a piece out of something sets `Result.locator` (`TextSegmenter` with `locate: true` records character ranges, `YoloSegmenter` its bounding boxes) and the storages stack those into `input_locator`. See `examples/experiment-locators.py`.
 
-Every model-backed result carries `token_usage`, `cost` (USD; `None` when unpriceable) and `duration` metadata; `Component.process` hands them to `workflow.usage` (`chai/usage.py`, a `UsageLedger`), which is reset per `run` and summarized on the workflow's `component_end` event and by `workflow.usage_summary()`.
+Every component supports an error policy via settings (`retries`, `retry_delay`, `on_error: skip`) and an `error_steps` config branch. `Iterator` adds `workers` (thread-pool concurrency), `continue_on_error` and `retain_results`.
 
 ### AI Components (`chai/ai/`)
 
-- **`LLMComponent`** (`chai/ai/llm.py`): the one backend for hosted and served chat models, built on LiteLLM. The provider is part of the model id (`gemini/...`, `vertex_ai/...`, `openai/...`, `anthropic/...`, `ollama_chat/...`, `lm_studio/...`, `hosted_vllm/...`). Builds the `litellm.completion` call once (`base_kwargs`; `request_kwargs(input)` shows the whole call), normalizes usage and prices the call. Settings that are not set are not sent; a set one is always sent (fail loudly, never silently drop).
-- **`GeminiComponent`**, **`OllamaComponent`**, **`LMStudioComponent`**, **`OpenAIComponent`**, **`VLLMComponent`**, **`SGLangComponent`**: thin subclasses that keep each provider's prefix, host and defaults so existing workflow JSON keeps working. Gemini: Vertex AI when `GOOGLE_CLOUD_PROJECT` is set, else the Gemini API; grounding on by default; `thinking_level` (3+) / `thinking_budget` (2.5) rules live in `build_base_kwargs`.
-- **`TransformersComponent`**, **`MLXVLMComponent`**: in-process models, unchanged.
-- **`system1.System1Model`** (`chai/ai/system1.py`): decision models, provider by prefix (`jev/` API, `jev-omni/`, `laya/`, `gliner/` in process, else generative via `LLMComponent`); canonical questions/answers, layouts, `normalize_answer`. Local models load lazily, once per process, and share `DEVICE_LOCK` (concurrent MPS submissions abort the process). `laya` and `gliner2` are optional installs (see `docs/system1.md`).
+- **`GeminiComponent`**: Uses Google's Gemini API (supports Vertex AI via `GOOGLE_CLOUD_PROJECT`).
+- **`LMStudioComponent`**: Uses LM Studio local server (`localhost:1234` by default).
+- **`OllamaComponent`**: Uses Ollama local server (`localhost:11434` by default).
 
-AI components are typically mixed with role components by `chai.ai.create_all_components` (e.g. `GeminiTranscriber`, `LLMExtractor`). `litellm` is imported lazily, when a component is built.
+AI components are typically mixed with base components (e.g., `GeminiTranscriber` extends both `Transcriber` and `GeminiComponent`).
+
+Every AI component records the same metadata on the result of a call: `token_usage` (`total`, `prompt`, `images`, `thinking`, `result` -- a provider that did not break a modality down writes `-1` for it, not 0), `duration` in seconds, `type`, plus `engine` (the component's `ENGINE_NAME`) and `model` (the model actually used). Storage keeps that dict whole, so a run can be totalled by model afterwards without re-reading anything from the API -- see `token_usage_summary` and `chai_tea_import.py`.
 
 ### Workflow Definition
 
@@ -92,12 +93,22 @@ Workflows are defined as JSON trees with `steps` and `next_steps`:
 - `chai/result.py`: Result class hierarchy (`Result`, `ItemResult`, `ListResult`, `FileItemResult`, `DirectoryListResult`).
 - `chai/provider.py`: Provider components for generating results from raw input.
 - `chai/gate.py`: `Gate`, `ConditionGate` (+ convenience gates), and `LabelTestGate` for conditional branching.
+- `chai/context.py`: `ContextWindow`, which carries text from one iterator entry into the next.
 - `chai/annotator.py`: `Annotator` components plus `annotate_image_bytes`/`collect_detections` helpers (also used by chai-workflow-builder for run previews).
-- `chai/ai/llm.py`: `LLMComponent`, the LiteLLM backend; `chai/ai/gemini.py`, `chai/ai/ollama.py`, `chai/ai/lm_studio.py`, `chai/ai/openai.py`, `chai/ai/vllm.py`, `chai/ai/sglang.py`: provider presets on top of it.
-- `chai/ai/system1.py`: System One decision models (providers, question/answer model); `chai/decision.py`: the decision roles.
-- `chai/usage.py`: `UsageLedger`, run-wide tokens and cost.
+- `chai/ai/gemini.py`, `chai/ai/lm_studio.py`, `chai/ai/ollama.py`: AI component implementations.
 - `chai/transcriber.py`: Transcriber components with AI mixins.
 - `chai/ai_utils.py`: JSON extraction utilities for LLM responses.
+
+### CHAI-TEA database (top level, not part of the `chai` package)
+
+The shared PostgreSQL schema a run's results are published into, defined by the ER diagram in `mermaid-er-database.md`: PROJECT -> WORKFLOW -> WORKFLOW_RUN -> RESULT, with ANNOTATION, USER, ROLE and the two permission tables.
+
+- `chai_tea_schema.sql`: the DDL as a plain file, for `psql -f` against Amazon RDS or any PostgreSQL server. Verified to build the same schema as the Python builder.
+- `chai_tea_schema.py`: the same schema built from Python (`--sql` prints the DDL, `--drop` rebuilds). `column_types(entity)` is the single description of each table's columns, read by everything that has to agree with the schema.
+- `chai_tea_import.py`: loads a run out of **any** storage layer (`.jsonl`, `.parquet`, SQLite, a `PostgresStorage` table) into the schema, one RESULT row per stored result under a WORKFLOW_RUN row. The AI metadata dict goes into `metadata` jsonb whole; `md_duration` and `md_timestamp` are promoted to columns, and `md_cost` is worked out from `--price MODEL=IN/OUT` rates given per million tokens.
+- `chai_tea_parquet.py`: moves CHAI-TEA rows from a local instance to a central one via a Parquet bundle, carrying the parent rows each exported row needs so nothing dangles.
+
+Editing a table's columns in `chai_tea_schema.py` means editing `chai_tea_schema.sql` to match; `tests/test_chai_tea_parquet.py` and `tests/test_chai_tea_import.py` cover both.
 
 ### Common Patterns
 
@@ -109,20 +120,16 @@ Workflows are defined as JSON trees with `steps` and `next_steps`:
 ### Running Tests
 
 ```bash
-# Run the unit tests (no API keys, no network)
+# Run the unit tests (the PostgreSQL ones skip unless a server is reachable)
 python -m unittest discover -s tests
 
-# Run an example as a live test case (needs credentials in .env; network for Wikidata)
-python examples/reconcile_wikidata.py
+# Run experiment.py as a live test case
+python experiment.py
 ```
 
-All components are real (no mock components): deterministic ones (`KeywordClassifier`,
+The `PostgresStorage` tests need a PostgreSQL server on localhost:5432 and use (creating it if
+necessary) a database called `chai`; they skip when there is no server to talk to.
+
+All components are real (no mocks): deterministic ones (`KeywordClassifier`,
 `TextSegmenter`, `StaticProvider`, `TextFileTranscriber`, `FileInfoDescriber`,
-`GlossaryTranslator`) run without models or API keys, and the model-backed ones are tested with
-LiteLLM's own local mock replies -- `"litellm_params": {"mock_response": "..."}` in a component's
-settings makes LiteLLM answer with that text, with real usage and pricing, without a network. The
-Jev System One provider is tested against a throwaway HTTP server in the test process.
-`tests/test_system1_models.py` runs the real decision models where they can run and skips
-otherwise: Laya and GLiNER when installed and cached (Hub forced offline, so nothing downloads),
-Jev-Omni only with `CHAI_TEST_JEV_OMNI=1` (~25 GB of memory), the Jev API only with
-`TYPESAFE_API_KEY`. `python examples/system1_models.py --offline` compares them side by side.
+`GlossaryTranslator`) run without models or API keys.

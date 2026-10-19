@@ -1,0 +1,144 @@
+{
+  "id": "m804",
+  "type": "workflow.Workflow",
+  "name": "M804: transcribe and translate each page with the previous page as context",
+  "steps": [
+    {
+      "id": "m804_pages",
+      "type": "provider.DirFileProvider",
+      "input": "inputs\/m804\/split",
+      "steps": [
+        {
+          "id": "each_page",
+          "type": "iterator.Iterator",
+          "source": true,
+          "settings": {
+            "workers": 1,
+            "continue_on_error": true,
+            "retain_results": false
+          },
+          "steps": [
+            {
+              "id": "transcribe_context",
+              "type": "context.ContextWindow",
+              "name": "last line of the previous page",
+              "settings": {
+                "capture": "last_line",
+                "capture_from": "transcribe",
+                "template": "{context}",
+                "empty": "(none: this is the first page of the run)",
+                "ignore": [
+                  "VLM-NO-TEXT"
+                ],
+                "on_empty": "keep",
+                "max_chars": 300
+              },
+              "steps": [
+                {
+                  "id": "transcribe",
+                  "type": "transcriber.GeminiTranscriber",
+                  "settings": {
+                    "model": "gemini-3.8-flash",
+                    "thinking_level": "medium",
+                    "tools": [],
+                    "max_output_tokens": 16384,
+                    "retries": 3,
+                    "retry_delay": 2,
+                    "prompt": "You are a careful and thorough palaeographer transcribing one page of a medieval manuscript. This transcription is the only record anyone will have of this page, so it must be as accurate as possible.\n\nTranscribe every line of text in the attached image, in natural reading order. The page may be laid out in more than one column: transcribe each column completely, in reading order, left column first.\n\nKeep each line of the manuscript as its own line in the response, and end each line with a space character.\nTranscribe the text as it is written: preserve the spelling, word division and punctuation of the original language. Expand an abbreviation only where the expansion is certain, and never modernize or correct the text.\nKeep blocks of text written in different directions or by different hands separate in the response, separated by blank lines.\nDo not transcribe running heads, folio or page numbers, catchwords, signature marks, or marginalia added by a later hand.\nDo not transcribe text that shows through from the other side of the leaf (\"bleed-through\"), which may look like mirror writing.\nWhere a word or letter genuinely cannot be read, write [...] in its place rather than guessing.\nDo not include any commentary, notes or explanation in the response: return only the transcribed text.\nIf there is no recognizable text in the image, return the string \"VLM-NO-TEXT\".\n\nThe last line of the preceding page is given below, for context only. Use it to settle a word or sentence that carries over onto this page and to follow the scribe's hand and spelling. It is NOT part of this page: do not include it in your response.\n\nLast line of the preceding page: {text_input_0}\n"
+                  }
+                }
+              ],
+              "next_steps": [
+                {
+                  "id": "log_transcribe",
+                  "type": "storage.JsonLinesStorage",
+                  "name": "one line per result, with its token usage",
+                  "settings": {
+                    "file": "results\/m804\/run.jsonl",
+                    "mode": "truncate",
+                    "fields": {
+                      "id": "id",
+                      "processorId": "step",
+                      "@input_uri": "page",
+                      "metadata": "metadata",
+                      "value": "text"
+                    }
+                  },
+                  "next_steps": [
+                    {
+                      "id": "save_text",
+                      "type": "storage.TextFileStorage",
+                      "settings": {
+                        "directory": "results\/m804\/text"
+                      },
+                      "next_steps": [
+                        {
+                          "id": "translate_context",
+                          "type": "context.ContextWindow",
+                          "name": "text of the previous page",
+                          "settings": {
+                            "capture": "all",
+                            "capture_from": "transcribe",
+                            "template": "{context}",
+                            "empty": "(none: this is the first page of the run)",
+                            "ignore": [
+                              "VLM-NO-TEXT"
+                            ],
+                            "on_empty": "clear",
+                            "max_chars": 6000
+                          },
+                          "steps": [
+                            {
+                              "id": "translate",
+                              "type": "translator.GeminiTranslator",
+                              "settings": {
+                                "model": "gemini-3.8-flash",
+                                "thinking_level": "low",
+                                "tools": [],
+                                "max_output_tokens": 16384,
+                                "retries": 3,
+                                "retry_delay": 2,
+                                "prompt": "You are a scholarly translator working on a medieval manuscript. Translate the page of text below into modern English.\n\nTranslate the whole page, faithfully and completely. Keep proper names, place names and titles in a recognizable modern English form where one exists, and otherwise leave them as they stand.\nFollow the paragraph structure of the source, but do not preserve the manuscript's line breaks: the lines are an accident of the page, not of the text.\nWhere the page begins or ends in the middle of a sentence, translate the part that is there rather than completing it from the other page.\nWhere the transcription marks something unreadable with [...], carry the [...] through into the translation.\nDo not add notes, commentary, headings or explanation, and do not summarize: return only the English translation.\nIf the page to translate is empty or reads \"VLM-NO-TEXT\", return \"VLM-NO-TEXT\".\n\nThe previous page's text is given first, for context only -- so that the vocabulary, names and style of your translation stay consistent, and so that a sentence running across the page break makes sense. Do NOT translate the previous page and do not include any of it in your response.\n\nPrevious page (context only, do not translate):\n{text_input_0}\n\nPage to translate:\n{text_input_1}\n"
+                              }
+                            }
+                          ],
+                          "next_steps": [
+                            {
+                              "id": "log_translate",
+                              "type": "storage.JsonLinesStorage",
+                              "name": "one line per result, with its token usage",
+                              "settings": {
+                                "file": "results\/m804\/run.jsonl",
+                                "mode": "truncate",
+                                "fields": {
+                                  "id": "id",
+                                  "processorId": "step",
+                                  "@input_uri": "page",
+                                  "metadata": "metadata",
+                                  "value": "text"
+                                }
+                              },
+                              "next_steps": [
+                                {
+                                  "id": "save_translation",
+                                  "type": "storage.TextFileStorage",
+                                  "settings": {
+                                    "directory": "results\/m804\/translation"
+                                  }
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

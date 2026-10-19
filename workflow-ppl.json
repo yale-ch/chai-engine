@@ -18,6 +18,7 @@
           "name": "Row Iterator",
           "settings": {
             "continue_on_error": true,
+            "retain_results": false,
             "max_slices": 1,
             "slice": 0
           },
@@ -29,6 +30,23 @@
               "settings": {
                 "xpath": "/name"
               },
+              "error_steps": [
+                {
+                  "id": "ppl_name_error_jsonl",
+                  "type": "storage.JsonLinesStorage",
+                  "name": "Failed Column JSON-Lines Writer",
+                  "settings": {
+                    "file": "results/people-parsed.jsonl",
+                    "fields": {
+                      "value": "error",
+                      "metadata": "metadata"
+                    },
+                    "sources": {
+                      "input": "ppl_rows"
+                    }
+                  }
+                }
+              ],
               "next_steps": [
                 {
                   "id": "ppl_parsed",
@@ -40,9 +58,38 @@
                     "prompt": "Parse this person name:\n\n{text_input_0}",
                     "expected_output": "yaml"
                   },
+                  "error_steps": [
+                    {
+                      "id": "ppl_error_jsonl",
+                      "type": "storage.JsonLinesStorage",
+                      "name": "Failed Parse JSON-Lines Writer",
+                      "settings": {
+                        "file": "results/people-parsed.jsonl",
+                        "fields": {
+                          "value": "error",
+                          "metadata": "metadata"
+                        },
+                        "sources": {
+                          "input": "ppl_rows"
+                        }
+                      }
+                    }
+                  ],
                   "next_steps": [
                     {
-                      "base": "FileSystemStorage"
+                      "id": "ppl_jsonl",
+                      "type": "storage.JsonLinesStorage",
+                      "name": "Parsed Name JSON-Lines Writer",
+                      "settings": {
+                        "file": "results/people-parsed.jsonl",
+                        "fields": {
+                          "value": "parsed",
+                          "metadata": "metadata"
+                        },
+                        "sources": {
+                          "input": "ppl_rows"
+                        }
+                      }
                     }
                   ]
                 }

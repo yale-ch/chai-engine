@@ -10,7 +10,7 @@ import re
 
 from .ai import create_all_components
 from .core import Component
-from .result import FileItemResult, ListResult
+from .result import FileItemResult, ItemResult, ListResult
 from .utils import text_from_input
 
 
@@ -41,6 +41,10 @@ class TextSegmenter(Segmenter):
     Settings:
         - mode:    paragraph (default) | line | sentence | word | regex
         - pattern: split regex, used when mode is 'regex'
+        - locate:  emit each segment as a Result carrying its character range in the text it was cut
+                   from (``locator`` of ``{"start": ..., "end": ...}``) instead of a bare string, so a
+                   stored row can point back into the source text rather than a copy of the segment
+                   (default false: the segments are plain strings)
     """
 
     _MODES = {
@@ -64,9 +68,32 @@ class TextSegmenter(Segmenter):
         self.splitter = re.compile(pattern)
 
     def _process(self, input):
-        segments = [s.strip() for s in self.splitter.split(text_from_input(input))]
-        segments = [s for s in segments if s]
-        return ListResult(segments, input=input, processor=self)
+        text = text_from_input(input)
+        if not self.settings.get("locate", False):
+            segments = [s.strip() for s in self.splitter.split(text)]
+            return ListResult([s for s in segments if s], input=input, processor=self)
+        # Locating mode: keep each segment's character range in the text it was cut from. The
+        # offsets are of the stripped segment, so they address the segment's own characters.
+        out = ListResult([], input=input, processor=self)
+        for match in self._spans(text):
+            start, end = match
+            segment = ItemResult(text[start:end], input=input, processor=self)
+            segment.locator = {"start": start, "end": end}
+            out.append(segment)
+        return out
+
+    def _spans(self, text):
+        """The ``(start, end)`` of each non-empty segment of *text*, stripped of surrounding space."""
+        spans, position = [], 0
+        for piece in self.splitter.split(text):
+            start = text.index(piece, position) if piece else position
+            end = start + len(piece)
+            position = end
+            stripped_start = start + (len(piece) - len(piece.lstrip()))
+            stripped_end = end - (len(piece) - len(piece.rstrip()))
+            if stripped_end > stripped_start:
+                spans.append((stripped_start, stripped_end))
+        return spans
 
 
 class WordSegmenter(TextSegmenter):
@@ -133,6 +160,9 @@ class YoloSegmenter(Segmenter):
                         "confidence": conf,
                     },
                 )
+                # Where the crop is in the page, so a stored row can point at the region even when
+                # the crop itself is never written anywhere
+                crop.locator = {"bbox": [x1, y1, x2, y2]}
                 if self.crop:
                     buf = io.BytesIO()
                     img.crop((x1, y1, x2, y2)).save(buf, format="PNG")

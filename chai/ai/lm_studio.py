@@ -28,4 +28,4 @@ class LMStudioComponent(LLMComponent):
     DEFAULT_TEMPERATURE = 0.4
     DEFAULT_MAX_OUTPUT_TOKENS = 32000
     DEFAULT_API_KEY = "EMPTY"
-    ENGINE_NAME = "lm_studio"
+    ENGINE_NAME = "lm-studio"  # as stored on main before the LiteLLM backend; the provider is "lm_studio"
