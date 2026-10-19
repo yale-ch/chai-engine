@@ -55,6 +55,28 @@ AUDIO_MIME_TYPES = {
     ".flac": "audio/flac",
 }
 
+# Leading bytes of the image formats providers accept, for image bytes that carry no file name.
+IMAGE_SIGNATURES = (
+    (b"\x89PNG", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+    (b"II*\x00", "image/tiff"),
+    (b"MM\x00*", "image/tiff"),
+)
+
+
+def sniff_image_mime(data) -> Optional[str]:
+    """The image mime type *data* starts with the signature of, or ``None``."""
+    head = bytes(data[:12]) if isinstance(data, (bytes, bytearray)) else b""
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    for signature, mime in IMAGE_SIGNATURES:
+        if head.startswith(signature):
+            return mime
+    return None
+
+
 # Gemini server-side tools by their chai names; LiteLLM forwards these to the
 # Gemini/Vertex request as-is and rejects them for other providers.
 GEMINI_TOOLS = {
@@ -137,7 +159,8 @@ class LLMComponent(Component):
         - api_key: credential for the provider (default: the provider's environment variable)
         - timeout: request timeout in seconds (default 600)
         - max_image_size: long-edge pixels; images are downscaled before upload when set (default 0 = off)
-        - image_mime_type: mime type declared for image bytes that have no file name (default 'image/png')
+        - image_mime_type: mime type declared for image bytes that have no file name (default: detected
+          from the bytes' signature, else 'image/png'); a file's own extension always wins
         - image_detail: OpenAI-style detail hint 'low' | 'high' | 'auto' (default: not sent)
         - pricing: {"input_per_million": USD, "output_per_million": USD} to price calls LiteLLM
           cannot, e.g. a self-hosted model (default: LiteLLM's price table)
@@ -176,7 +199,7 @@ class LLMComponent(Component):
         self.temperature = self.settings.get("temperature", self.DEFAULT_TEMPERATURE)
         self.top_p = self.settings.get("top_p", self.DEFAULT_TOP_P)
         self.max_output_tokens = self.settings.get("max_output_tokens", self.DEFAULT_MAX_OUTPUT_TOKENS)
-        self.image_mime_type = self.settings.get("image_mime_type", "image/png")
+        self.image_mime_type = self.settings.get("image_mime_type") or None
 
         # Everything about the request except the messages, computed once so a
         # misconfiguration fails when the workflow is built, not on the first file.
@@ -287,33 +310,49 @@ class LLMComponent(Component):
     # ------------------------------------------------------------------ building the request
 
     @staticmethod
-    def unwrap_typed(item: Result) -> Tuple[str, Any]:
-        """``(type, value)`` for a result, looking through one level of ``Iterator`` re-wrapping.
+    def peel(source):
+        """The Result that carries the media or text, looking through ``ItemResult`` wrappers.
 
-        ``ListResult`` iteration re-wraps raw entries as ``ItemResult(value=<orig>)`` with empty
-        metadata; peeking one level deeper keeps the original ``type``. Untyped strings are TEXT,
-        untyped bytes are IMAGE.
+        ``Iterator`` and ``ListResult`` iteration can wrap an existing Result in an untyped
+        ``ItemResult``; each wrapper is looked through until a Result whose value is not itself a
+        Result. A ``FileItemResult`` is never looked into (its value would read the file).
+        """
+        while (
+            isinstance(source, Result)
+            and not isinstance(source, FileItemResult)
+            and not source.metadata.get("type")
+            and isinstance(source.value, Result)
+        ):
+            source = source.value
+        return source
+
+    @classmethod
+    def unwrap_typed(cls, item: Result) -> Tuple[str, Any]:
+        """``(type, value)`` for a result, looking through untyped wrappers (see ``peel``).
+
+        Untyped strings are TEXT, untyped bytes are IMAGE.
         """
         typ = item.metadata.get("type", "")
         if typ:
             return typ, item.value
-        inner = item.value
-        if isinstance(inner, Result):
+        inner = cls.peel(item)
+        if inner is not item:
             inner_type = inner.metadata.get("type", "")
             if inner_type:
                 return inner_type, inner.value
-            inner = inner.value
-        if isinstance(inner, (bytes, bytearray)):
-            return "IMAGE", inner
-        if isinstance(inner, str):
-            return "TEXT", inner
+        value = inner.value if isinstance(inner, Result) and not isinstance(inner, FileItemResult) else inner
+        if isinstance(value, (bytes, bytearray)):
+            return "IMAGE", value
+        if isinstance(value, str):
+            return "TEXT", value
         return typ, item.value
 
-    def _media_bytes(self, source, mime_types: dict, default_mime: str) -> Tuple[bytes, str]:
+    def _media_bytes(self, source, mime_types: dict) -> Tuple[bytes, Optional[str]]:
+        """``(bytes, mime)`` for a media source; *mime* is ``None`` when no file name says what it is."""
         if isinstance(source, FileItemResult):
-            return source.value, mime_types.get(source.file_path.suffix.lower(), default_mime)
+            return source.value, mime_types.get(source.file_path.suffix.lower())
         if isinstance(source, Result):
-            return self._media_bytes(source.value, mime_types, default_mime)
+            return self._media_bytes(source.value, mime_types)
         if isinstance(source, Image.Image):
             buf = io.BytesIO()
             source.save(buf, format="PNG")
@@ -321,18 +360,24 @@ class LLMComponent(Component):
         if isinstance(source, (str, Path)):
             path = Path(source)
             with open(path, "rb") as fh:
-                return fh.read(), mime_types.get(path.suffix.lower(), default_mime)
+                return fh.read(), mime_types.get(path.suffix.lower())
         if isinstance(source, (bytes, bytearray)):
-            return bytes(source), default_mime
+            return bytes(source), None
         raise ValueError(f"Unsupported media source type: {type(source)}")
 
     def image_part(self, source) -> dict:
-        """An OpenAI-style ``image_url`` content part (LiteLLM converts it per provider)."""
+        """An OpenAI-style ``image_url`` content part (LiteLLM converts it per provider).
+
+        The type declared for the bytes is the file's extension when there is one, else the
+        ``image_mime_type`` setting, else what the bytes' signature says, else PNG.
+        """
+        source = self.peel(source)
         raw = source.value if isinstance(source, Result) and not isinstance(source, FileItemResult) else source
         if isinstance(raw, str) and raw.startswith(("gs://", "http://", "https://")):
             url = raw  # Gemini file URIs / remote images are passed as references
         else:
-            img_bytes, mime = self._media_bytes(source, IMAGE_MIME_TYPES, self.image_mime_type)
+            img_bytes, mime = self._media_bytes(source, IMAGE_MIME_TYPES)
+            mime = mime or self.image_mime_type or sniff_image_mime(img_bytes) or "image/png"
             max_size = int(self.settings.get("max_image_size", 0) or 0)
             if max_size:
                 img_bytes = bytes_from_image(scale(image_from_bytes(img_bytes), max_size))
@@ -346,10 +391,10 @@ class LLMComponent(Component):
 
     def audio_part(self, source) -> dict:
         """A generic ``file`` content part carrying the audio as a data URL (provider-dependent)."""
-        audio_bytes, mime = self._media_bytes(source, AUDIO_MIME_TYPES, "audio/mpeg")
+        audio_bytes, mime = self._media_bytes(self.peel(source), AUDIO_MIME_TYPES)
         return {
             "type": "file",
-            "file": {"file_data": f"data:{mime};base64,{base64.b64encode(audio_bytes).decode('ascii')}"},
+            "file": {"file_data": f"data:{mime or 'audio/mpeg'};base64,{base64.b64encode(audio_bytes).decode('ascii')}"},
         }
 
     def build_contents(self, input) -> Tuple[str, List[dict]]:

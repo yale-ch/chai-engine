@@ -27,23 +27,32 @@ indexed without reaching into the JSON:
 * ``md_duration`` -- ``metadata.duration``, the wall-clock seconds the call took
 * ``md_timestamp`` -- when the storage recorded the row
 
-``md_cost`` is filled in only when prices are supplied, since nothing in a provider's response says
-what a call cost. Give them per million tokens as ``--price MODEL=INPUT/OUTPUT``, taken from the
-provider's own pricing page:
+``md_cost`` comes from, in order:
+
+1. a price given for the row's model with ``--price MODEL=INPUT/OUTPUT`` (dollars per million
+   tokens, from the provider's own pricing page), matched by exact name or glob;
+2. the ``cost`` the component recorded when it made the call -- the LiteLLM-backed components price
+   every call from LiteLLM's table, or from their ``pricing`` setting for self-hosted models;
+3. the ``--price '*=IN/OUT'`` fallback;
+
+and is NULL otherwise, rather than a guess at zero. So a run made with the LiteLLM backend is costed
+with no flags at all, a ``--price`` for a model overrides what was recorded for it, and the ``*``
+fallback only fills in rows nobody priced:
 
     python chai_tea_import.py run.jsonl --database chai_tea --project M804 \\
         --price gemini-3.1-flash-lite-preview=0.10/0.40 --price 'qwen/*=0/0'
 
 The model is read from each result's own ``metadata.model``, so a run that used several models costs
-each row at its own rate; ``--price '*=IN/OUT'`` sets a fallback for models not named. Thinking
-tokens are billed as output, matching ``storage.token_usage_summary``. A row whose model has no
-price leaves ``md_cost`` NULL rather than guessing at zero.
+each row at its own rate. The LiteLLM backend records the model id it called, provider included
+(``vertex_ai/gemini-3.1-flash-lite-preview``, ``lm_studio/qwen/qwen3.5-9b``); a price given for the
+bare name (``gemini-3.1-flash-lite-preview``, ``qwen/*``) matches it too. Thinking tokens are billed
+as output, matching ``storage.token_usage_summary``.
 
-One thing to know before writing rollup SQL over the stored counts: a provider that did not break a
-modality down records ``-1`` for it, not 0 (Ollama and LM Studio do this for ``images`` and
-``thinking``), and those sentinels are kept as the provider wrote them. So a plain
-``sum((metadata->'token_usage'->>'thinking')::int)`` returns a negative number across such rows.
-Filter them out with ``GREATEST(..., 0)``, as the costing here does.
+One thing to know before writing rollup SQL over the stored counts: a count the provider did not
+report is ``null`` (the LiteLLM backend) or, in rows written before it, ``-1`` (Ollama and LM Studio
+did this for ``images`` and ``thinking``). Both are kept as written. So a plain
+``sum((metadata->'token_usage'->>'thinking')::int)`` can return a negative number across older rows;
+filter them out with ``GREATEST(..., 0)``, as the costing here does.
 
 Mapping
 -------
@@ -314,30 +323,80 @@ def parse_prices(specs):
     return prices
 
 
-def price_for(model, prices):
-    """The (input, output) rates for *model*: an exact name first, then a glob, then ``*``."""
+#: Provider prefixes LiteLLM model ids start with, for rows that recorded no ``provider``.
+LITELLM_PREFIXES = {
+    "anthropic", "azure", "bedrock", "cohere", "deepseek", "gemini", "groq", "hosted_vllm",
+    "lm_studio", "mistral", "ollama", "ollama_chat", "openai", "openrouter", "together_ai",
+    "vertex_ai", "xai",
+}
+
+
+def model_names(model, provider=None):
+    """The names *model* may be priced under: as recorded, then without its LiteLLM provider prefix.
+
+    ``vertex_ai/gemini-3.1-flash-lite`` -> ``[that, "gemini-3.1-flash-lite"]``. Only a known prefix (or
+    the row's own ``provider``) is stripped, so an organisation in a model id (``qwen/qwen3.5-9b``)
+    stays put.
+    """
+    if not model:
+        return []
+    names = [model]
+    head, sep, rest = str(model).partition("/")
+    if sep and rest and (head == provider or head in LITELLM_PREFIXES):
+        names.append(rest)
+    return names
+
+
+def named_price(model, prices, provider=None):
+    """The rates given for *model* by name or glob (either form of its name), ignoring ``*``."""
     if not prices:
         return None
-    if model and model in prices:
-        return prices[model]
-    if model:
+    names = model_names(model, provider)
+    for name in names:
+        if name != "*" and name in prices:
+            return prices[name]
+    for name in names:
         for pattern, rates in prices.items():
-            if pattern not in ("*", model) and fnmatch.fnmatch(model, pattern):
+            if pattern not in ("*", name) and fnmatch.fnmatch(name, pattern):
                 return rates
-    return prices.get("*")
+    return None
+
+
+def price_for(model, prices, provider=None):
+    """The (input, output) rates for *model*: an exact name first, then a glob, then ``*``.
+
+    A LiteLLM model id also matches prices given for its bare name (see ``model_names``).
+    """
+    if not prices:
+        return None
+    rates = named_price(model, prices, provider)
+    return rates if rates is not None else prices.get("*")
+
+
+def recorded_cost(metadata):
+    """The USD cost a component recorded for its call (``metadata.cost``), or ``None``."""
+    cost = metadata.get("cost")
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)) or cost < 0:
+        return None
+    return float(cost)
 
 
 def cost_of(metadata, prices):
-    """What the call *metadata* describes cost, or ``None`` if its model has no price.
+    """What the call *metadata* describes cost, or ``None`` if that cannot be told.
 
-    Thinking tokens bill as output, as ``storage.token_usage_summary`` does. Counts the providers
-    record as -1 ("this response did not break that down") are read as zero rather than negative.
+    A price given for the call's model wins; then the cost the component recorded when it made the
+    call; then the ``*`` fallback price. Thinking tokens bill as output, as
+    ``storage.token_usage_summary`` does. Counts the provider did not report (``null``, or ``-1`` in
+    older rows) are read as zero rather than negative.
     """
     usage = metadata.get("token_usage")
-    if not isinstance(usage, dict) or not usage:
-        return None
-    rates = price_for(metadata.get("model"), prices)
+    rates = named_price(metadata.get("model"), prices, metadata.get("provider"))
     if rates is None:
+        recorded = recorded_cost(metadata)
+        if recorded is not None:
+            return recorded
+        rates = (prices or {}).get("*")
+    if rates is None or not isinstance(usage, dict) or not usage:
         return None
 
     def count(key):
@@ -574,7 +633,8 @@ def main(argv=None):
         action="append",
         metavar="MODEL=IN/OUT",
         help="dollars per million tokens for a model, e.g. gemini-3.1-flash-lite-preview=0.10/0.40; "
-        "repeatable, and '*=IN/OUT' sets a fallback. Without it md_cost stays NULL.",
+        "repeatable, and '*=IN/OUT' sets a fallback. Overrides the cost a component recorded for that "
+        "model; rows with neither keep md_cost NULL.",
     )
     parser.add_argument("--dsn", default=None, help="target connection string; overrides the options below")
     parser.add_argument("--host", default=None)
@@ -624,7 +684,7 @@ def main(argv=None):
     if summary["costed"]:
         print(f"${summary['cost']:.4f} over {summary['costed']} costed calls")
     elif prices:
-        print("No rows costed: no result carried a model with a matching price")
+        print("No rows costed: no result carried a recorded cost or a model with a matching price")
     return 0
 
 

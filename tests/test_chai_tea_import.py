@@ -162,6 +162,61 @@ class TestCosting(unittest.TestCase):
         self.assertIsNone(chai_tea_import.cost_of({"type": "TEXT"}, {"*": (1.0, 1.0)}))
 
 
+def litellm_metadata(cost=0.00123, **overrides):
+    """What the LiteLLM-backed GeminiTranscriber records: the provider-prefixed model id, the
+    provider, the cost it priced the call at, and null for counts the provider did not report."""
+    metadata = gemini_metadata()
+    metadata.update(
+        {
+            "model": "vertex_ai/gemini-3.1-flash-lite-preview",
+            "provider": "vertex_ai",
+            "cost": cost,
+        }
+    )
+    metadata["token_usage"]["images"] = None
+    metadata.update(overrides)
+    return metadata
+
+
+class TestCostingLiteLLMRows(unittest.TestCase):
+    """Rows written by the LiteLLM backend: prefixed model ids and a recorded cost."""
+
+    def test_recorded_cost_is_used_without_prices(self):
+        self.assertAlmostEqual(chai_tea_import.cost_of(litellm_metadata(), {}), 0.00123)
+        self.assertAlmostEqual(chai_tea_import.cost_of(litellm_metadata(), None), 0.00123)
+
+    def test_a_price_for_the_bare_name_matches_the_prefixed_id(self):
+        prices = {"gemini-3.1-flash-lite-preview": (0.10, 0.40)}
+        self.assertEqual(chai_tea_import.price_for("vertex_ai/gemini-3.1-flash-lite-preview", prices), (0.10, 0.40))
+        self.assertEqual(chai_tea_import.price_for("gemini/gemini-3.1-flash-lite-preview", prices), (0.10, 0.40))
+        self.assertEqual(chai_tea_import.price_for("lm_studio/qwen/qwen3.5-9b", {"qwen/*": (0.0, 0.0)}), (0.0, 0.0))
+        # an organisation in a model id is not a provider prefix
+        self.assertIsNone(chai_tea_import.price_for("qwen/qwen3.5-9b", {"qwen3.5-9b": (1.0, 1.0)}))
+        # the row's own provider is stripped even when it is not a known prefix
+        self.assertEqual(chai_tea_import.price_for("myhost/m", {"m": (1.0, 2.0)}, provider="myhost"), (1.0, 2.0))
+
+    def test_a_named_price_overrides_the_recorded_cost(self):
+        metadata = litellm_metadata()
+        cost = chai_tea_import.cost_of(metadata, {"gemini-3.1-flash-lite-preview": (0.10, 0.40)})
+        # 1200 text tokens in (images unreported), 150 thinking + 640 out, billed as output
+        self.assertAlmostEqual(cost, 1200 * 0.10 / 1e6 + 790 * 0.40 / 1e6)
+
+    def test_the_fallback_price_does_not_override_a_recorded_cost(self):
+        self.assertAlmostEqual(chai_tea_import.cost_of(litellm_metadata(), {"*": (9.0, 9.0)}), 0.00123)
+        # ... but still prices a row that recorded none
+        unpriced = litellm_metadata(cost=None)
+        self.assertIsNotNone(chai_tea_import.cost_of(unpriced, {"*": (9.0, 9.0)}))
+        self.assertIsNone(chai_tea_import.cost_of(unpriced, {}))
+
+    def test_bad_recorded_costs_are_ignored(self):
+        for bad in (True, -1, "0.5", None):
+            self.assertIsNone(chai_tea_import.cost_of(litellm_metadata(cost=bad), {}), bad)
+
+    def test_a_local_model_recorded_as_free_costs_zero(self):
+        metadata = litellm_metadata(cost=0.0, model="ollama_chat/llama3.2", provider="ollama_chat")
+        self.assertEqual(chai_tea_import.cost_of(metadata, {}), 0.0)
+
+
 class TestReaders(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
@@ -319,6 +374,21 @@ class TestImportIntoChaiTea(unittest.TestCase):
     def test_md_cost_stays_null_without_prices(self):
         self.run_import()
         self.assertEqual(self.query("SELECT count(*) FROM results WHERE md_cost IS NOT NULL"), [(0,)])
+
+    def test_litellm_rows_are_costed_from_what_they_recorded(self):
+        """Rows from the LiteLLM backend carry their cost, so they need no --price at all."""
+        with open(self.path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(result_record(processorId="transcribe2", metadata=litellm_metadata(cost=0.002))) + "\n")
+            free = litellm_metadata(cost=0.0, model="ollama_chat/llama3.2", provider="ollama_chat")
+            fh.write(json.dumps(result_record(processorId="transcribe3", metadata=free)) + "\n")
+        summary = self.run_import()
+        self.assertEqual(summary["costed"], 2)
+        self.assertAlmostEqual(summary["cost"], 0.002)
+        rows = self.query("SELECT md_cost FROM results WHERE md_cost IS NOT NULL ORDER BY md_cost")
+        self.assertEqual([float(r[0]) for r in rows], [0.0, 0.002])
+        # the unreported image counts (both rows) are stored as JSON null, not a number
+        nulls = self.query("SELECT count(*) FROM results WHERE metadata->'token_usage'->'images' = 'null'::jsonb")
+        self.assertEqual(nulls, [(2,)])
 
     def test_md_timestamp_is_never_null(self):
         """chai_tea_parquet.py's --since export filters on it, so a NULL would hide the row."""
