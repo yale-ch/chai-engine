@@ -105,9 +105,14 @@ class Workflow(Component):
             raise ValueError(f"Tried to create identifier that already exists: {cid}")
         return cid
 
-    def record_usage(self, component, metadata):
-        """Add a result's ``token_usage``/``cost`` metadata (if any) to this run's usage ledger."""
-        return self.usage.record(component, metadata)
+    def record_usage(self, component, metadata, result=None):
+        """Add a result's ``token_usage``/``cost`` metadata (if any) to this run's usage ledger.
+
+        Pass the *result* itself when there is one: a result is counted once, so a pass-through
+        step that returns an earlier component's result does not count that call again.
+        """
+        key = getattr(result, "id", None) if result is not None else None
+        return self.usage.record(component, metadata, key=key)
 
     def usage_summary(self):
         """Calls, tokens and cost of the last (or current) run; see ``chai.usage.UsageLedger``."""

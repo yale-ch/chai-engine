@@ -297,9 +297,10 @@ class Component(BaseThing):
             # ... so that we can walk up the hierarchy to link results
 
             # Model-backed components report what their call consumed (token_usage,
-            # cost, duration, model); the workflow keeps the run-wide tally.
+            # cost, duration, model); the workflow keeps the run-wide tally. The result
+            # goes along so a step that returns an earlier result is not counted twice.
             if self.workflow is not None and self.workflow is not self:
-                self.workflow.record_usage(self, new_result.metadata)
+                self.workflow.record_usage(self, new_result.metadata, result=new_result)
 
             if isinstance(input, Result) and self.register_on:
                 # list of processors, on to which we register the new result for the input

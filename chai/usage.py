@@ -9,6 +9,11 @@ as it finishes; ``workflow.usage.summary()`` gives the same numbers afterwards.
 ``cost`` is in US dollars. It is ``None`` on a result when nobody could price the call (a self-hosted
 model LiteLLM has no table entry for and no ``pricing`` setting); the ledger counts such calls under
 ``unpriced_calls`` so a total is never mistaken for a complete one.
+
+A call is counted once, against the component that made the result. Steps that hand a result on
+unchanged -- storage returns its input, a wrapper may return its child's result -- pass the same
+``Result`` through ``Component.process`` again; the ledger remembers the results it has counted and
+skips them.
 """
 
 import threading
@@ -64,6 +69,7 @@ class UsageLedger:
             self.totals = _empty()
             self.by_component = {}
             self.by_model = {}
+            self._counted = set()
 
     @staticmethod
     def entry_from_metadata(metadata):
@@ -93,14 +99,23 @@ class UsageLedger:
             "seconds": seconds,
         }
 
-    def record(self, component, metadata):
-        """Add one result's usage to the ledger; returns the entry added (``None`` if nothing to add)."""
+    def record(self, component, metadata, key=None):
+        """Add one result's usage to the ledger; returns the entry added (``None`` if nothing to add).
+
+        *key* identifies the result the usage belongs to (``Component.process`` passes the result's
+        id). Usage already recorded under the same key is not counted again, so a result handed on
+        by a pass-through step is counted once, against the component that made it.
+        """
         entry = self.entry_from_metadata(metadata)
         if entry is None:
             return None
         cid = getattr(component, "id", None) or "?"
         model = metadata.get("model") or "?"
         with self._lock:
+            if key is not None:
+                if key in self._counted:
+                    return None
+                self._counted.add(key)
             _add(self.totals, entry)
             row = self.by_component.setdefault(
                 cid,

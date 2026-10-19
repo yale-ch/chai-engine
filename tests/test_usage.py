@@ -101,5 +101,55 @@ class TestWorkflowAccounting(unittest.TestCase):
         self.assertEqual(len(summary["by_model"]), 1)
 
 
+class TestPassThroughSteps(unittest.TestCase):
+    """A step that returns its input (storage, wrappers) must not count the call it hands on."""
+
+    def test_storage_after_a_model_call(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            step = llm_step("llm", model="gemini/gemini-3.1-flash-lite")
+            step["next_steps"] = [{"type": "storage.FileSystemStorage", "id": "store", "settings": {"directory": d}}]
+            wf = Workflow({"type": "Workflow", "id": "wf", "steps": [step]})
+            out = wf.run("x").value[0]
+        summary = wf.usage_summary()
+        self.assertEqual(summary["calls"], 1)
+        self.assertEqual(list(summary["by_component"]), ["llm"])
+        self.assertAlmostEqual(summary["cost"], out.metadata["cost"])
+
+    def test_a_chain_of_pass_through_steps(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d1, tempfile.TemporaryDirectory() as d2:
+            step = llm_step("llm")
+            step["next_steps"] = [
+                {
+                    "type": "storage.FileSystemStorage",
+                    "id": "store1",
+                    "settings": {"directory": d1},
+                    "next_steps": [{"type": "storage.FileSystemStorage", "id": "store2", "settings": {"directory": d2}}],
+                }
+            ]
+            wf = Workflow({"type": "Workflow", "id": "wf", "steps": [step]})
+            wf.run("x")
+        self.assertEqual(wf.usage_summary()["calls"], 1)
+
+    def test_same_result_recorded_twice_counts_once(self):
+        wf = Workflow({"type": "Workflow", "id": "wf"})
+        result = ItemResult("x", metadata={"token_usage": {"prompt": 3, "result": 1, "total": 4}, "cost": 0.5, "model": "m"})
+
+        class C:
+            id = "a"
+            name = "a"
+
+        self.assertIsNotNone(wf.record_usage(C(), result.metadata, result=result))
+        self.assertIsNone(wf.record_usage(C(), result.metadata, result=result))
+        self.assertEqual(wf.usage_summary()["calls"], 1)
+        # usage reported without a result (a gate's decision) is always counted
+        wf.record_usage(C(), {"token_usage": {"total": 1}, "cost": 0.0})
+        wf.record_usage(C(), {"token_usage": {"total": 1}, "cost": 0.0})
+        self.assertEqual(wf.usage_summary()["calls"], 3)
+
+
 if __name__ == "__main__":
     unittest.main()
