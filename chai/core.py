@@ -250,9 +250,10 @@ class Component(BaseThing):
         """Run this component on *input* and forward the output to ``next_steps``.
 
         Wraps ``_process`` with lifecycle events (``component_start`` / ``component_end``, or
-        ``component_error``), back-fills ``input``/``processor`` on the new result, performs
-        ``register_on`` derivative registration by walking up the input chain, and returns
-        ``process_out``'s result. Returns ``None`` when ``_process`` produced no result.
+        ``component_error``), back-fills ``input``/``processor`` on the new result, hands any
+        ``token_usage``/``cost`` metadata to the workflow's usage ledger, performs ``register_on``
+        derivative registration by walking up the input chain, and returns ``process_out``'s result.
+        Returns ``None`` when ``_process`` produced no result.
 
         Error policy (every component, via settings):
 
@@ -305,16 +306,27 @@ class Component(BaseThing):
                 new_result.processor = self
             # ... so that we can walk up the hierarchy to link results
 
+            # Model-backed components report what their call consumed (token_usage,
+            # cost, duration, model); the workflow keeps the run-wide tally. The result
+            # goes along so a step that returns an earlier result is not counted twice.
+            if self.workflow is not None and self.workflow is not self:
+                self.workflow.record_usage(self, new_result.metadata, result=new_result)
+
             if isinstance(input, Result) and self.register_on:
                 # list of processors, on to which we register the new result for the input
                 inp = input
                 targets = self.register_on[:]
-                while targets:
+                # The chain ends at the raw run input (or None); a target that never
+                # appears in it -- e.g. this component run outside the iterator it
+                # registers on, as a test or a one-off -- is simply not registered.
+                while targets and isinstance(inp, Result):
                     if inp.processor in targets:
                         inp.register_result(self, new_result)
                         targets.remove(inp.processor)
                     # walk up one step
                     inp = inp.input
+                if targets:
+                    logger.debug(f"{self}: register_on target(s) {targets} not found in the input chain")
 
         # and call process_out to get to the next step
         return self.process_out(new_result)

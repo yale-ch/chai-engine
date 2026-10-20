@@ -124,3 +124,40 @@ class TestIterator(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRegisterOnOutsideItsAncestor(unittest.TestCase):
+    def test_target_absent_from_the_chain_is_not_an_error(self):
+        """A component that registers on an iterator still runs when called directly (a test, a
+        one-off API call): the provenance chain ends before the target and nothing is registered."""
+        wf = Workflow(
+            {
+                "type": "Workflow",
+                "id": "reg_wf",
+                "steps": [
+                    {
+                        "type": "iterator.Iterator",
+                        "id": "it",
+                        "steps": [
+                            {
+                                "type": "classifier.KeywordClassifier",
+                                "id": "cls",
+                                "register_on": ["it"],
+                                "settings": {"labels": {"cat": ["cat"]}},
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+        cls = wf.get_component_by_id("cls")
+        item = ItemResult("a cat")
+        out = cls.process(item)  # not inside the iterator: the chain is item -> None
+        self.assertEqual(out.value, ["cat"])
+        # derivatives are keyed by the component that made them (what LabelTestGate looks up)
+        self.assertEqual(item.get_derivative_result(cls), [])
+        # inside the iterator the registration still happens, on the iterator's entry
+        res = wf.run(ListResult([ItemResult("a cat"), ItemResult("a dog")]))
+        entries = res.value[0].value
+        self.assertEqual(entries[0].input.get_derivative_result(cls)[0].value, ["cat"])
+        self.assertEqual(entries[1].input.get_derivative_result(cls)[0].value, [])

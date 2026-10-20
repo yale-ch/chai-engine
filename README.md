@@ -19,8 +19,12 @@ Chai is one of three sibling projects:
 pip install -r requirements.txt
 cp env.template .env        # add GEMINI_API_KEY (or GOOGLE_CLOUD_PROJECT for Vertex)
 
-python -m unittest discover -s tests    # 78 tests, no API keys needed
+python -m unittest discover -s tests    # no API keys, no network needed
 ```
+
+Hosted and served models are reached through [LiteLLM](https://docs.litellm.ai), so any
+provider it knows -- Gemini and Vertex AI, OpenAI, Anthropic, Ollama, LM Studio, vLLM, sglang,
+OpenRouter, Groq, ... -- is one `model` string away, and every call is priced.
 
 A workflow is a JSON tree handed to `Workflow`:
 
@@ -107,6 +111,7 @@ Two consequences worth internalizing:
 | **Reducer** | Merge branched runs into one result | `FlattenReducer`, `CollectReducer`, `MergeDictReducer`, `TextJoinReducer`, `GeminiReducer`, ... |
 | **Annotator** | Human-reviewable artifacts | `ImageBoxAnnotator` (supervision boxes), `TextHighlightAnnotator` (labelled `<mark>`s) |
 | **Embedder** | Vectors + similarity | `VectorIndexer`, `VectorRetriever` (SQLite store; hash/gemini/ollama/openai services) |
+| **Decision** | System One questions: choice / score / noul answered with probabilities | `DecisionClassifier` (one question, the answer as a label), `DecisionGate` (a true/false question as a branch), `DecisionExtractor` (several questions, one record) -- see [docs/system1.md](docs/system1.md) |
 | **Storage** | Persist results | `FileSystemStorage`, `SqliteStorage` (+ human corrections) |
 | **Converter** | File → file in another format | `JsonLinesToParquet` |
 | **Uploader** | Hand a file to another system | `S3Uploader`, `FileSystemUploader` |
@@ -115,19 +120,48 @@ Two consequences worth internalizing:
 
 Deterministic components (`KeywordClassifier`, `TextSegmenter`,
 `StaticProvider`, `CsvFileProvider`, `TextFileTranscriber`, `FileInfoDescriber`,
-`GlossaryTranslator`, all reducers/gates/evaluators, hash embeddings) run
+`GlossaryTranslator`, all reducers/gates, hash embeddings) run
 without models or API keys — the test suite and example workflows rely on
-this.
+this. Tests of the model-backed components use LiteLLM's local mock replies
+(`"litellm_params": {"mock_response": "..."}`), so they run the real component
+code without a network.
 
 ### AI backends
 
-Every AI-capable role has a generated composite per backend (``GeminiTranscriber``,
-``OllamaExtractor``, ``VLLMDescriber``, ...): the role contributes prompts and defaults,
-the backend contributes the API call. Backends: Gemini (Vertex AI via
-`GOOGLE_CLOUD_PROJECT`; Google Search grounding on by default, `tools: []` disables),
-LM Studio, Ollama, OpenAI-compatible endpoints (vLLM, sglang, anything with an
-`api_host`), and MLX-VLM on Apple Silicon.
+Every AI-capable role has a generated composite per backend: the role contributes prompts and
+defaults, the backend contributes the model call. There is one backend for hosted and served chat
+models, **`LLMComponent`** (`chai/ai/llm.py`), built on LiteLLM: the provider is part of the model
+id, so `extractor.LLMExtractor` with `"model": "gemini/gemini-3.1-flash-lite"`,
+`"vertex_ai/gemini-3.7-flash"`, `"openai/gpt-4o-mini"`, `"anthropic/claude-sonnet-5-5"`,
+`"ollama_chat/llama3.2"`, `"lm_studio/qwen/qwen3.5-9b"` or `"hosted_vllm/Qwen/Qwen3-8B"` is the
+same component talking to a different model. The familiar names still work and keep each
+provider's defaults -- `GeminiTranscriber` (Vertex AI via `GOOGLE_CLOUD_PROJECT`, Google Search
+grounding on by default, `tools: []` disables; `thinking_level` on Gemini 3+), `OllamaExtractor`,
+`LMStudioDescriber`, `OpenAIClassifier`, `VLLMSegmenter`, `SGLangTranslator` -- as thin subclasses.
+Settings that are not set are not sent (the provider's defaults apply); a setting that is set is
+always sent, so a model that rejects it fails loudly instead of being silently ignored. In-process
+backends: `TransformersComponent` (text) and `MLXVLMComponent` (vision, Apple Silicon).
 
+**System One decision models** (the Jev API, and Jev-Omni, Laya and GLiNER2.5-Decide in process, or
+any chat model as a baseline) are a
+different kind of backend -- they answer typed questions with calibrated probabilities instead of
+text -- and have their own roles in `chai/decision.py`; see [docs/system1.md](docs/system1.md).
+
+### Usage and cost
+
+Every model-backed result carries `token_usage` (prompt / result / thinking / images / total),
+`cost` (USD from LiteLLM's price table, or your own `pricing` setting for self-hosted models; `null`
+when nobody can price the call) and `duration`. The workflow keeps the run-wide tally:
+
+```python
+wf.run(input)
+wf.usage_summary()
+# {'calls': 42, 'total_tokens': 310_221, 'cost': 0.0834, 'unpriced_calls': 0, 'seconds': 97.2,
+#  'by_component': {'ner': {...}, 'select': {...}}, 'by_model': {'vertex_ai/gemini-3.1-flash-lite': {...}}}
+```
+
+The same summary rides on the workflow's final `component_end` event as `usage`, so a harness can
+show what a run cost as it finishes.
 
 ### Conditions: one test language for all gates
 
@@ -225,6 +259,20 @@ Default prompts live in `chai/data/prompts.json`; reusable step templates in
   tables with human correction), bind viewers to specific workflow steps,
   theme it (Yale palette by default), and **Export** a standalone Flask app
   runnable with `uv run app.py`.
+
+## Examples
+
+`examples/` holds runnable scripts and workflow JSON. `examples/reconcile_wikidata.py` is the
+end-to-end shape chai is built for: NER with an LLM, candidate records from Wikidata (plain
+Python), and a System One style selection -- which candidate does this mention refer to, or none
+-- with every model call priced. `examples/system1_models.py` runs every available System One
+model side by side on the same decisions and reports accuracy, time and cost per model.
+`examples/workflow-system1.json` is the selection step alone as workflow JSON.
+
+## Where chai is going
+
+[docs/roadmap.md](docs/roadmap.md) lists what the engine still needs to reach its goals, drawn
+from the projects that lean on it hardest (entity reconciliation, decision-model fine-tuning).
 
 ## Extending chai
 
