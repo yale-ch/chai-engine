@@ -108,6 +108,8 @@ Two consequences worth internalizing:
 | **Annotator** | Human-reviewable artifacts | `ImageBoxAnnotator` (supervision boxes), `TextHighlightAnnotator` (labelled `<mark>`s) |
 | **Embedder** | Vectors + similarity | `VectorIndexer`, `VectorRetriever` (SQLite store; hash/gemini/ollama/openai services) |
 | **Storage** | Persist results | `FileSystemStorage`, `SqliteStorage` (+ human corrections) |
+| **Converter** | File → file in another format | `JsonLinesToParquet` |
+| **Uploader** | Hand a file to another system | `S3Uploader`, `FileSystemUploader` |
 | **FanOut** | Explicit parallel split | `FanOut` (run all children on the same input; optional concurrent `workers`) |
 | **Utils** | Plumbing | `DebugStep` (print & pass) |
 
