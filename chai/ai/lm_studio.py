@@ -1,207 +1,31 @@
 """LM Studio backend for chai.
 
-Talks to a local `LM Studio <https://lmstudio.ai>`_ server through the ``lmstudio`` Python SDK
-(default ``localhost:1234``). Role mixins such as ``LMStudioTranscriber`` are generated from
-``LMStudioComponent`` by ``chai.ai.create_all_components``.
+Talks to a local `LM Studio <https://lmstudio.ai>`_ server (default ``localhost:1234``) through
+LiteLLM's ``lm_studio`` provider, which speaks the server's OpenAI-compatible ``/v1`` API. Role mixins
+such as ``LMStudioTranscriber`` are generated from ``LMStudioComponent`` by
+``chai.ai.create_all_components``.
 """
 
-import io
-import logging
-import time
-from pathlib import Path
-
-import lmstudio as lms
-from PIL import Image
-
-# from tenacity import retry
-from ..core import Component
-from ..image_operations import bytes_from_image, image_from_bytes, scale
-from ..result import FileItemResult, ItemResult, Result
-from .ai_utils import extract_json
-
-logger = logging.getLogger("chai")
+from .llm import LLMComponent
 
 
-class LMStudioComponent(Component):
-    """Component that sends its input to a local LM Studio server and returns the response.
-
-    Input is an ``ItemResult`` or list-shaped Result whose entries carry ``type`` metadata: TEXT/DATA
-    values fill ``{text_input_<i>}`` prompt slots, IMAGE entries are uploaded as image attachments
-    (optionally downscaled first). Output is an ``ItemResult`` whose value is parsed JSON (when
-    ``expected_output`` is 'json') or raw text, with ``token_usage``/``duration``/``type``/``engine``/``model`` metadata.
-    A ``</think>`` block at the start of the reply (reasoning models) is stripped.
+class LMStudioComponent(LLMComponent):
+    """A model served by LM Studio, with the defaults chai has used for it, on top of ``LLMComponent``.
 
     Settings:
-        - api_host: host:port of the LM Studio server (default 'localhost:1234')
-        - model: model identifier as known to LM Studio (default 'qwen/qwen3.5-9b')
-        - prompt: prompt template; supports {step_name}, {text_input_<i>}, {input_length},
-          {first_input} and {last_input} substitutions (default '')
-        - expected_output: 'json' to parse the reply as JSON, anything else for raw text (default 'json')
+        - api_host: host:port (or URL) of the LM Studio server; '/v1' is appended (default 'localhost:1234')
+        - model: model identifier as LM Studio advertises it (default 'qwen/qwen3.5-9b')
         - temperature: sampling temperature (default 0.4)
-        - top_p: nucleus sampling threshold (default 0.9)
         - max_output_tokens: response token cap (default 32000)
         - max_image_size: long-edge pixel limit; images are downscaled before upload if set (default 0 = off)
+        - plus every LLMComponent setting (prompt, expected_output, system_instruction, timeout, pricing, ...)
     """
 
-    ENGINE_NAME: str = "lm-studio"
-
-    def __init__(self, tree, workflow, parent=None):
-        super().__init__(tree, workflow, parent)
-        self.api_host = self.settings.get("api_host", "localhost:1234")
-        self.model = self.settings.get("model", "qwen/qwen3.5-9b")
-        self.temperature = self.settings.get("temperature", 0.4)
-        self.top_p = self.settings.get("top_p", 0.9)
-        self.max_output_tokens = self.settings.get("max_output_tokens", 32000)
-        self.prompt_text = self.settings.get("prompt", "")
-        self.expects = self.settings.get("expected_output", "json")
-        self.substitutions = {"ADDITIONAL_CONTEXT": ""}
-
-        self.base_config = {"temperature": self.temperature, "maxTokens": self.max_output_tokens}
-
-        self.client = None
-        self.client_model = None
-        self.connect_to_client()
-
-    def connect_to_client(self):
-        self.client = lms.Client(self.api_host)
-        self.client_model = self.client.llm.model(self.model)
-
-    def generate_content(self, contents):
-        chat = lms.Chat()
-        chat.add_user_message(contents[0], images=contents[1])
-        resp = self.client_model.respond(chat)
-        return resp
-
-    @staticmethod
-    def get_usage(response) -> dict:
-        tokens_out = response.stats.predicted_tokens_count
-        tokens_in = response.stats.prompt_tokens_count
-        t_image = -1
-        t_thinking = -1
-
-        return {
-            "total": tokens_out + tokens_in,
-            "prompt": tokens_in,
-            "images": t_image,
-            "thinking": t_thinking,
-            "result": tokens_out,
-        }
-
-    def image_to_part(self, image_source, mime_type: str = "image/png"):
-        """Convert various image formats into a file part"""
-
-        if isinstance(image_source, FileItemResult):
-            img_bytes = image_source.value
-        elif isinstance(image_source, Image.Image):
-            buf = io.BytesIO()
-            image_source.save(buf, format="PNG")
-            img_bytes = buf.getvalue()
-        elif isinstance(image_source, (str, Path)):
-            path = Path(image_source)
-            with open(path, "rb") as f:
-                img_bytes = f.read()
-        elif isinstance(image_source, bytes):
-            img_bytes = image_source
-        else:
-            raise ValueError(f"Unsupported image source type: {type(image_source)}")
-
-        max_size = self.settings.get("max_image_size", 0)
-        if max_size:
-            i2 = image_from_bytes(img_bytes)
-            i3 = scale(i2, max_size)
-            img_bytes = bytes_from_image(i3)
-
-        imgh = self.client.files.prepare_image(img_bytes)
-        return imgh
-
-    def build_contents(self, input):
-        """Baseline processor for inputs to send to LM Studio"""
-
-        ### Process input into the API call
-
-        inputs = []
-        format_vars = {"step_name": self.name}
-        format_vars.update(self.substitutions)
-        prompt_text = self.prompt_text
-        if isinstance(input, ItemResult):
-            input = [input]
-
-        for i, item in enumerate(input):
-            if isinstance(item, Result):
-                typ = item.metadata.get("type", "")
-                # DATA, TEXT, IMAGE, AUDIO
-                if typ in ["DATA", "TEXT"]:
-                    # embed if slot, else attach
-                    if f"{{text_input_{i}}}" in prompt_text:
-                        format_vars[f"text_input_{i}"] = item.value
-                    else:
-                        # Can we attach?
-                        pass
-                elif typ in ["IMAGE"]:
-                    # attach
-                    p = self.image_to_part(item)
-                    inputs.append(p)
-                else:
-                    raise NotImplementedError(f"Unsupported type {typ} for lm_studio: {item}")
-
-        format_vars["input_length"] = len(inputs)
-        if isinstance(input[0], FileItemResult):
-            format_vars["first_input"] = input[0].file_path.name
-        else:
-            format_vars["first_input"] = ""
-        if isinstance(input[-1], FileItemResult):
-            format_vars["last_input"] = input[-1].file_path.name
-        else:
-            format_vars["last_input"] = ""
-
-        try:
-            p_text = prompt_text.format(**format_vars)
-        except KeyError as e:
-            print(f"Missing substitution in prompt for {self}: {e}")
-
-        if not p_text:
-            raise ValueError(f"Prompt text in {self} is empty")
-
-        return (p_text, inputs)
-
-    def extract_text(self, resp):
-        text = resp.content
-        print(text)
-        if "\n</think>\n" in text:
-            thinking, text = text.split("\n</think>\n")
-        return text.strip()
-
-    def _process(self, input):
-        client = self.client
-        if client is None:
-            self.connect_to_client()
-
-        contents = self.build_contents(input)
-
-        start = time.time()
-        resp = self.generate_content(contents)
-        duration = time.time() - start
-
-        data_type = "DATA"
-        # LM Studio sets .parsed to .content even if not .structured
-        if hasattr(resp, "structured") and resp.structured:
-            result = resp.parsed
-        else:
-            txt = self.extract_text(resp)
-            if self.expects == "json":
-                result = extract_json(txt)
-            else:
-                result = txt
-                data_type = "TEXT"
-
-        toks = self.get_usage(resp)
-
-        metadata = {
-            "token_usage": toks,
-            "duration": duration,
-            "type": data_type,
-            "engine": self.ENGINE_NAME,
-            "model": self.model,
-        }
-        r = ItemResult(result, metadata=metadata)
-        return r
+    PROVIDER = "lm_studio"
+    DEFAULT_MODEL = "qwen/qwen3.5-9b"
+    DEFAULT_API_BASE = "http://localhost:1234"
+    API_BASE_SUFFIX = "/v1"
+    DEFAULT_TEMPERATURE = 0.4
+    DEFAULT_MAX_OUTPUT_TOKENS = 32000
+    DEFAULT_API_KEY = "EMPTY"
+    ENGINE_NAME = "lm-studio"  # as stored on main before the LiteLLM backend; the provider is "lm_studio"

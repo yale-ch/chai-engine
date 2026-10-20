@@ -10,14 +10,11 @@ pi-heif
 supervision
 transformers>=5.5.0
 python-dotenv
-google
-google_genai
-ollama
-lmstudio
 accelerate>=1.13.0
 lxml
-# vLLM, sglang, generic OpenAI-compatible backends
-openai>=1.40.0
+# Every hosted/served chat model (Gemini, Vertex, OpenAI, Anthropic, Ollama, LM Studio,
+# vLLM, sglang, ...) and remote embeddings go through LiteLLM
+litellm>=1.105.1
 # Apple Silicon vision-language backend (MLXVLMComponent). Optional;
 # installs gracefully as a no-op on Linux/Windows -- the backend just
 # won't register.

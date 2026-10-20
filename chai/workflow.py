@@ -12,6 +12,7 @@ import ujson as json
 
 from .core import Component
 from .result import ListResult, Result
+from .usage import UsageLedger
 
 logger = logging.getLogger("chai")
 
@@ -30,6 +31,11 @@ class Workflow(Component):
       ``base`` templates merged by ``Component._make_step``.
     * **Events** -- listeners added with ``add_listener`` receive a payload dict for every
       ``component_start`` / ``component_end`` / ``component_error`` emitted during a run.
+    * **Usage** -- ``usage`` is a ``chai.usage.UsageLedger``: every model-backed component's
+      ``token_usage``/``cost`` metadata is recorded as results are produced (``record_usage``), the
+      ledger is reset at the start of each ``run``, and ``usage.summary()`` (also attached to the
+      workflow's ``component_end`` event as ``usage``) totals calls, tokens and cost per run, per
+      component and per model.
 
     ``run(input)`` is the entry point; see ``_run`` for how the input is fed to the top-level steps.
     Returns a ``ListResult`` collecting one entry per top-level step's output.
@@ -45,6 +51,7 @@ class Workflow(Component):
         self.registry_ids = {}
         self.id_counter = -1
         self.listeners = []
+        self.usage = UsageLedger()
 
         # read in defaults from data/
 
@@ -98,6 +105,19 @@ class Workflow(Component):
             raise ValueError(f"Tried to create identifier that already exists: {cid}")
         return cid
 
+    def record_usage(self, component, metadata, result=None):
+        """Add a result's ``token_usage``/``cost`` metadata (if any) to this run's usage ledger.
+
+        Pass the *result* itself when there is one: a result is counted once, so a pass-through
+        step that returns an earlier component's result does not count that call again.
+        """
+        key = getattr(result, "id", None) if result is not None else None
+        return self.usage.record(component, metadata, key=key)
+
+    def usage_summary(self):
+        """Calls, tokens and cost of the last (or current) run; see ``chai.usage.UsageLedger``."""
+        return self.usage.summary()
+
     def add_listener(self, fn):
         """Subscribe *fn* to run events; it is called with a dict per event
         (component_start / component_end / component_error). Lets harnesses
@@ -128,7 +148,12 @@ class Workflow(Component):
                 logger.warning(f"Workflow listener failed on {event}: {e}")
 
     def run(self, input=None) -> Result:
-        """Execute the workflow, wrapping ``_run`` in workflow-level lifecycle events."""
+        """Execute the workflow, wrapping ``_run`` in workflow-level lifecycle events.
+
+        The usage ledger is reset first, so ``usage.summary()`` (and the ``usage`` carried by the
+        final ``component_end`` event) describes this run alone.
+        """
+        self.usage.reset()
         self.emit("component_start", self)
         try:
             res = self._run(input)
@@ -137,7 +162,7 @@ class Workflow(Component):
             raise
         from .core import result_preview
 
-        self.emit("component_end", self, preview=result_preview(res), result=res)
+        self.emit("component_end", self, preview=result_preview(res), result=res, usage=self.usage.summary())
         return res
 
     def _run(self, input=None) -> Result:

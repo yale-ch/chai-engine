@@ -1,0 +1,66 @@
+{
+  "type": "Workflow",
+  "id": "system1_reconcile",
+  "name": "Reconcile mentions against candidate records with a System One model",
+  "steps": [
+    {
+      "type": "provider.StaticProvider",
+      "id": "records",
+      "input": "",
+      "settings": {
+        "values": [
+          {
+            "name": "Van Gogh",
+            "type": "person",
+            "context_text": "The Night Café was painted by Vincent van Gogh in Arles in 1888.",
+            "candidates": [
+              {"key": "wikidata:Q5582", "summary": "Vincent van Gogh — Dutch painter (1853–1890)"},
+              {"key": "wikidata:Q17029510", "summary": "Van Gogh — music album"}
+            ]
+          },
+          {
+            "name": "Theo",
+            "type": "person",
+            "context_text": "Van Gogh wrote to his brother Theo about it.",
+            "candidates": [
+              {"key": "wikidata:Q1413126", "summary": "Theo — given name"}
+            ]
+          }
+        ]
+      },
+      "steps": [
+        {
+          "type": "iterator.Iterator",
+          "id": "entities",
+          "settings": {"workers": 2, "continue_on_error": true},
+          "steps": [
+            {
+              "type": "decision.DecisionClassifier",
+              "id": "select",
+              "name": "Select record",
+              "register_on": ["entities"],
+              "settings": {
+                "model": "gemini-3.1-flash-lite",
+                "question": "Which candidate record is the mention '{name}' ({type}) referring to in the text?",
+                "state": "Text: {context_text}",
+                "options_from": "candidates",
+                "option_text": "{summary}",
+                "none_option": "None of the listed records is the entity referred to in the text",
+                "layout": "in_state",
+                "options_heading": "Candidate records for the mention '{name}':",
+                "retries": 1
+              }
+            },
+            {
+              "type": "gate.LabelTestGate",
+              "id": "unlinked",
+              "settings": {"component": "select", "label": ["none"]},
+              "true_steps": [{"type": "utils.DebugStep", "id": "needs_review"}],
+              "false_steps": [{"type": "utils.DebugStep", "id": "linked"}]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

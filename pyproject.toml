@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chai-engine"
-version = "0.1.0"
+version = "0.2.0"
 description = "A component-based processing engine for LLM workflows"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,12 +14,8 @@ authors = [
 ]
 dependencies = [
     "accelerate>=1.13.0",
-    "google",
-    "google-genai",
-    "lmstudio",
+    "litellm>=1.105.1",
     "lxml",
-    "ollama",
-    "openai>=1.40.0",
     "Pillow",
     "pi-heif",
     "psycopg[binary]",

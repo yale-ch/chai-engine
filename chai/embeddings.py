@@ -2,8 +2,9 @@
 
 ``embed_texts`` turns text into vectors via a pluggable service: ``hash`` (a
 deterministic local feature-hash embedding -- no model, no keys, fine for tests
-and small corpora), ``gemini``, ``ollama``, or any OpenAI-compatible endpoint
-(``openai`` / ``custom`` / ``lmstudio`` / ``vllm`` with ``api_host``).
+and small corpora), or -- through LiteLLM -- ``gemini``, ``ollama``, or any
+OpenAI-compatible endpoint (``openai`` / ``custom`` / ``lmstudio`` / ``vllm``
+with ``api_host``).
 
 ``VectorStore`` (defined in ``chai.storage`` -- persistence is Storage's job) is a SQLite-backed store with cosine search. The workflow
 components: ``VectorIndexer`` writes its input texts (or a configured document
@@ -48,38 +49,50 @@ def _hash_embed(texts):
 
 
 def embed_texts(texts, service="hash", model=None, api_host=None):
-    """Embed *texts* (list of str) -> list of float vectors, via *service*."""
+    """Embed *texts* (list of str) -> list of float vectors, via *service*.
+
+    ``hash`` is local and deterministic. Every other service goes through LiteLLM's ``embedding``:
+    ``gemini`` (``GEMINI_API_KEY``), ``ollama`` (a local server, ``api_host``), and anything else as an
+    OpenAI-compatible embeddings endpoint (``openai`` itself with ``OPENAI_API_KEY``, or ``custom`` /
+    ``lmstudio`` / ``vllm`` with ``api_host``). *model* may be a bare name or a full LiteLLM id.
+    """
     service = (service or "hash").lower()
     texts = [str(t) for t in texts]
     if not texts:
         return []
     if service == "hash":
         return _hash_embed(texts)
+
+    import litellm
+
+    from .ai.llm import known_provider
+
+    kwargs = {}
+
+    def prefixed(prefix, name):
+        return name if known_provider(name.split("/", 1)[0]) else f"{prefix}/{name}"
+
     if service == "gemini":
-        from google import genai
-
-        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY", os.environ.get("GOOGLE_API_KEY", "")))
-        resp = client.models.embed_content(model=model or "gemini-embedding-001", contents=texts)
-        return [e.values for e in resp.embeddings]
-    if service == "ollama":
-        import ollama
-
-        client = ollama.Client(host=api_host) if api_host else ollama
-        resp = client.embed(model=model or "nomic-embed-text", input=texts)
-        return list(resp["embeddings"])
-    # everything else speaks the OpenAI embeddings API
-    from openai import OpenAI
-
-    host = api_host or "api.openai.com"
-    base_url = host if host.startswith("http") else f"http://{host}"
-    if "api.openai.com" in base_url:
-        base_url = "https://api.openai.com/v1"
-    elif not base_url.rstrip("/").endswith("/v1"):
-        base_url = base_url.rstrip("/") + "/v1"
-    client = OpenAI(base_url=base_url, api_key=os.environ.get("OPENAI_API_KEY", "EMPTY"))
-    resp = client.embeddings.create(model=model or "text-embedding-3-small", input=texts)
-    return [d.embedding for d in resp.data]
-
+        model_id = prefixed("gemini", model or "gemini-embedding-001")
+        key = os.environ.get("GEMINI_API_KEY", os.environ.get("GOOGLE_API_KEY", ""))
+        if key:
+            kwargs["api_key"] = key
+    elif service == "ollama":
+        model_id = prefixed("ollama", model or "nomic-embed-text")
+        host = api_host or "http://localhost:11434"
+        kwargs["api_base"] = host if host.startswith("http") else f"http://{host}"
+    else:
+        # everything else speaks the OpenAI embeddings API
+        model_id = prefixed("openai", model or "text-embedding-3-small")
+        host = api_host or ""
+        if host and "api.openai.com" not in host:
+            base_url = host if host.startswith("http") else f"http://{host}"
+            if not base_url.rstrip("/").endswith("/v1"):
+                base_url = base_url.rstrip("/") + "/v1"
+            kwargs["api_base"] = base_url
+            kwargs["api_key"] = os.environ.get("OPENAI_API_KEY", "EMPTY")
+    resp = litellm.embedding(model=model_id, input=texts, **kwargs)
+    return [list(d["embedding"] if isinstance(d, dict) else d.embedding) for d in resp.data]
 
 
 class Embedder(Component):
