@@ -15,11 +15,13 @@ reports calls, time and cost per model.
     python examples/system1_models.py                      # every model available here
     python examples/system1_models.py --models laya,gliner
 
-Models: ``laya`` and ``gliner`` (in process; ``pip install laya`` and ``gliner2[local]``),
-``jev-omni`` (in process, ~48 GB of weights, ~25 GB of accelerator memory; used when its weights are
-already cached), ``jev`` (TypeSafe API; needs ``TYPESAFE_API_KEY``) and ``gemini`` (a generative
-baseline; needs ``GOOGLE_CLOUD_PROJECT`` or ``GEMINI_API_KEY``). A model that is not available is
-skipped with the reason. ``--offline`` loads local weights from the Hugging Face cache only.
+Models: ``laya`` and ``gliner`` (in process; ``pip install laya`` and ``gliner2[local]``), ``von``,
+``bekko`` and ``decider-2b`` (in process, used when their weights are already cached), the Yale
+fine-tunes ``kev-ft`` (kev-4b on Europeana persons) and ``gliner-ft`` (GLiNER2.5-Decide on Europeana
+persons), ``jev-omni`` (in process, ~48 GB of weights, ~25 GB of accelerator memory; used when
+cached), ``jev`` (TypeSafe API; needs ``TYPESAFE_API_KEY``) and ``gemini`` (a generative baseline;
+needs ``GOOGLE_CLOUD_PROJECT`` or ``GEMINI_API_KEY``). A model that is not available is skipped with
+the reason. ``--offline`` loads local weights from the Hugging Face cache only.
 """
 
 from __future__ import annotations
@@ -103,23 +105,49 @@ TRIAGE_QUESTIONS = {
 
 # Each model's best-measured input layout (see docs/system1.md). GLiNER answers without the
 # question's instructions, so the mention has to be in the state; Laya does best with the
-# candidates listed in the state and no extra header lines.
+# candidates listed in the state and no extra header lines. The Yale fine-tunes expect the layout
+# they were trained on: a Mention / Entity type / Text header.
+HEADER = "Mention: {name}\nEntity type: {type}\nText: {context}"
 MODELS = {
     "laya": {"model": "laya/convaiinnovations/laya", "layout": "in_state", "state": "Text: {context}"},
-    "gliner": {"model": "gliner/fastino/GLiNER2.5-Decide", "layout": "described", "state": "Mention: {name}\nEntity type: {type}\nText: {context}"},
+    "gliner": {"model": "gliner/fastino/GLiNER2.5-Decide", "layout": "described", "state": HEADER},
+    "von": {"model": "von", "layout": "described", "state": "Text: {context}"},
+    "bekko": {"model": "bekko-400m", "layout": "described", "state": "Text: {context}"},
+    "decider-2b": {"model": "decider-2b", "layout": "described", "state": "Text: {context}"},
+    "kev-ft": {"model": "kev-4b-europeana-persons", "layout": "described", "state": HEADER},
+    "gliner-ft": {"model": "gliner-decide-europeana-persons", "layout": "described", "state": HEADER},
     "jev-omni": {"model": "jev-omni/akhilaaa3/Jev-Omni", "layout": "described", "state": "Text: {context}"},
     "jev": {"model": "jev/jev-latest", "layout": "in_state", "state": "Text: {context}"},
     "gemini": {"model": "gemini-3.1-flash-lite", "layout": "in_state", "state": "Text: {context}"},
 }
 
+#: What a local model needs in the Hugging Face cache before it can run here.
+CACHED_FILES = {
+    "von": ("wfzyx/von", "option_marker.pt"),
+    "bekko": ("hotchpotch/bekko-system-one-v0-400m", "inference_v0.py"),
+    "decider-2b": ("Mapika/decider-2b", "config.json"),
+    "kev-ft": ("yale-cultural-heritage/kev-4b-europeana-persons", "head.pt"),
+    "gliner-ft": ("yale-cultural-heritage/GLiNER2.5-Decide-europeana-persons", "model.safetensors"),
+}
 
-def _cached(repo: str, filename: str) -> bool:
+
+def _cached(repo: str, filename: str, revision: str = None) -> bool:
     try:
         from huggingface_hub import try_to_load_from_cache
     except ImportError:
         return False
-    path = try_to_load_from_cache(repo, filename)
+    path = try_to_load_from_cache(repo, filename, revision=revision)
     return isinstance(path, str) and os.path.exists(path)
+
+
+def _preset_cached(name: str) -> bool:
+    """Whether the weights a preset pins (its revision, when it has one) are in the cache."""
+    from chai.system_one import PRESETS
+
+    repo, filename = CACHED_FILES[name]
+    model = MODELS[name]["model"]
+    revision = PRESETS.get(model, {}).get("revision") if PRESETS.get(model, {}).get("checkpoint") == repo else None
+    return _cached(repo, filename, revision)
 
 
 def availability(name: str):
@@ -128,9 +156,17 @@ def availability(name: str):
         if not importlib.util.find_spec("laya"):
             return False, "pip install laya"
         return True, ""
-    if name == "gliner":
+    if name in ("gliner", "gliner-ft"):
         if not importlib.util.find_spec("gliner2"):
             return False, "pip install 'gliner2[local]'"
+        if name in CACHED_FILES and not _preset_cached(name):
+            return False, "weights not in the Hugging Face cache"
+        return True, ""
+    if name == "bekko" and not importlib.util.find_spec("sentence_transformers"):
+        return False, "pip install sentence-transformers (bekko's own inference code needs it)"
+    if name in CACHED_FILES:
+        if not _preset_cached(name):
+            return False, "weights not in the Hugging Face cache (use --offline only once they are)"
         return True, ""
     if name == "jev-omni":
         if not _cached("akhilaaa3/Jev-Omni", "head.pt"):
