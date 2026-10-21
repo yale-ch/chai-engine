@@ -2,9 +2,9 @@
 
 An uploader takes a file (a ``FileItemResult``, or a result whose value is a path) and copies it to a
 destination -- an S3 bucket, a shared directory -- returning a result that says where it went. This
-is the hand-off at the end of a run: a ``JsonLinesToParquet`` converter packs the run into a Parquet
-file, an ``S3Uploader`` puts that file in a bucket, and the system that maintains the central
-database ingests it from there.
+is the hand-off at the end of a run: ``storage.jsonl_to_parquet`` (or a ``ParquetStorage``) packs the
+run into a Parquet file, an ``S3Uploader`` puts that file in a bucket, and the system that maintains
+the central database ingests it from there.
 
 The output is an ``ItemResult`` whose value is ``{"uri", "key", "size", "md5", "source"}``: the
 destination URI, the key the file was stored under, its size in bytes, the md5 of its content and
@@ -18,11 +18,28 @@ import shutil
 import threading
 from datetime import datetime, timezone
 
-from .converter import result_file_path
 from .core import Component, Result
-from .result import ItemResult
+from .result import FileItemResult, ItemResult
 
 logger = logging.getLogger("chai")
+
+
+def result_file_path(result):
+    """The local path *result* stands for: a ``FileItemResult``'s file, or a path given as the value.
+
+    Never reads a ``FileItemResult``'s content. Raises ``ValueError`` when the result names no file.
+    """
+    if isinstance(result, FileItemResult):
+        path = result.file_name
+    elif isinstance(result, Result):
+        path = result.value
+    else:
+        path = result
+    if isinstance(path, os.PathLike):
+        path = os.fspath(path)
+    if not isinstance(path, str) or not path:
+        raise ValueError(f"Expected a file, or a result whose value is a file path; got {result!r}")
+    return path
 
 
 def file_md5(path, chunk_size=1 << 20):
@@ -90,7 +107,13 @@ class Uploader(Component):
         }
         uri = self.upload(path, key, info)
         logger.info(f"{self} uploaded {path} to {uri}")
-        value = {"uri": uri, "key": key, "size": info["size"], "md5": info["md5"], "source": info["source"]}
+        value = {
+            "uri": uri,
+            "key": key,
+            "size": info["size"],
+            "md5": info["md5"],
+            "source": info["source"],
+        }
         return ItemResult(value, input=input, processor=self, metadata={"type": "DATA"})
 
 
@@ -140,7 +163,7 @@ class S3Uploader(Uploader):
     ``s3://bucket/key`` as the output's ``uri``.
 
     Settings (as well as ``key``/``prefix``/``overwrite``, see ``Uploader``):
-        - bucket: the bucket to upload to (default: the ``CHAI_S3_BUCKET`` environment variable)
+        - bucket: the bucket to upload to (default: the ``S3_BUCKET`` environment variable)
         - region: AWS region (default: boto3's, e.g. ``AWS_REGION``/``AWS_DEFAULT_REGION``)
         - profile: named AWS profile to take credentials from (default: boto3's)
         - endpoint_url: for an S3-compatible service other than AWS (default: boto3's, which honours
@@ -161,9 +184,11 @@ class S3Uploader(Uploader):
 
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)
-        self.bucket = self.settings.get("bucket") or os.environ.get("CHAI_S3_BUCKET", "")
+        self.bucket = self.settings.get("bucket") or os.environ.get("S3_BUCKET", "")
         if not self.bucket:
-            raise ValueError(f"{self!r} needs the `bucket` setting (or CHAI_S3_BUCKET in the environment)")
+            raise ValueError(
+                f"{self!r} needs the `bucket` setting (or S3_BUCKET in the environment)"
+            )
         self._client = None
         self._client_lock = threading.Lock()
 
@@ -175,12 +200,16 @@ class S3Uploader(Uploader):
                 try:
                     import boto3
                 except ImportError as e:  # pragma: no cover - depends on the install
-                    raise ImportError("S3Uploader requires boto3: pip install boto3") from e
+                    raise ImportError(
+                        "S3Uploader requires boto3: pip install boto3"
+                    ) from e
                 session = boto3.session.Session(
                     profile_name=self.settings.get("profile") or None,
                     region_name=self.settings.get("region") or None,
                 )
-                self._client = session.client("s3", endpoint_url=self.settings.get("endpoint_url") or None)
+                self._client = session.client(
+                    "s3", endpoint_url=self.settings.get("endpoint_url") or None
+                )
             return self._client
 
     def uri(self, key):
@@ -193,7 +222,11 @@ class S3Uploader(Uploader):
             self.client.head_object(Bucket=self.bucket, Key=key)
             return True
         except ClientError as e:
-            if e.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
+            if e.response.get("Error", {}).get("Code") in (
+                "404",
+                "NoSuchKey",
+                "NotFound",
+            ):
                 return False
             raise
 
@@ -202,7 +235,8 @@ class S3Uploader(Uploader):
         ext = os.path.splitext(path)[1].lower()
         extra.setdefault(
             "ContentType",
-            self.settings.get("content_type") or self.CONTENT_TYPES.get(ext, "application/octet-stream"),
+            self.settings.get("content_type")
+            or self.CONTENT_TYPES.get(ext, "application/octet-stream"),
         )
         # S3 user metadata must be ASCII; a non-ASCII local path is not worth failing the upload over
         metadata = {

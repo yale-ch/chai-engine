@@ -9,6 +9,7 @@ import uuid
 import pyarrow.parquet as pq
 
 from chai.result import FileItemResult, ItemResult
+from chai.storage import jsonl_to_parquet
 from chai.workflow import Workflow
 
 
@@ -28,64 +29,6 @@ RECORDS = [
     {"id": "a", "value": "Ada", "metadata": {"type": "TEXT"}, "score": 1},
     {"id": "b", "value": "Grace", "metadata": {"type": "TEXT"}, "score": 2},
 ]
-
-
-class TestJsonLinesToParquet(unittest.TestCase):
-    def setUp(self):
-        self.dir = tempfile.mkdtemp()
-        self.wf = Workflow({"id": "convert_wf", "type": "workflow.Workflow"})
-        self.jsonl = write_jsonl(os.path.join(self.dir, "run.jsonl"), RECORDS)
-
-    def tearDown(self):
-        shutil.rmtree(self.dir, ignore_errors=True)
-
-    def converter(self, **settings):
-        return self.wf._make_step({"type": "converter.JsonLinesToParquet", "settings": settings}, self.wf)
-
-    def test_writes_the_parquet_file_next_to_the_jsonl(self):
-        out = self.converter().process(FileItemResult(self.jsonl))
-        path = os.path.join(self.dir, "run.parquet")
-        self.assertIsInstance(out, FileItemResult)
-        self.assertEqual(out.file_name, path)
-        self.assertEqual(out.metadata["rows"], 2)
-        self.assertEqual(out.metadata["columns"]["metadata"], "json")
-        table = pq.read_table(path)
-        self.assertEqual(table.column("value").to_pylist(), ["Ada", "Grace"])
-        self.assertEqual(table.column("score").to_pylist(), [1, 2])
-        self.assertFalse(os.path.exists(path + ".partial"))
-
-    def test_the_file_records_where_it_came_from(self):
-        self.converter(metadata={"batch": "b1"}).process(ItemResult(self.jsonl))
-        meta = pq.read_schema(os.path.join(self.dir, "run.parquet")).metadata
-        self.assertEqual(meta[b"chai_source"].decode(), self.jsonl)
-        self.assertEqual(meta[b"chai_workflow_id"].decode(), "convert_wf")
-        self.assertEqual(meta[b"batch"].decode(), "b1")
-
-    def test_directory_and_file_settings_place_the_output(self):
-        out_dir = os.path.join(self.dir, "out")
-        out = self.converter(directory=out_dir).process(FileItemResult(self.jsonl))
-        self.assertEqual(out.file_name, os.path.join(out_dir, "run.parquet"))
-        out = self.converter(file=os.path.join(self.dir, "{stem}-packed.parquet")).process(FileItemResult(self.jsonl))
-        self.assertEqual(out.file_name, os.path.join(self.dir, "run-packed.parquet"))
-
-    def test_an_empty_file_produces_nothing_unless_a_schema_says_what_it_holds(self):
-        empty = write_jsonl(os.path.join(self.dir, "empty.jsonl"), [])
-        self.assertIsNone(self.converter().process(FileItemResult(empty)))
-        self.assertFalse(os.path.exists(os.path.join(self.dir, "empty.parquet")))
-        out = self.converter(schema={"id": "string"}).process(FileItemResult(empty))
-        self.assertEqual(out.metadata["rows"], 0)
-        self.assertEqual(pq.read_schema(out.file_name).names, ["id"])
-
-    def test_a_bad_line_leaves_no_file_behind(self):
-        with open(self.jsonl, "a") as fh:
-            fh.write("{not json\n")
-        with self.assertRaises(Exception):
-            self.converter(batch_size=1).process(FileItemResult(self.jsonl))
-        self.assertEqual(sorted(os.listdir(self.dir)), ["run.jsonl"])
-
-    def test_a_missing_file_is_an_error(self):
-        with self.assertRaises(ValueError):
-            self.converter().process(ItemResult(os.path.join(self.dir, "nope.jsonl")))
 
 
 class TestFileSystemUploader(unittest.TestCase):
@@ -135,8 +78,8 @@ class TestFileSystemUploader(unittest.TestCase):
             self.wf._make_step({"type": "uploader.FileSystemUploader"}, self.wf)
 
 
-class TestConvertAndUploadWorkflow(unittest.TestCase):
-    """The hand-off workflow: .jsonl files in, Parquet files converted and uploaded out."""
+class TestUploadWorkflow(unittest.TestCase):
+    """The hand-off: .jsonl runs packed into Parquet by jsonl_to_parquet, then uploaded by a workflow."""
 
     def setUp(self):
         self.dir = tempfile.mkdtemp()
@@ -146,10 +89,10 @@ class TestConvertAndUploadWorkflow(unittest.TestCase):
         shutil.rmtree(self.dir, ignore_errors=True)
 
     def test_each_jsonl_file_is_converted_and_uploaded(self):
-        files = [
-            write_jsonl(os.path.join(self.dir, "slice-0.jsonl"), RECORDS[:1]),
-            write_jsonl(os.path.join(self.dir, "slice-1.jsonl"), RECORDS[1:]),
-        ]
+        files = []
+        for n, records in enumerate((RECORDS[:1], RECORDS[1:])):
+            jsonl = write_jsonl(os.path.join(self.dir, f"slice-{n}.jsonl"), records)
+            files.append(jsonl_to_parquet(jsonl, os.path.join(self.dir, f"slice-{n}.parquet"))["path"])
         tree = {
             "id": "handoff_wf",
             "type": "workflow.Workflow",
@@ -162,13 +105,8 @@ class TestConvertAndUploadWorkflow(unittest.TestCase):
                             "type": "iterator.Iterator",
                             "steps": [
                                 {
-                                    "type": "converter.JsonLinesToParquet",
-                                    "next_steps": [
-                                        {
-                                            "type": "uploader.FileSystemUploader",
-                                            "settings": {"directory": self.dest, "prefix": "chai/"},
-                                        }
-                                    ],
+                                    "type": "uploader.FileSystemUploader",
+                                    "settings": {"directory": self.dest, "prefix": "chai/"},
                                 }
                             ],
                         }
@@ -186,11 +124,11 @@ class TestConvertAndUploadWorkflow(unittest.TestCase):
 class TestS3UploaderSettings(unittest.TestCase):
     def setUp(self):
         self.wf = Workflow({"id": "s3_wf", "type": "workflow.Workflow"})
-        self._env = os.environ.pop("CHAI_S3_BUCKET", None)
+        self._env = os.environ.pop("S3_BUCKET", None)
 
     def tearDown(self):
         if self._env is not None:
-            os.environ["CHAI_S3_BUCKET"] = self._env
+            os.environ["S3_BUCKET"] = self._env
 
     def test_bucket_is_required(self):
         with self.assertRaises(ValueError):

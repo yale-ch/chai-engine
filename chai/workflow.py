@@ -11,7 +11,9 @@ import os
 import ujson as json
 
 from .core import Component
+from .records import Project, WorkflowRun, as_datetime, as_uuid, now
 from .result import ListResult, Result
+from .schema import column_types
 from .usage import UsageLedger
 
 logger = logging.getLogger("chai")
@@ -36,6 +38,17 @@ class Workflow(Component):
       ledger is reset at the start of each ``run``, and ``usage.summary()`` (also attached to the
       workflow's ``component_end`` event as ``usage``) totals calls, tokens and cost per run, per
       component and per model.
+    * **CHAI-TEA rows** -- a workflow is a WORKFLOW row and carries its columns, read from its
+      config: ``name``, ``description``, ``project`` (a name or a dict of PROJECT columns; see
+      ``chai.records.Project``), ``previous_id`` (the workflow this is a new version of),
+      ``is_active`` (default true), and ``created``/``modified`` (ISO-8601; default the time the
+      workflow is built). ``uuid`` is its WORKFLOW id -- the config's ``uuid``, else derived from its
+      ``id`` -- and ``to_row()`` renders the row, ``to_config()`` the config that keeps all of it.
+    * **Runs** -- each ``run`` is a ``chai.records.WorkflowRun`` (``current_run``), started when the
+      run begins and finished, successful or not, before the final event goes out. ``run_id`` is its
+      id: the ``workflow_run_id`` the storages record on every row, so all the rows one run wrote, to
+      however many files or databases, belong to the same WORKFLOW_RUN. ``records()`` gives the
+      PROJECT, WORKFLOW and WORKFLOW_RUN rows those results hang under.
 
     ``run(input)`` is the entry point; see ``_run`` for how the input is fed to the top-level steps.
     Returns a ``ListResult`` collecting one entry per top-level step's output.
@@ -52,6 +65,8 @@ class Workflow(Component):
         self.id_counter = -1
         self.listeners = []
         self.usage = UsageLedger()
+        # Made before the steps are built: a storage reads the run id when it is constructed
+        self.current_run = WorkflowRun()
 
         # read in defaults from data/
 
@@ -86,6 +101,70 @@ class Workflow(Component):
         self.library = lib
 
         super().__init__(tree, workflow)
+
+        # The WORKFLOW columns, from the config
+        self.uuid = as_uuid(tree.get("uuid") or self.id)
+        self.description = tree.get("description")
+        self.project = Project.from_config(tree.get("project"))
+        self.previous_id = as_uuid(tree.get("previous_id"))
+        self.is_active = bool(tree.get("is_active", True))
+        self.created = as_datetime(tree.get("created")) or now()
+        self.modified = as_datetime(tree.get("modified")) or self.created
+        self.current_run.workflow_id = self.uuid
+
+    @property
+    def run_id(self):
+        """The id of the current (or, between runs, the last) run: its ``workflow_run_id``."""
+        return self.current_run.id
+
+    @property
+    def project_id(self):
+        return self.project.id
+
+    def touch(self):
+        """Mark the workflow changed: ``modified`` becomes now."""
+        self.modified = now()
+
+    def to_row(self):
+        """The WORKFLOW row: exactly its columns, in order."""
+        values = {
+            "id": self.uuid,
+            "project_id": self.project.id,
+            "previous_id": self.previous_id,
+            "name": self.name,
+            "description": self.description,
+            "is_active": self.is_active,
+            "created": self.created,
+            "modified": self.modified,
+        }
+        return {column: values[column] for column in column_types("WORKFLOW")}
+
+    def records(self):
+        """The rows this workflow's results hang under: ``{entity: row}`` for PROJECT, WORKFLOW, WORKFLOW_RUN."""
+        return {
+            "PROJECT": self.project.to_row(),
+            "WORKFLOW": self.to_row(),
+            "WORKFLOW_RUN": self.current_run.to_row(),
+        }
+
+    def to_config(self):
+        """The workflow's config with its WORKFLOW columns filled in, so saving it keeps them all."""
+        config = dict(self.config)
+        config.update(
+            {
+                "id": self.id,
+                "uuid": self.uuid,
+                "name": self.name,
+                "description": self.description,
+                "project": self.project.to_config(),
+                "is_active": self.is_active,
+                "created": self.created.isoformat(),
+                "modified": self.modified.isoformat(),
+            }
+        )
+        if self.previous_id:
+            config["previous_id"] = self.previous_id
+        return {key: value for key, value in config.items() if value is not None}
 
     def get_component_by_id(self, cid):
         """Return the registered component with id *cid*, or ``None`` if unknown."""
@@ -151,18 +230,25 @@ class Workflow(Component):
         """Execute the workflow, wrapping ``_run`` in workflow-level lifecycle events.
 
         The usage ledger is reset first, so ``usage.summary()`` (and the ``usage`` carried by the
-        final ``component_end`` event) describes this run alone.
+        final ``component_end`` event) describes this run alone. A new ``WorkflowRun`` is started,
+        and finished -- with its duration, success and usage -- before the final event, so a storage
+        closing up on that event sees the finished run.
         """
         self.usage.reset()
+        self.current_run = WorkflowRun(workflow_id=self.uuid)
+        self.current_run.start()
         self.emit("component_start", self)
         try:
             res = self._run(input)
         except Exception as e:
+            self.current_run.finish(False, {"usage": self.usage.summary()}, error=e)
             self.emit("component_error", self, error=str(e))
             raise
         from .core import result_preview
 
-        self.emit("component_end", self, preview=result_preview(res), result=res, usage=self.usage.summary())
+        usage = self.usage.summary()
+        self.current_run.finish(True, {"usage": usage})
+        self.emit("component_end", self, preview=result_preview(res), result=res, usage=usage)
         return res
 
     def _run(self, input=None) -> Result:

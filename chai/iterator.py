@@ -33,6 +33,12 @@ class Iterator(Component):
 
     Either way, the output records how many entries were processed in its ``processed`` metadata, and
     how many of those produced an ERROR result in its ``errors`` metadata.
+
+    Each entry is stamped with its zero-based position in the input (``Result.sequence``) before its
+    steps run -- the position in the whole input, whatever ``workers`` or a ``SliceIterator`` slice
+    does to the order things are processed in. A stored row records the nearest such position up its
+    chain as ``input_sequence``: a page's transcription and translation get the page's position, a
+    line handed out by an inner iterator gets its position within the image.
     """
 
     def _run_entry(self, x, input):
@@ -54,16 +60,27 @@ class Iterator(Component):
             processor=self,
         )
 
+    def select_entries(self, input: Result) -> list:
+        """``(position, entry)`` for each entry of *input* to run the child steps over.
+
+        The position is the entry's place in the whole of *input*; subclasses may narrow the entries
+        but keep their positions.
+        """
+        return list(enumerate(input))
+
     def select_items(self, input: Result) -> list:
-        """The entries of *input* to run the child steps over; subclasses may narrow this."""
-        return list(input)
+        """The entries of *input* to run the child steps over (``select_entries`` without positions)."""
+        return [x for _, x in self.select_entries(input)]
 
     def _process(self, input: Result) -> Result:
         workers = int(self.settings.get("workers", 1) or 1)
         continue_on_error = bool(self.settings.get("continue_on_error", False))
         retain_results = bool(self.settings.get("retain_results", True))
 
-        def run_one(x):
+        def run_one(entry):
+            position, x = entry
+            if isinstance(x, Result):
+                x.sequence = position
             try:
                 return self._run_entry(x, input)
             except Exception as e:
@@ -71,7 +88,7 @@ class Iterator(Component):
                     raise
                 return self._entry_error(x, e)
 
-        items = self.select_items(input)
+        items = self.select_entries(input)
         merged = self.outputResultClass([], input=input, processor=self)
         counts = {"processed": 0, "errors": 0}
 
@@ -88,8 +105,8 @@ class Iterator(Component):
                 for step_value in pool.map(run_one, items):  # map preserves input order
                     collect(step_value)
         else:
-            for x in items:
-                collect(run_one(x))
+            for entry in items:
+                collect(run_one(entry))
         merged.metadata.update(counts)
         return merged
 
@@ -104,8 +121,8 @@ class SliceIterator(Iterator):
     in separate processes or on separate machines -- to divide the work.
 
     The output holds one entry per *selected* input entry, not per input entry, so positions in the
-    result are the slice's own. Where the original position matters, take it from the entry (a
-    ``CsvFileProvider`` row, for instance, records its own ``row`` in its metadata).
+    result are the slice's own. Each entry's ``sequence`` is still its position in the whole input,
+    so the rows the slices store sort together into the original order.
 
     Settings:
         - max_slices: how many slices to divide the input into (default 1: every entry, i.e. the
@@ -115,11 +132,11 @@ class SliceIterator(Iterator):
         - workers, continue_on_error, retain_results: as Iterator
     """
 
-    def select_items(self, input: Result) -> list:
+    def select_entries(self, input: Result) -> list:
         max_slices = int(self.settings.get("max_slices", 1) or 1)
         offset = int(self.settings.get("slice", 0) or 0)
         if max_slices < 1:
             raise ValueError(f"max_slices must be 1 or more in {self}, got {max_slices}")
         if not 0 <= offset < max_slices:
             raise ValueError(f"slice must be between 0 and {max_slices - 1} in {self}, got {offset}")
-        return [x for i, x in enumerate(input) if i % max_slices == offset]
+        return [(i, x) for i, x in enumerate(input) if i % max_slices == offset]

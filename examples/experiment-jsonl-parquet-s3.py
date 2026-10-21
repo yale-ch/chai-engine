@@ -1,13 +1,12 @@
 """Pack a run's JSON-Lines output into Parquet and upload it to S3 for ingestion into the central db.
 
 A long run streams its results into a ``.jsonl`` file with ``JsonLinesStorage`` as it goes (see
-``experiment-ppl-jsonl.py``). This workflow is the hand-off afterwards:
+``experiment-ppl-jsonl.py``). This is the hand-off afterwards:
 
-* ``FileListProvider`` + ``Iterator`` take one or more ``.jsonl`` files (e.g. one per slice of a
-  ``SliceIterator`` run);
-* ``JsonLinesToParquet`` converts each into a ``.parquet`` file next to it (or into ``--out-dir``);
-* ``S3Uploader`` puts each Parquet file in the bucket under ``--prefix``, tagged with its md5 and the
-  workflow it came from.
+* ``jsonl_to_parquet`` packs each ``.jsonl`` file (e.g. one per slice of a ``SliceIterator`` run) into
+  a ``.parquet`` file next to it (or into ``--out-dir``);
+* a workflow of ``FileListProvider`` + ``Iterator`` + ``S3Uploader`` puts each Parquet file in the
+  bucket under ``--prefix``, tagged with its md5 and the workflow it came from.
 
 The system that maintains the central database picks the Parquet files up from the bucket and
 ingests them; nothing here talks to that database. Credentials come from boto3's usual chain
@@ -31,36 +30,36 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # examples/ sits outside the package, so put the repository root on the path to import chai
 sys.path.insert(0, ROOT)
 
+from chai.storage import jsonl_to_parquet  # noqa: E402
 from chai.workflow import Workflow  # noqa: E402
 
 
-def build_workflow(jsonl_files, uploader, out_dir=None):
-    """The workflow config: for each .jsonl file, convert it to Parquet, then upload the Parquet file."""
-    converter_settings = {"compression": "zstd"}
-    if out_dir:
-        converter_settings["directory"] = out_dir
+def to_parquet(jsonl_files, out_dir=None):
+    """Pack each .jsonl file into a .parquet file; returns the paths of the files written."""
+    paths = []
+    for jsonl in jsonl_files:
+        stem = os.path.splitext(os.path.basename(jsonl))[0]
+        target = os.path.join(out_dir or os.path.dirname(os.path.abspath(jsonl)), f"{stem}.parquet")
+        # snappy, not zstd: the central loader's pyarrow is built without zstd
+        info = jsonl_to_parquet(jsonl, target, compression="snappy")
+        if info["rows"]:
+            paths.append(info["path"])
+        else:
+            print(f"{jsonl} is empty; nothing to upload")
+    return paths
+
+
+def build_workflow(parquet_files, uploader):
+    """The workflow config: upload each Parquet file with the given uploader step."""
     return {
-        "id": "jsonl_parquet_upload_wf",
+        "id": "parquet_upload_wf",
         "type": "workflow.Workflow",
         "steps": [
             {
-                "id": "jsonl_files",
+                "id": "parquet_files",
                 "type": "provider.FileListProvider",
-                "input": list(jsonl_files),
-                "steps": [
-                    {
-                        "id": "each_jsonl",
-                        "type": "iterator.Iterator",
-                        "steps": [
-                            {
-                                "id": "to_parquet",
-                                "type": "converter.JsonLinesToParquet",
-                                "settings": converter_settings,
-                                "next_steps": [uploader],
-                            }
-                        ],
-                    }
-                ],
+                "input": list(parquet_files),
+                "steps": [{"id": "each_parquet", "type": "iterator.Iterator", "steps": [uploader]}],
             }
         ],
     }
@@ -112,7 +111,10 @@ def main():
         uploader = s3_uploader(args.bucket, args.prefix, args.region, args.endpoint_url, args.profile)
     else:
         uploader = directory_uploader(args.directory, args.prefix)
-    result = Workflow(build_workflow(args.jsonl, uploader, args.out_dir)).run()
+    parquet_files = to_parquet(args.jsonl, args.out_dir)
+    if not parquet_files:
+        return
+    result = Workflow(build_workflow(parquet_files, uploader)).run()
     for record in uploaded(result):
         print(f"{record['source']} -> {record['uri']} ({record['size']} bytes, md5 {record['md5']})")
 
