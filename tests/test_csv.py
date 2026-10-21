@@ -203,7 +203,7 @@ class TestCsvXpathChain(unittest.TestCase):
 
     def test_workflow_ppl_json_is_valid(self):
         """workflow-ppl.json must be loadable and wired the way the chain above expects."""
-        wf_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "workflow-ppl.json")
+        wf_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "workflow-ppl.json")
         with open(wf_path) as fh:
             tree = json.load(fh)
 
