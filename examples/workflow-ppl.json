@@ -2,6 +2,8 @@
   "id": "wf-ppl-csv",
   "type": "workflow.Workflow",
   "name": "Parse the names in a CSV of people",
+  "description": "Parse each person's name in a CSV of people into its parts",
+  "project": "People",
   "steps": [
     {
       "id": "ppl_csv",
@@ -37,10 +39,6 @@
                   "name": "Failed Column JSON-Lines Writer",
                   "settings": {
                     "file": "results/people-parsed.jsonl",
-                    "fields": {
-                      "value": "error",
-                      "metadata": "metadata"
-                    },
                     "sources": {
                       "input": "ppl_rows"
                     }
@@ -65,10 +63,6 @@
                       "name": "Failed Parse JSON-Lines Writer",
                       "settings": {
                         "file": "results/people-parsed.jsonl",
-                        "fields": {
-                          "value": "error",
-                          "metadata": "metadata"
-                        },
                         "sources": {
                           "input": "ppl_rows"
                         }
@@ -82,10 +76,6 @@
                       "name": "Parsed Name JSON-Lines Writer",
                       "settings": {
                         "file": "results/people-parsed.jsonl",
-                        "fields": {
-                          "value": "parsed",
-                          "metadata": "metadata"
-                        },
                         "sources": {
                           "input": "ppl_rows"
                         }

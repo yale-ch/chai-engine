@@ -3,16 +3,22 @@ import json
 import os
 import shutil
 import sqlite3
+import sys
 import tempfile
 import unittest
 import uuid
 from datetime import datetime, timezone
+
+# the CHAI-TEA schema modules sit at the repository root, outside the package
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from chai.result import FileItemResult, ItemResult, ListResult
 import pyarrow.parquet as pq
 
 from chai.storage import (
     COMPUTED_FIELDS,
+    RESULT_COLUMNS,
+    result_row,
     build_record,
     content_md5,
     correction_target,
@@ -33,10 +39,174 @@ from chai.storage import (
     postgres_params,
     save_correction,
     save_postgres_correction,
+    store_postgres_rows,
+    store_rows,
     source_value,
     token_usage_summary,
 )
 from chai.workflow import Workflow
+import chai.schema as chai_schema
+
+
+class TestResultRows(unittest.TestCase):
+    """What the record-writing storages produce by default: rows of the CHAI-TEA RESULT table."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.out = os.path.join(self.dir, "run.jsonl")
+        self.wf = Workflow({"id": "rows_wf", "type": "workflow.Workflow"})
+        self.comp_a = self.wf._make_step({"type": "describer.FileInfoDescriber", "id": "src_a"}, self.wf)
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def lines(self):
+        with open(self.out) as fh:
+            return [json.loads(line) for line in fh if line.strip()]
+
+    def storage(self, **settings):
+        settings.setdefault("file", self.out)
+        return self.wf._make_step({"type": "storage.JsonLinesStorage", "settings": settings}, self.wf)
+
+    def test_the_columns_are_the_chai_tea_result_table(self):
+        import chai_tea_parquet  # top level, outside the package -- the schema's own definition
+
+        self.assertEqual(RESULT_COLUMNS, chai_tea_parquet.column_kinds("RESULT"))
+
+    def test_a_line_is_exactly_a_result_row(self):
+        res = ItemResult(
+            "hello",
+            processor=self.comp_a,
+            metadata={"type": "TEXT", "duration": 1.5, "cost": 0.002, "timestamp": 1789336426.0},
+        )
+        self.storage().process(res)
+        [row] = self.lines()
+        self.assertEqual(list(row), list(RESULT_COLUMNS))
+        self.assertEqual(row["id"], res.id)
+        self.assertEqual(row["workflow_run_id"], self.wf.run_id)
+        self.assertEqual(row["process_id"], "src_a")
+        self.assertEqual(row["value"], "hello")
+        self.assertTrue(row["was_successful"])
+        self.assertEqual((row["md_cost"], row["md_duration"]), (0.002, 1.5))
+        self.assertEqual(datetime.fromisoformat(row["md_timestamp"]).timestamp(), 1789336426.0)
+        self.assertIsNone(row["editor_user_id"])
+        self.assertIsNone(row["extra_data"])
+
+    def test_input_is_the_file_the_result_came_from_and_where_in_it(self):
+        page = make_file_result("/pages/f0001r.jpg")
+        # the page provider is the run's recorded source, so the locator runs from the page down
+        page.processor = self.wf._make_step(
+            {"type": "describer.FileInfoDescriber", "id": "pages", "source": True}, self.wf
+        )
+        region = ItemResult("text", input=page, extra={"locator": {"bbox": [1, 2, 3, 4]}})
+        line = ItemResult("a line", input=region, extra={"locator": {"index": 7}})
+        row = result_row(line, self.wf.run_id)
+        self.assertEqual(row["input"], "/pages/f0001r.jpg")
+        self.assertEqual(json.loads(row["input_segment"]), [{"bbox": [1, 2, 3, 4]}, {"index": 7}])
+        self.assertEqual(row["input_sequence"], 7)
+        # with no file up the chain, the input is the result it was made from
+        made_from = ItemResult("y")
+        self.assertEqual(result_row(ItemResult("x", input=made_from))["input"], made_from.id)
+
+    def test_errors_and_corrections(self):
+        original = ItemResult("teh")
+        self.assertFalse(result_row(ItemResult(None, metadata={"type": "ERROR", "error": "boom"}))["was_successful"])
+        fixed = result_row(ItemResult("the", extra={"corrects": original, "note": "typo"}))
+        self.assertEqual(fixed["previous_id"], original.id)
+        self.assertEqual(fixed["extra_data"], {"note": "typo"})  # 'corrects' became previous_id
+
+    def test_sources_and_constants_are_kept_in_extra_data(self):
+        row = ItemResult({"name": "Ada"}, processor=self.comp_a)
+        self.storage(sources={"row": "src_a"}).process(ItemResult("Ada", input=row))
+        [line] = self.lines()
+        self.assertEqual(list(line), list(RESULT_COLUMNS))
+        self.assertEqual(line["extra_data"], {"row": {"name": "Ada"}})
+
+    def test_every_storage_in_a_run_records_the_same_run(self):
+        tree = {
+            "id": "two_files_wf",
+            "type": "workflow.Workflow",
+            "steps": [
+                {
+                    "type": "provider.StaticProvider",
+                    "settings": {"values": ["a", "b"]},
+                    "input": "x",
+                    "steps": [
+                        {
+                            "type": "iterator.Iterator",
+                            "steps": [
+                                {
+                                    "type": "extractor.DoubleExtractor",
+                                    "next_steps": [
+                                        {"type": "storage.JsonLinesStorage", "settings": {"file": self.out}},
+                                        {
+                                            "type": "storage.ParquetStorage",
+                                            "settings": {"file": os.path.join(self.dir, "run.parquet"), "flush_on_exit": False},
+                                        },
+                                    ],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+        wf = Workflow(tree)
+        wf.run()
+        first = wf.run_id
+        parquet = pq.read_table(os.path.join(self.dir, "run.parquet")).to_pydict()
+        self.assertEqual({r["workflow_run_id"] for r in self.lines()}, {first})
+        self.assertEqual(set(parquet["workflow_run_id"]), {first})
+        self.assertEqual(list(parquet), list(RESULT_COLUMNS))
+        wf.run()
+        self.assertNotEqual(wf.run_id, first)
+        self.assertEqual({r["workflow_run_id"] for r in self.lines()[2:]}, {wf.run_id})
+
+    def test_a_configured_run_id_that_is_not_a_uuid_is_hashed_into_one(self):
+        self.storage(run_id="slice-3").process(ItemResult("x"))
+        run = self.lines()[0]["workflow_run_id"]
+        self.assertEqual(str(uuid.UUID(run)), run)
+        self.storage(run_id="slice-3").process(ItemResult("y"))
+        self.assertEqual(self.lines()[1]["workflow_run_id"], run)
+
+    def test_jsonl_to_parquet_types_result_rows_by_the_schema(self):
+        storage = self.storage()
+        storage.process(ItemResult("plain text"))
+        storage.process(ItemResult({"a": 1}))
+        out = os.path.join(self.dir, "run.parquet")
+        info = jsonl_to_parquet(self.out, out)
+        self.assertEqual(info["columns"], RESULT_COLUMNS)
+        values = [json.loads(v) for v in pq.read_table(out).column("value").to_pylist()]
+        self.assertEqual(values, ["plain text", {"a": 1}])
+
+    def test_an_empty_parquet_run_still_has_the_columns(self):
+        out = os.path.join(self.dir, "empty.parquet")
+        tree = {
+            "id": "empty_wf",
+            "type": "workflow.Workflow",
+            "steps": [
+                {
+                    "type": "provider.StaticProvider",
+                    "settings": {"values": []},
+                    "input": "x",
+                    "steps": [
+                        {
+                            "type": "iterator.Iterator",
+                            "steps": [{"type": "storage.ParquetStorage", "settings": {"file": out, "flush_on_exit": False}}],
+                        }
+                    ],
+                }
+            ],
+        }
+        Workflow(tree).run()
+        self.assertEqual(pq.read_schema(out).names, list(RESULT_COLUMNS))
+
+    def test_token_usage_is_totalled_per_process(self):
+        usage = {"total": 30, "prompt": 10, "images": 0, "thinking": 5, "result": 15}
+        self.storage().process(ItemResult("x", processor=self.comp_a, metadata={"token_usage": usage, "duration": 2}))
+        summary = token_usage_summary(self.out)
+        self.assertEqual(summary["components"]["src_a"]["calls"], 1)
+        self.assertEqual(summary["total"]["output"], 15)
 
 
 def make_file_result(path="/nonexistent/crop.png", content=b"\x89PNG\r\n\x1a\nfakebytes"):
@@ -128,12 +298,57 @@ class TestJsonLinesStorage(unittest.TestCase):
         self.make_storage().process(ItemResult("second run"))
         self.assertEqual([js["value"] for js in self.lines()], ["first run", "second run"])
 
-    def test_truncate_mode_empties_the_file_when_built(self):
+    def test_truncate_mode_leaves_the_file_alone_when_built(self):
+        # building a workflow -- to inspect it, say -- must never cost the last run's output
         self.make_storage().process(ItemResult("stale"))
         fresh = self.make_storage(mode="truncate")
-        self.assertEqual(self.lines(), [])
+        self.assertEqual([js["value"] for js in self.lines()], ["stale"])
+        # outside a run, the file is emptied before the first write, and only then
         fresh.process(ItemResult("current"))
-        self.assertEqual([js["value"] for js in self.lines()], ["current"])
+        fresh.process(ItemResult("next"))
+        self.assertEqual([js["value"] for js in self.lines()], ["current", "next"])
+
+    def truncating_workflow(self, values, steps=1):
+        store = {"type": "storage.JsonLinesStorage", "settings": {"file": self.out, "mode": "truncate"}}
+        return {
+            "id": "truncate_wf",
+            "type": "workflow.Workflow",
+            "steps": [
+                {
+                    "type": "provider.StaticProvider",
+                    "settings": {"values": values},
+                    "input": "x",
+                    "steps": [
+                        {
+                            "type": "iterator.Iterator",
+                            "steps": [{"type": "extractor.DoubleExtractor", "next_steps": [dict(store) for _ in range(steps)]}],
+                        }
+                    ],
+                }
+            ],
+        }
+
+    def test_truncate_mode_empties_the_file_when_a_run_starts(self):
+        self.make_storage().process(ItemResult("stale"))
+        wf = Workflow(self.truncating_workflow(["a", "b"]))
+        self.assertEqual([js["value"] for js in self.lines()], ["stale"])  # built: nothing lost yet
+        wf.run()
+        self.assertEqual([js["value"] for js in self.lines()], ["aa", "bb"])
+        wf.run()  # each run replaces the last run's lines
+        self.assertEqual([js["value"] for js in self.lines()], ["aa", "bb"])
+
+    def test_a_run_that_writes_nothing_still_empties_the_file(self):
+        self.make_storage().process(ItemResult("stale"))
+        Workflow(self.truncating_workflow([])).run()
+        self.assertEqual(self.lines(), [])
+
+    def test_steps_sharing_a_file_empty_it_once_per_run(self):
+        # two truncating steps writing one file (as workflow-m804.json has) keep each other's lines
+        wf = Workflow(self.truncating_workflow(["a", "b"], steps=2))
+        wf.run()
+        self.assertEqual([js["value"] for js in self.lines()], ["aa", "aa", "bb", "bb"])
+        wf.run()
+        self.assertEqual(len(self.lines()), 4)
 
     def test_fields_list_selects_keys(self):
         self.make_storage(fields=["value", "processorId"]).process(
@@ -526,7 +741,9 @@ class TestParquetStorage(unittest.TestCase):
         self.assertEqual(info["path"], self.out)
         self.assertEqual(info["rows"], 2)
         cols = self.columns()
-        self.assertEqual(cols["value"], ["one", "two"])
+        # the default row is a CHAI-TEA RESULT row: value is a jsonb column, so it holds JSON text
+        self.assertEqual(list(cols), list(RESULT_COLUMNS))
+        self.assertEqual([json.loads(v) for v in cols["value"]], ["one", "two"])
         self.assertEqual(cols["id"][0], first.id)
         self.assertEqual(json.loads(cols["metadata"][0])["type"], "TEXT")
 
@@ -725,10 +942,20 @@ class TestParquetStorage(unittest.TestCase):
 
 
 class TestSqliteStorage(unittest.TestCase):
+    """A run stored in SQLite, in the CHAI-TEA tables: RESULT rows under their run, workflow and project."""
+
     def setUp(self):
         self.dir = tempfile.mkdtemp()
         self.db = os.path.join(self.dir, "results.db")
-        self.wf = Workflow({"id": "sqlite_storage_wf", "type": "workflow.Workflow"})
+        self.wf = Workflow(
+            {
+                "id": "sqlite_storage_wf",
+                "type": "workflow.Workflow",
+                "name": "SQLite storage",
+                "description": "results stored by the tests",
+                "project": {"name": "Tests", "description": "the test suite's project"},
+            }
+        )
         self.storage = self.wf._make_step(
             {"type": "storage.SqliteStorage", "settings": {"database": self.db}}, self.wf
         )
@@ -751,34 +978,53 @@ class TestSqliteStorage(unittest.TestCase):
         r3 = self.store(make_file_result(), self.comp_b)
         return r1, r2, r3
 
-    def test_rows_exist_for_each_stored_result(self):
-        r1, r2, r3 = self.store_samples()
+    def query(self, sql, params=()):
         conn = sqlite3.connect(self.db)
         try:
-            ids = {row[0] for row in conn.execute("SELECT id FROM results")}
-            self.assertEqual(ids, {r1.id, r2.id, r3.id})
-            value_json = conn.execute(
-                "SELECT value_json FROM results WHERE id = ?", (r3.id,)
-            ).fetchone()[0]
+            return conn.execute(sql, params).fetchall()
         finally:
             conn.close()
-        js = json.loads(value_json)  # FileItemResult row holds valid JSON with the path, not bytes
-        self.assertEqual(js["value"], "/nonexistent/crop.png")
-        self.assertEqual(js["processorId"], "comp_b")
 
-    def test_value_json_is_full_result_json(self):
-        r2 = self.store(ItemResult({"name": "Ada", "year": 1815}), self.comp_a)
+    def test_the_database_has_the_chai_tea_tables(self):
+        self.store_samples()
+        tables = {row[0] for row in self.query("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        self.assertEqual(tables, set(chai_schema.TABLES.values()))
+        for entity, table in chai_schema.TABLES.items():
+            columns = [row[1] for row in self.query(f"PRAGMA table_info({table})")]
+            self.assertEqual(columns, list(chai_schema.column_types(entity)), entity)
+
+    def test_rows_exist_for_each_stored_result_under_its_run(self):
+        r1, r2, r3 = self.store_samples()
+        rows = {r["id"]: r for r in list_results(self.db)}
+        self.assertEqual(set(rows), {r1.id, r2.id, r3.id})
+        self.assertEqual(rows[r3.id]["value"], "/nonexistent/crop.png")  # a file's path, never its bytes
+        self.assertEqual(rows[r3.id]["process_id"], "comp_b")
+        self.assertEqual({r["workflow_run_id"] for r in rows.values()}, {self.wf.run_id})
+        # the rows they hang under come from the objects: the run, the workflow, its project
+        self.assertEqual(self.query("SELECT id, workflow_id FROM workflow_runs"), [(self.wf.run_id, self.wf.uuid)])
+        self.assertEqual(
+            self.query("SELECT id, project_id, name, description, is_active FROM workflows"),
+            [(self.wf.uuid, self.wf.project.id, "SQLite storage", "results stored by the tests", 1)],
+        )
+        self.assertEqual(self.query("SELECT name, description FROM projects"), [("Tests", "the test suite's project")])
+
+    def test_a_row_carries_the_result_and_its_own_timestamps(self):
+        r2 = self.store(ItemResult({"name": "Ada", "year": 1815}, metadata={"duration": 1.25}), self.comp_a)
         row = get_result(self.db, r2.id)
-        self.assertEqual(row["value"]["id"], r2.id)
-        self.assertEqual(row["value"]["type"], "ItemResult")
-        self.assertEqual(row["value"]["value"], {"name": "Ada", "year": 1815})
-        self.assertEqual(row["value"]["workflowId"], "sqlite_storage_wf")
+        self.assertEqual(row["value"], {"name": "Ada", "year": 1815})
+        self.assertEqual(row["md_duration"], 1.25)
         self.assertIn("timestamp", row["metadata"])
+        self.assertTrue(row["was_successful"])
+        self.assertEqual(datetime.fromisoformat(row["created"]), r2.created)
+        self.assertEqual(datetime.fromisoformat(row["modified"]), r2.modified)
 
     def test_bytes_value_gets_placeholder(self):
         res = self.store(ItemResult(b"binary blob"), self.comp_a)
-        row = get_result(self.db, res.id)
-        self.assertEqual(row["value"]["value"], {"__bytes__": len(b"binary blob")})
+        self.assertEqual(get_result(self.db, res.id)["value"], {"__bytes__": len(b"binary blob")})
+
+    def test_an_error_result_is_not_successful(self):
+        res = self.store(ItemResult(None, metadata={"type": "ERROR", "error": "boom"}), self.comp_a)
+        self.assertFalse(get_result(self.db, res.id)["was_successful"])
 
     def test_list_results_and_filters(self):
         r1, r2, r3 = self.store_samples()
@@ -786,21 +1032,19 @@ class TestSqliteStorage(unittest.TestCase):
         self.assertEqual({r["id"] for r in rows}, {r1.id, r2.id, r3.id})
         for row in rows:
             self.assertEqual(row["correction_count"], 0)
-            self.assertIsNotNone(row["created_at"])
-        by_proc = list_results(self.db, processor_id="comp_a")
-        self.assertEqual({r["id"] for r in by_proc}, {r1.id, r2.id})
-        by_wf = list_results(self.db, workflow_id="sqlite_storage_wf")
-        self.assertEqual(len(by_wf), 3)
-        self.assertEqual(list_results(self.db, workflow_id="no_such_wf"), [])
+            self.assertIsNotNone(row["created"])
+        self.assertEqual({r["id"] for r in list_results(self.db, process_id="comp_a")}, {r1.id, r2.id})
+        self.assertEqual(len(list_results(self.db, workflow_run_id=self.wf.run_id)), 3)
+        self.assertEqual(list_results(self.db, workflow_run_id=str(uuid.uuid4())), [])
         self.assertEqual(len(list_results(self.db, limit=2)), 2)
         self.assertEqual(len(list_results(self.db, limit=2, offset=2)), 1)
 
     def test_get_result_round_trip(self):
         r1, _, _ = self.store_samples()
         row = get_result(self.db, r1.id)
-        self.assertEqual(row["processor_id"], "comp_a")
-        self.assertEqual(row["workflow_id"], "sqlite_storage_wf")
-        self.assertEqual(row["value"]["value"], "hello world")
+        self.assertEqual(list(row)[: len(RESULT_COLUMNS)], list(RESULT_COLUMNS))
+        self.assertEqual(row["process_id"], "comp_a")
+        self.assertEqual(row["value"], "hello world")
         self.assertIsNone(get_result(self.db, "no-such-id"))
 
     def test_a_correction_is_an_entry_pointing_at_what_it_corrects(self):
@@ -811,24 +1055,34 @@ class TestSqliteStorage(unittest.TestCase):
         )
         self.assertIsNotNone(correction_id)
         row = get_result(self.db, r1.id)
-        self.assertEqual(row["value"]["value"], "hello world")  # the original is untouched
+        self.assertEqual(row["value"], "hello world")  # the original is untouched
         self.assertEqual(row["correction_count"], 1)
         self.assertTrue(row["corrected"])
 
-        # the correction is a row of its own, with its own metadata about who made it
+        # the correction is a row of its own, in the same run, made from the same input
         correction = row["corrections"][0]
         self.assertEqual(correction["id"], correction_id)
-        self.assertEqual(correction["corrects_id"], r1.id)
-        self.assertEqual(correction["value"]["value"], {"text": "hello world, corrected"})
-        self.assertEqual(correction["value"]["type"], "Correction")
-        self.assertEqual(correction["value"]["input"], r1.id)  # its provenance is what it corrects
+        self.assertEqual(correction["previous_id"], r1.id)
+        self.assertEqual(correction["workflow_run_id"], self.wf.run_id)
+        self.assertEqual(correction["value"], {"text": "hello world, corrected"})
         self.assertEqual(correction["metadata"]["agent"], "a.reviewer@example.org")
         self.assertEqual(correction["metadata"]["reason"], "typo")
         self.assertEqual(correction["correction_count"], 0)
         # and it is reachable as a row in its own right, and by what it corrects
-        self.assertEqual(get_result(self.db, correction_id)["corrects_id"], r1.id)
-        self.assertEqual([c["id"] for c in list_results(self.db, corrects_id=r1.id)], [correction_id])
+        self.assertEqual(get_result(self.db, correction_id)["previous_id"], r1.id)
+        self.assertEqual([c["id"] for c in list_results(self.db, previous_id=r1.id)], [correction_id])
         self.assertIsNone(save_correction(self.db, "no-such-id", "x"))
+
+    def test_a_correction_names_its_editor_when_that_user_exists(self):
+        r1, _, _ = self.store_samples()
+        now = datetime.now(timezone.utc)
+        user = {"id": str(uuid.uuid4()), "name": "A. Reviewer", "netid": "ar123", "email_address": None,
+                "is_active": True, "auth_key": None, "created": now, "modified": now}
+        store_rows(self.db, {"USER": user})
+        known = save_correction(self.db, r1.id, "fixed", editor_user_id=user["id"])
+        unknown = save_correction(self.db, r1.id, "fixed", editor_user_id=str(uuid.uuid4()))
+        self.assertEqual(get_result(self.db, known)["editor_user_id"], user["id"])
+        self.assertIsNone(get_result(self.db, unknown)["editor_user_id"])  # no USER row to point at
 
     def test_a_result_can_be_corrected_more_than_once(self):
         r1, _, _ = self.store_samples()
@@ -840,15 +1094,19 @@ class TestSqliteStorage(unittest.TestCase):
         self.assertEqual(set(corrections), {first, second})
         self.assertEqual(corrections[first]["metadata"]["agent"], "reviewer")
         self.assertEqual(corrections[second]["metadata"], {"agent": "gpt-brand-x", "agent_type": "model"})
-        self.assertEqual(corrections[second]["value"]["value"], "fixed again")
+        self.assertEqual(corrections[second]["value"], "fixed again")
 
-    def test_restoring_a_result_keeps_the_corrections_pointing_at_it(self):
+    def test_restoring_a_result_keeps_its_created_and_the_corrections_pointing_at_it(self):
         r1 = self.store(ItemResult("hello world"), self.comp_a)
+        created = get_result(self.db, r1.id)["created"]
         correction_id = save_correction(self.db, r1.id, "fixed")
-        self.store(r1)  # same result stored again (e.g. a re-run)
+        r1.value = "hello again"  # changing the value marks the result modified
+        self.store(r1)
         row = get_result(self.db, r1.id)
         self.assertEqual([c["id"] for c in row["corrections"]], [correction_id])
-        self.assertEqual(row["value"]["value"], "hello world")
+        self.assertEqual(row["value"], "hello again")
+        self.assertEqual(row["created"], created)
+        self.assertGreaterEqual(row["modified"], created)
 
     def test_a_correction_made_by_a_component_records_what_it_corrects(self):
         r1, _, _ = self.store_samples()
@@ -857,28 +1115,22 @@ class TestSqliteStorage(unittest.TestCase):
         self.store(corrected, self.comp_a)
         row = get_result(self.db, r1.id)
         self.assertEqual([c["id"] for c in row["corrections"]], [corrected.id])
-        self.assertEqual(get_result(self.db, corrected.id)["corrects_id"], r1.id)
+        self.assertEqual(get_result(self.db, corrected.id)["previous_id"], r1.id)
 
     def test_list_processors(self):
         self.store_samples()
-        procs = {p["processor_id"]: p["count"] for p in list_processors(self.db)}
+        procs = {p["process_id"]: p["count"] for p in list_processors(self.db)}
         self.assertEqual(procs, {"comp_a": 2, "comp_b": 1})
 
-    def test_derivative_storage(self):
+    def test_a_derivative_is_a_result_row_of_its_own(self):
         src = ItemResult("source text")
         deriv = ItemResult(["label"], processor=self.comp_a, register_on=src)
         self.store(src, self.comp_b)
-        conn = sqlite3.connect(self.db)
-        try:
-            row = conn.execute(
-                "SELECT source_id, component_id, result_json FROM derivatives WHERE id = ?", (deriv.id,)
-            ).fetchone()
-        finally:
-            conn.close()
-        self.assertIsNotNone(row)
-        self.assertEqual(row[0], src.id)
-        self.assertEqual(row[1], "comp_a")
-        self.assertEqual(json.loads(row[2])["value"], ["label"])
+        row = get_result(self.db, deriv.id)
+        self.assertEqual(row["value"], ["label"])
+        self.assertEqual(row["process_id"], "comp_a")
+        self.assertEqual(row["input"], src.id)  # made from the result it is a derivative of
+        self.assertEqual(row["workflow_run_id"], self.wf.run_id)
 
     def test_rows_record_the_input_they_were_generated_from(self):
         path = os.path.join(self.dir, "page.txt")
@@ -888,7 +1140,7 @@ class TestSqliteStorage(unittest.TestCase):
         transcript = ItemResult("some page text", input=source)
         self.store(transcript, self.comp_a)
         row = get_result(self.db, transcript.id)
-        self.assertEqual(row["input_uri"], path)
+        self.assertEqual(row["input"], path)
         self.assertEqual(row["input_hash"], hashlib.md5(b"some page text").hexdigest())
         # every entry made from the same input can be found by its hash
         self.assertEqual([r["id"] for r in list_results(self.db, input_hash=row["input_hash"])], [transcript.id])
@@ -949,23 +1201,63 @@ class TestSqliteStorage(unittest.TestCase):
                 }
             ],
         }
-        Workflow(tree).run()
-        rows = [r for r in list_results(self.db, processor_id="words") if r["input_locator"]]
+        wf = Workflow(tree)
+        wf.run()
+        rows = [r for r in list_results(self.db, process_id="words") if r["input_segment"]]
         self.assertEqual(len(rows), 2)  # one per sentence, and no sentence was written anywhere
         located = {}
         for row in rows:
             # every row names the document, not the sentence or the transcript it sat behind
-            self.assertEqual(row["input_uri"], os.path.join(docs, "note.txt"))
+            self.assertEqual(row["input"], os.path.join(docs, "note.txt"))
             self.assertEqual(row["input_hash"], hashlib.md5(text.encode()).hexdigest())
-            frame = row["input_locator"][0]
-            located[text[frame["start"] : frame["end"]]] = row["value"]["value"]
+            frame = json.loads(row["input_segment"])[0]
+            located[text[frame["start"] : frame["end"]]] = row["value"]
         # the offsets read back out of the document as the sentences the labels were assigned to
         self.assertEqual(located, {"Ada wrote it.": ["who"], "Babbage built it.": ["who"]})
+        # the finished run was written back: it succeeded, and says how long it took
+        [(successful, duration, metadata)] = self.query(
+            "SELECT was_successful, duration, metadata FROM workflow_runs WHERE id = ?", (wf.run_id,)
+        )
+        self.assertEqual(successful, 1)
+        self.assertGreater(duration, 0)
+        self.assertIn("usage", json.loads(metadata))
+
+    def test_each_run_is_a_workflow_run_row(self):
+        tree = {
+            "id": "two_runs_wf",
+            "type": "workflow.Workflow",
+            "steps": [
+                {
+                    "type": "provider.StaticProvider",
+                    "settings": {"values": ["a"]},
+                    "input": "x",
+                    "steps": [
+                        {
+                            "type": "iterator.Iterator",
+                            "steps": [
+                                {
+                                    "type": "extractor.DoubleExtractor",
+                                    "next_steps": [{"type": "storage.SqliteStorage", "settings": {"database": self.db}}],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+        wf = Workflow(tree)
+        wf.run()
+        first = wf.run_id
+        wf.run()
+        runs = dict(self.query("SELECT id, workflow_id FROM workflow_runs"))
+        self.assertEqual(set(runs), {first, wf.run_id})
+        self.assertEqual(set(runs.values()), {wf.uuid})
+        self.assertEqual(len(self.query("SELECT id FROM workflows")), 1)  # the same workflow, run twice
 
     def test_a_result_with_no_input_has_nothing_to_record(self):
         res = self.store(ItemResult("standalone"), self.comp_a)
         row = get_result(self.db, res.id)
-        self.assertIsNone(row["input_uri"])
+        self.assertIsNone(row["input"])
         self.assertIsNone(row["input_hash"])
 
     def test_hash_input_false_skips_the_digest(self):
@@ -978,15 +1270,30 @@ class TestSqliteStorage(unittest.TestCase):
         res = ItemResult("some page text", input=FileItemResult(path))
         storage.process(res)
         row = get_result(self.db, res.id)
-        self.assertEqual(row["input_uri"], path)  # the path is free; the digest is the part that costs
+        self.assertEqual(row["input"], path)  # the path is free; the digest is the part that costs
         self.assertIsNone(row["input_hash"])
+
+    def test_foreign_keys_are_enforced(self):
+        stray = {column: None for column in RESULT_COLUMNS}
+        now = datetime.now(timezone.utc)
+        stray.update(id=str(uuid.uuid4()), workflow_run_id=str(uuid.uuid4()), created=now, modified=now)
+        with self.assertRaises(sqlite3.IntegrityError):  # a RESULT row must belong to a run that exists
+            store_rows(self.db, {"RESULT": stray})
+
+    def test_a_database_in_the_old_layout_is_refused(self):
+        old = os.path.join(self.dir, "old.db")
+        conn = sqlite3.connect(old)
+        conn.execute("CREATE TABLE results (id TEXT PRIMARY KEY, processor_id TEXT, value_json TEXT)")
+        conn.commit()
+        conn.close()
+        with self.assertRaises(RuntimeError):
+            list_results(old)
 
 
 def postgres_available():
-    """True when there is a server to test against; the whole PostgreSQL class is skipped if not."""
+    """True when there is a server to test against; the PostgreSQL classes are skipped if not."""
     try:
-        ensure_postgres_database(postgres_params({}))
-        _pg_connect(postgres_params({})).close()
+        _pg_connect(postgres_params({"database": "postgres"})).close()
         return True
     except Exception:
         return False
@@ -995,36 +1302,21 @@ def postgres_available():
 HAS_POSTGRES = postgres_available()
 
 
-@unittest.skipUnless(HAS_POSTGRES, "no PostgreSQL server on localhost:5432 with a 'chai' database")
-class TestPostgresStorage(unittest.TestCase):
-    """The same rows a run writes straight into PostgreSQL, and the same rows loaded from Parquet."""
+class _ThrowawayDatabase(unittest.TestCase):
+    """A PostgreSQL database of the class's own, created for it and dropped afterwards."""
 
-    def setUp(self):
-        self.dir = tempfile.mkdtemp()
-        self.out = os.path.join(self.dir, "run.parquet")
-        self.params = postgres_params({})
-        # a table name of this run's own, so a suite running twice at once does not fight over rows
-        self.table = f"test_pg_{uuid.uuid4().hex[:8]}"
-        self.loaded_table = f"{self.table}_loaded"
-        self.wf = Workflow({"id": "pg_wf", "type": "workflow.Workflow"})
-        self.comp_a = self.wf._make_step({"type": "describer.FileInfoDescriber", "id": "src_a"}, self.wf)
+    @classmethod
+    def setUpClass(cls):
+        cls.params = postgres_params({"database": f"chai_test_{uuid.uuid4().hex[:8]}"})
+        ensure_postgres_database(cls.params)
 
-    def tearDown(self):
-        shutil.rmtree(self.dir, ignore_errors=True)
-        for component in list(self.wf.registry_ids.values()):
-            if isinstance(component, PostgresStorage):
-                component.close()  # nothing ran the workflow, so nothing has given the connection back
-        conn = _pg_connect(self.params, autocommit=True)
+    @classmethod
+    def tearDownClass(cls):
+        conn = _pg_connect(postgres_params({"database": "postgres"}), autocommit=True)
         try:
-            for table in (self.table, self.loaded_table):
-                conn.cursor().execute(f"DROP TABLE IF EXISTS {table}_derivatives")
-                conn.cursor().execute(f"DROP TABLE IF EXISTS {table}")
+            conn.cursor().execute(f'DROP DATABASE IF EXISTS "{cls.params["dbname"]}" WITH (FORCE)')
         finally:
             conn.close()
-
-    def make_storage(self, **settings):
-        settings.setdefault("table", self.table)
-        return self.wf._make_step({"type": "storage.PostgresStorage", "settings": settings}, self.wf)
 
     def query(self, sql, params=None):
         conn = _pg_connect(self.params)
@@ -1042,95 +1334,102 @@ class TestPostgresStorage(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_stores_a_result_row_with_json_columns(self):
+
+@unittest.skipUnless(HAS_POSTGRES, "no PostgreSQL server to test against (PGHOST/PGPORT, default localhost:5432)")
+class TestPostgresStorage(_ThrowawayDatabase):
+    """The same rows a run writes straight into PostgreSQL, and the same rows loaded from Parquet."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.out = os.path.join(self.dir, "run.parquet")
+        # tables of this test's own, so the tests do not see each other's rows
+        suffix = uuid.uuid4().hex[:6]
+        self.tables = {entity: f"{name}_{suffix}" for entity, name in chai_schema.TABLES.items()}
+        self.names = self.tables
+        self.loaded_table = f"loaded_{suffix}"
+        self.wf = Workflow(
+            {"id": "pg_wf", "type": "workflow.Workflow", "name": "PostgreSQL storage", "project": "Tests"}
+        )
+        self.comp_a = self.wf._make_step({"type": "describer.FileInfoDescriber", "id": "src_a"}, self.wf)
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+        for component in list(self.wf.registry_ids.values()):
+            if isinstance(component, PostgresStorage):
+                component.close()  # nothing ran the workflow, so nothing has given the connection back
+
+    def make_storage(self, workflow=None, **settings):
+        settings.setdefault("tables", self.tables)
+        settings.setdefault("database", self.params["dbname"])
+        wf = workflow or self.wf
+        return wf._make_step({"type": "storage.PostgresStorage", "settings": settings}, wf)
+
+    def test_stores_a_result_row_under_its_run(self):
         storage = self.make_storage()
         res = ItemResult("hello world", metadata={"type": "TEXT"}, processor=self.comp_a)
         self.assertIs(storage.process(res), res)  # pass-through, like the other Storage components
+        results = self.names["RESULT"]
         rows = self.query(
-            f"SELECT id, processor_id, workflow_id, value_json, metadata_json, extra_json FROM {self.table}"
+            f"SELECT id::text, workflow_run_id::text, process_id, value, metadata, extra_data, created FROM {results}"
         )
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0][0], res.id)
-        self.assertEqual(rows[0][1], "src_a")
-        self.assertEqual(rows[0][2], "pg_wf")
-        # value_json is the whole result, parsed back out of jsonb rather than returned as text
-        self.assertEqual(rows[0][3]["value"], "hello world")
-        self.assertEqual(rows[0][4]["type"], "TEXT")  # metadata_json is its own queryable column
+        self.assertEqual(rows[0][:3], (res.id, self.wf.run_id, "src_a"))
+        self.assertEqual(rows[0][3], "hello world")  # jsonb, parsed back out rather than returned as text
+        self.assertEqual(rows[0][4]["type"], "TEXT")
         self.assertIsNone(rows[0][5])  # nothing in extra: NULL rather than an empty object
-        types = dict(
-            self.query(
-                "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = %s",
-                (self.table,),
-            )
+        self.assertEqual(rows[0][6], res.created)
+        columns = [r[0] for r in self.query(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = %s ORDER BY ordinal_position",
+            (results,),
+        )]
+        self.assertEqual(columns, list(RESULT_COLUMNS))
+        self.assertEqual(
+            self.query(f"SELECT w.name, p.name FROM {self.names['WORKFLOW']} w JOIN {self.names['PROJECT']} p ON p.id = w.project_id"),
+            [("PostgreSQL storage", "Tests")],
         )
-        self.assertEqual(types["value_json"], "jsonb")
-        self.assertEqual(types["created_at"], "timestamp with time zone")
 
     def test_storing_a_result_again_is_an_upsert(self):
         storage = self.make_storage()
         res = ItemResult("first", processor=self.comp_a)
         storage.process(res)
-        created = self.query(f"SELECT created_at FROM {self.table}")[0][0]
+        results = self.names["RESULT"]
+        created = self.query(f"SELECT created FROM {results}")[0][0]
         correction_id = save_postgres_correction(
-            res.id, "fixed", agent="a.reviewer@example.org", params=self.params, table=self.table
+            res.id, "fixed", agent="a.reviewer@example.org", params=self.params, tables=self.tables
         )
         res.value = "second"
         storage.process(res)
-        rows = self.query(f"SELECT value_json, created_at FROM {self.table} WHERE id = %s", (res.id,))
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0][0]["value"], "second")
-        self.assertEqual(rows[0][1], created)
+        rows = self.query(f"SELECT value, created FROM {results} WHERE id = %s::uuid", (res.id,))
+        self.assertEqual(rows, [("second", created)])
         # the correction is its own row and still points at the result that was re-stored
         corrections = self.query(
-            f"SELECT id, corrects_id, metadata_json FROM {self.table} WHERE corrects_id = %s", (res.id,)
+            f"SELECT id::text, metadata, workflow_run_id::text FROM {results} WHERE previous_id = %s::uuid", (res.id,)
         )
         self.assertEqual(corrections[0][0], correction_id)
-        self.assertEqual(corrections[0][2]["agent"], "a.reviewer@example.org")
+        self.assertEqual(corrections[0][1]["agent"], "a.reviewer@example.org")
+        self.assertEqual(corrections[0][2], self.wf.run_id)
+        self.assertIsNone(save_postgres_correction(str(uuid.uuid4()), "x", params=self.params, tables=self.tables))
 
-    def test_derivatives_are_stored_against_their_source(self):
+    def test_a_derivative_is_a_result_row_of_its_own(self):
         storage = self.make_storage()
         src = ItemResult("source")
-        deriv = ItemResult(["label"], processor=self.comp_a)
+        deriv = ItemResult(["label"], processor=self.comp_a, input=src)
         src.derivative_results = {self.comp_a: [deriv]}
         storage.process(src)
         rows = self.query(
-            f"SELECT source_id, component_id, result_json FROM {self.table}_derivatives WHERE id = %s",
-            (deriv.id,),
+            f"SELECT process_id, input, value FROM {self.names['RESULT']} WHERE id = %s::uuid", (deriv.id,)
         )
-        self.assertEqual(rows[0][0], src.id)
-        self.assertEqual(rows[0][1], "src_a")
-        self.assertEqual(rows[0][2]["value"], ["label"])
+        self.assertEqual(rows, [("src_a", src.id, ["label"])])
 
-    def test_a_run_reaches_the_table_and_the_parquet_file_alike(self):
+    def test_a_run_reaches_the_tables_and_the_parquet_file_alike(self):
         csv_path = os.path.join(self.dir, "people.csv")
         with open(csv_path, "w", newline="") as fh:
             fh.write("name,title\n")
             fh.write("".join(f"name{i},title{i}\n" for i in range(6)))
-        parquet_fields = {
-            "id": "id",
-            "processorId": "processor_id",
-            "workflowId": "workflow_id",
-            "@record": "value_json",
-            "metadata": "metadata_json",
-            "extraInfo": "extra_json",
-            "@input_uri": "input_uri",
-            "@input_hash": "input_hash",
-            "@corrects": "corrects_id",
-        }
-        parquet_schema = {
-            "id": "string",
-            "processor_id": "string",
-            "workflow_id": "string",
-            "value_json": "json",
-            "metadata_json": "json",
-            "extra_json": "json",
-            "input_uri": "string",
-            "input_hash": "string",
-            "corrects_id": "string",
-        }
         tree = {
             "id": "pg_run_wf",
             "type": "workflow.Workflow",
+            "name": "PostgreSQL and Parquet",
             "steps": [
                 {
                     "id": "csv",
@@ -1149,20 +1448,11 @@ class TestPostgresStorage(unittest.TestCase):
                                     "next_steps": [
                                         {
                                             "type": "storage.PostgresStorage",
-                                            "settings": {"table": self.table},
+                                            "settings": {"tables": self.tables, "database": self.params["dbname"]},
                                         },
-                                        {
-                                            "id": "pq",
-                                            "type": "storage.ParquetStorage",
-                                            "settings": {
-                                                "file": self.out,
-                                                "fields": parquet_fields,
-                                                "schema": parquet_schema,
-                                                "null_if_empty": True,
-                                                "run_columns": False,
-                                                "flush_on_exit": False,
-                                            },
-                                        },
+                                        # no fields: the file's rows are RESULT rows too
+                                        {"id": "pq", "type": "storage.ParquetStorage",
+                                         "settings": {"file": self.out, "flush_on_exit": False}},
                                     ],
                                 }
                             ],
@@ -1171,30 +1461,35 @@ class TestPostgresStorage(unittest.TestCase):
                 }
             ],
         }
-        Workflow(tree).run()
-        # the loaded table is made with the same DDL, so the two can be compared column for column
-        ensure_postgres_schema(self.params, table=self.loaded_table)
-        info = parquet_to_postgres(self.out, self.loaded_table, self.params)
+        wf = Workflow(tree)
+        wf.run()
+        # the Parquet route into a second set of tables: the run's own rows (carried in the file's
+        # metadata) first, then the RESULT rows, bulk loaded
+        loaded = {entity: f"{name}_l" for entity, name in self.tables.items()}
+        records = json.loads(pq.read_schema(self.out).metadata[b"chai_tea_records"])
+        store_postgres_rows(records, self.params, tables=loaded)
+        info = parquet_to_postgres(self.out, loaded["RESULT"], self.params, create=False)
         self.assertEqual(info["rows"], 6)
+        direct = self.tables["RESULT"]
         # the run's rows say what they were made from: the CSV, and the md5 of the row itself
-        uris = self.query(f"SELECT DISTINCT input_uri FROM {self.table}")
-        self.assertEqual(uris, [(csv_path,)])
-        self.assertEqual(self.query(f"SELECT count(DISTINCT input_hash) FROM {self.table}")[0][0], 6)
-        columns = (
-            "id, processor_id, workflow_id, value_json, metadata_json, extra_json, "
-            "input_uri, input_hash, corrects_id"
-        )
-        self.assertEqual(self.query(f"SELECT count(*) FROM {self.table}")[0][0], 6)
-        self.assertEqual(self.query(f"SELECT count(*) FROM {self.loaded_table}")[0][0], 6)
-        # what one route stored and the other loaded is the same set of rows, both ways round
-        self.assertEqual(
-            self.query(f"SELECT {columns} FROM {self.table} EXCEPT SELECT {columns} FROM {self.loaded_table}"),
-            [],
-        )
-        self.assertEqual(
-            self.query(f"SELECT {columns} FROM {self.loaded_table} EXCEPT SELECT {columns} FROM {self.table}"),
-            [],
-        )
+        self.assertEqual(self.query(f"SELECT DISTINCT input FROM {direct}"), [(csv_path,)])
+        self.assertEqual(self.query(f"SELECT count(DISTINCT input_hash) FROM {direct}")[0][0], 6)
+        columns = ", ".join(RESULT_COLUMNS)
+        self.assertEqual(self.query(f"SELECT count(*) FROM {direct}")[0][0], 6)
+        # what one route stored and the other loaded is the same set of rows -- every column, both ways
+        self.assertEqual(self.query(f"SELECT {columns} FROM {direct} EXCEPT SELECT {columns} FROM {loaded['RESULT']}"), [])
+        self.assertEqual(self.query(f"SELECT {columns} FROM {loaded['RESULT']} EXCEPT SELECT {columns} FROM {direct}"), [])
+        # and the run finished in both: successful, with its duration
+        for names in (self.tables, loaded):
+            self.assertEqual(
+                self.query(f"SELECT id::text, was_successful, duration > 0 FROM {names['WORKFLOW_RUN']}"),
+                [(wf.run_id, True, True)],
+            )
+
+    def test_a_table_in_the_old_layout_is_refused(self):
+        self.execute(f"CREATE TABLE {self.tables['RESULT']} (id TEXT PRIMARY KEY, value_json JSONB)")
+        with self.assertRaises(RuntimeError):
+            self.make_storage().process(ItemResult("x"))
 
     def test_uploader_creates_a_table_from_the_parquet_columns(self):
         writer = ParquetRecordWriter(
@@ -1246,7 +1541,6 @@ class TestPostgresStorage(unittest.TestCase):
             parquet_to_postgres(wider, self.loaded_table, self.params, create=False)
         self.assertIn("extra", str(caught.exception))
 
-
     def test_works_through_the_psycopg2_fallback(self):
         try:
             import psycopg2
@@ -1268,7 +1562,7 @@ class TestPostgresStorage(unittest.TestCase):
             self.assertEqual(parquet_to_postgres(self.out, self.loaded_table, self.params)["rows"], 1)
         finally:
             chai.storage._pg_driver = driver
-        self.assertEqual(self.query(f"SELECT value_json FROM {self.table}")[0][0]["value"], "through psycopg2")
+        self.assertEqual(self.query(f"SELECT value FROM {self.tables['RESULT']}")[0][0], "through psycopg2")
         self.assertEqual(self.query(f"SELECT payload FROM {self.loaded_table}")[0][0], {"a": 1})
 
 

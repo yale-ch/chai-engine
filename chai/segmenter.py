@@ -104,6 +104,55 @@ class WordSegmenter(TextSegmenter):
         super().__init__(tree, workflow, parent)
 
 
+#: The orders ``YoloSegmenter`` can put its regions in.
+ORDERS = ("reading", "top_to_bottom", "detected")
+
+
+def reading_order(boxes, order="reading"):
+    """The indexes of *boxes* (``[x1, y1, x2, y2]``) in the order a page is read.
+
+    * ``reading`` (the default) -- columns left to right, and top to bottom within each column. Boxes
+      are grouped into a column when they overlap it horizontally by more than half the narrower of
+      the two. The narrowest boxes are placed first and a column only widens for a box of similar
+      width, so the lines of a column define it; a box spanning several columns (a heading above
+      two) joins the leftmost of them, so it is read before both rather than merging them into one.
+      A spanning box partway down the page is read within the left column, not between the blocks.
+    * ``top_to_bottom`` -- by vertical centre, then left edge: a single column of lines.
+    * ``detected`` -- as the detector returned them (roughly by confidence).
+    """
+    if order not in ORDERS:
+        raise ValueError(f"Unknown order {order!r}; use one of {', '.join(ORDERS)}")
+    indexes = list(range(len(boxes)))
+    if order == "detected":
+        return indexes
+
+    def down(i):
+        x1, y1, _, y2 = boxes[i]
+        return ((y1 + y2) / 2, x1)
+
+    if order == "top_to_bottom":
+        return sorted(indexes, key=down)
+    columns = []  # [left, right, members]
+    for i in sorted(indexes, key=lambda i: boxes[i][2] - boxes[i][0]):
+        x1, _, x2, _ = boxes[i]
+        width = max(x2 - x1, 1e-9)
+        # A box spanning several columns (a heading over two) belongs to the leftmost, read first
+        overlapping = [
+            column
+            for column in columns
+            if min(x2, column[1]) - max(x1, column[0]) > 0.5 * min(width, column[1] - column[0])
+        ]
+        if overlapping:
+            column = min(overlapping, key=lambda c: c[0])
+            column[2].append(i)
+            if width <= 1.5 * (column[1] - column[0]):
+                column[0], column[1] = min(column[0], x1), max(column[1], x2)
+        else:
+            columns.append([x1, x2, [i]])
+    columns.sort(key=lambda column: column[0])
+    return [i for column in columns for i in sorted(column[2], key=down)]
+
+
 class YoloSegmenter(Segmenter):
     """Runs a YOLO detection model and emits one FileItemResult per bounding box.
 
@@ -112,11 +161,17 @@ class YoloSegmenter(Segmenter):
     true the cropped PNG bytes are populated in ``file_bytes`` so AI components
     (e.g. GeminiTranscriber) can consume the region without touching disk.
 
+    The regions are emitted in reading order (see ``reading_order``) and each
+    records its position as its ``sequence``, so the rows stored for the lines
+    of a page sort into the order they are read in (``input_sequence``).
+
     Settings:
         - model:      path or name of a YOLO detection model (default 'yolo11n.pt')
         - confidence: minimum box confidence to keep (default 0.25)
         - crop:       if true (default), emit cropped PNG bytes; otherwise only metadata
         - classes:    optional list of class names to keep; others are dropped
+        - order:      'reading' (default: columns left to right, each top to
+                      bottom), 'top_to_bottom', or 'detected' (the model's own order)
     """
 
     def __init__(self, tree, workflow, parent=None):
@@ -127,6 +182,9 @@ class YoloSegmenter(Segmenter):
         self.confidence = self.settings.get("confidence", 0.25)
         self.crop = self.settings.get("crop", True)
         self.keep_classes = set(self.settings.get("classes", []) or [])
+        self.order = self.settings.get("order", "reading")
+        if self.order not in ORDERS:
+            raise ValueError(f"{self!r}: unknown order {self.order!r}; use one of {', '.join(ORDERS)}")
 
     def _process(self, input):
         from PIL import Image
@@ -169,4 +227,10 @@ class YoloSegmenter(Segmenter):
                     crop.file_bytes = buf.getvalue()
                 out.append(crop)
 
+        # Detection order is roughly confidence order; the rows want the order the page is read in
+        crops = list(out.value)
+        ordered = [crops[i] for i in reading_order([c.metadata["bbox"] for c in crops], self.order)]
+        for position, crop in enumerate(ordered):
+            crop.sequence = position
+        out.value = ordered
         return out

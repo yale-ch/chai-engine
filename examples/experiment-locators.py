@@ -5,10 +5,11 @@ per sentence. Nothing about a sentence is written anywhere except its row -- the
 document per sentence -- and yet every row can be traced to the exact characters it came from:
 
 * the file iterator is marked ``"source": true``, so every row records *that document* as the input
-  it was generated from (``input_uri``) plus the md5 of the document's content (``input_hash``),
+  it was generated from (``input``) plus the md5 of the document's content (``input_hash``),
   rather than whatever step happened to precede it;
 * the segmenter runs with ``locate: true``, so each sentence carries the character range it occupies
-  in the document, and the storage collects those into ``input_locator``.
+  in the document, and the storage collects those into ``input_segment`` (JSON text) -- the
+  columns of the CHAI-TEA RESULT table, which is what ``SqliteStorage`` writes.
 
 A UI holding a stored row therefore has everything it needs: which document to open, whether that
 document still hashes the same, and where in it to highlight. The same shape works for images -- a
@@ -21,6 +22,7 @@ Usage (from the repository root):
 """
 
 import argparse
+import json
 import os
 import sys
 
@@ -131,14 +133,16 @@ def main():
 
     Workflow(build_workflow(args.dir, args.db)).run()
 
-    rows = [r for r in list_results(args.db, processor_id="topics", limit=1000) if r["input_locator"]]
+    rows = [r for r in list_results(args.db, process_id="topics", limit=1000) if r["input_segment"]]
+    for row in rows:
+        row["locator"] = json.loads(row["input_segment"])
     print(f"{len(rows)} stored rows, not one of which materialized its sentence\n")
-    for row in sorted(rows, key=lambda r: (r["input_uri"], r["input_locator"][0]["start"])):
-        frame = row["input_locator"][0]
-        with open(row["input_uri"]) as fh:  # what a UI would do with the row: go back to the source
+    for row in sorted(rows, key=lambda r: (r["input"], r["locator"][0]["start"])):
+        frame = row["locator"][0]
+        with open(row["input"]) as fh:  # what a UI would do with the row: go back to the source
             quoted = fh.read()[frame["start"] : frame["end"]]
-        labels = ",".join(row["value"]["value"]) or "-"
-        print(f"  {os.path.basename(row['input_uri'])} [{row['input_hash'][:8]}] "
+        labels = ",".join(row["value"]) or "-"
+        print(f"  {os.path.basename(row['input'])} [{row['input_hash'][:8]}] "
               f"{frame['start']:>4}-{frame['end']:<4} {labels:<15} {quoted}")
 
 

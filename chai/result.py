@@ -9,6 +9,7 @@ steps walk back up the provenance chain.
 
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -32,17 +33,25 @@ class Result(BaseThing):
     * ``derivative_results`` -- ``{component: [results]}`` registered via ``register_result``; this is
       how ``register_on`` makes e.g. a classifier's labels for a result discoverable by a later
       ``LabelTestGate``.
+    * ``created`` / ``modified`` -- when the result was made and last changed (UTC datetimes;
+      assigning a new ``value`` updates ``modified``), and ``editor_user_id`` -- the USER who edited
+      it, for a result a person made or corrected (``None`` for a component's own output). With
+      ``was_successful`` (false for an ERROR result) these are the RESULT columns a result holds
+      itself; ``storage.result_row`` renders the whole row.
 
     ``to_json`` serializes the result (optionally recursing into child Results); ``view`` prints an
     indented tree of nested results for debugging.
     """
 
-    value = None
+    _value = None
     input: Optional["Result"] = None
     processor: Optional["BaseThing"] = None
     metadata: dict = {}
     extra: dict = {}
     derivative_results: dict = {}
+    created: Optional[datetime] = None
+    modified: Optional[datetime] = None
+    editor_user_id: Optional[str] = None
 
     def __init__(
         self, value=None, input=None, processor=None, register_on=None, workflow=None, metadata={}, extra={}
@@ -56,7 +65,11 @@ class Result(BaseThing):
             self.metadata["timestamp"] = time.time()
         self.extra = extra or {}
         self.derivative_results = {}
+        self.created = datetime.now(timezone.utc)
+        self.modified = self.created
+        self.editor_user_id = None
         self.set_value(value)
+        self.modified = self.created  # being made is not a change
         if register_on is not None:
             self.input = register_on
             if processor is None:
@@ -82,9 +95,45 @@ class Result(BaseThing):
     def locator(self, value):
         self.extra["locator"] = dict(value) if value is not None else None
 
+    @property
+    def sequence(self):
+        """This result's zero-based position among its siblings, or ``None`` if it has none.
+
+        An ``Iterator`` stamps each entry it hands out with the entry's position in its input -- the
+        nth page of a directory, the nth line of an image -- and a stored row records the nearest
+        position up its chain as ``input_sequence``, so a front end can ``ORDER BY`` it.
+        """
+        return self.extra.get("sequence", None)
+
+    @sequence.setter
+    def sequence(self, value):
+        self.extra["sequence"] = int(value) if value is not None else None
+
+    @property
+    def value(self):
+        """The payload."""
+        return self._value
+
+    @value.setter
+    def value(self, value):
+        # Assigning a new payload is a change to the result: modified moves with it
+        self._value = value
+        self.touch()
+
     def set_value(self, value):
         """Assign the payload; subclasses hook this to normalize values (e.g. sorting file lists)."""
         self.value = value
+
+    def touch(self):
+        """Mark the result changed: ``modified`` becomes now."""
+        if self.created is not None:
+            self.modified = max(datetime.now(timezone.utc), self.created)
+
+    @property
+    def was_successful(self):
+        """False for a result recording a failure (an ERROR result), true otherwise."""
+        metadata = self.metadata or {}
+        return not (metadata.get("type") == "ERROR" or "error" in metadata)
 
     def to_json(self, recurse=False):
         """Return a JSON representation of the result, including metadata etc."""

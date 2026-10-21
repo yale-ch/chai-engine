@@ -1,16 +1,19 @@
 """Run workflow-ppl.json over a CSV of people and write the results as JSON-Lines.
 
-One line per CSV row, written as soon as that row has been parsed, pairing the row it came from with
-the parse of its name:
+One line per CSV row, written as soon as that row has been parsed: a row of the CHAI-TEA RESULT
+table, as every storage writes by default, with the parse of the name as its value and the CSV row
+it came from in its extra_data:
 
-    {"input": {"name": "Ford, Brinsley [Sir, 1908-1999] (introduction by)", "title": ...},
-     "parsed": {"first_name": "Brinsley", "last_name": "Ford", "titles": ["Sir"], ...},
-     "metadata": {"type": "DATA", "timestamp": 1755000000.0, ...}}
+    {"id": "...", "workflow_run_id": "...", "process_id": "ppl_parsed", "input": "inputs/people.csv",
+     "value": {"first_name": "Brinsley", "last_name": "Ford", "titles": ["Sir"], ...},
+     "metadata": {"type": "DATA", "timestamp": 1755000000.0, ...},
+     "extra_data": {"input": {"name": "Ford, Brinsley [Sir, 1908-1999] (introduction by)", ...}},
+     "was_successful": true, ...}
 
 The writing is done by the JsonLinesStorage steps in the workflow itself, which append each result to
 the file as it is produced; the row iterator runs with ``retain_results: false``, so nothing is held
 in memory until the end of the run and the output file is complete and valid at every moment. Rows
-the workflow could not parse still get a line, with "error" in place of "parsed" (the workflow gives
+the workflow could not parse still get a line, an ERROR result with was_successful false (the workflow gives
 both extraction steps an error branch that writes to the same file), so the output always has one
 line per row read. This script only points those steps at the output file and reports what happened.
 

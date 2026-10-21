@@ -269,35 +269,39 @@ def _timestamp_of(value):
 def normalize(record):
     """One stored record as the fields a CHAI-TEA RESULT row needs.
 
-    Accepts both spellings a storage layer might have used -- the ``result_to_json`` keys
-    (``processorId``, ``extraInfo``, ``workflowId``) and the tabular columns (``processor_id``,
-    ``extra_json``, ``workflow_id``) -- so every storage component is a source without the caller
-    having to say which shape it wrote.
+    Accepts every spelling a storage layer might have used -- the RESULT columns the storages write
+    by default (``process_id``, ``extra_data``, ``input_segment``, ``previous_id``), the
+    ``result_to_json`` keys (``processorId``, ``extraInfo``, ``workflowId``) and the tabular columns
+    (``processor_id``, ``extra_json``, ``workflow_id``) -- so every storage component is a source
+    without the caller having to say which shape it wrote.
     """
     metadata = _maybe_json(_first(record, "metadata", "metadata_json")) or {}
     if not isinstance(metadata, dict):
         metadata = {"value": metadata}
-    extra = _maybe_json(_first(record, "extraInfo", "extra", "extra_json")) or None
-    locator = _maybe_json(record.get("input_locator"))
+    extra = _maybe_json(_first(record, "extra_data", "extraInfo", "extra", "extra_json")) or None
+    locator = _maybe_json(_first(record, "input_locator", "input_segment"))
 
     # input_uri is what the storage recorded the row as coming from; without one, the plain "input"
     # field is the id of the result this was made from, which is still the best answer available.
     source_input = _first(record, "input_uri", "@input_uri", "input")
 
     error = metadata.get("type") in ERROR_TYPES or "error" in metadata
+    if isinstance(record.get("was_successful"), bool):
+        error = not record["was_successful"]
+    sequence = record.get("input_sequence")
     return {
         "id": as_uuid(_first(record, "id", "@id")),
-        "process_id": _first(record, "processorId", "processor_id", "step"),
+        "process_id": _first(record, "process_id", "processorId", "processor_id", "step"),
         "workflow_id": _first(record, "workflowId", "workflow_id"),
         "input": None if source_input is None else str(source_input),
         "input_hash": _first(record, "input_hash", "@input_hash"),
         "input_segment": json.dumps(locator) if locator else None,
-        "input_sequence": _sequence_of(locator),
+        "input_sequence": sequence if isinstance(sequence, int) else _sequence_of(locator),
         "was_successful": not error,
         "value": _maybe_json(_first(record, "value", "value_json", "@record")),
         "metadata": metadata,
         "extra_data": extra,
-        "previous_id": as_uuid(_first(record, "corrects_id", "@corrects")),
+        "previous_id": as_uuid(_first(record, "previous_id", "corrects_id", "@corrects")),
         "md_duration": metadata.get("duration"),
         "md_timestamp": _timestamp_of(_first(record, "created_at", "md_timestamp")),
     }

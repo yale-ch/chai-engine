@@ -2,6 +2,8 @@
   "id": "m804",
   "type": "workflow.Workflow",
   "name": "M804: transcribe and translate each page with the previous page as context",
+  "description": "Transcribe each page image of M804 with the last line of the previous page as context, then translate it into English with the previous page as context",
+  "project": "M804",
   "steps": [
     {
       "id": "m804_pages",
@@ -55,14 +57,7 @@
                   "name": "one line per result, with its token usage",
                   "settings": {
                     "file": "results\/m804\/run.jsonl",
-                    "mode": "truncate",
-                    "fields": {
-                      "id": "id",
-                      "processorId": "step",
-                      "@input_uri": "page",
-                      "metadata": "metadata",
-                      "value": "text"
-                    }
+                    "mode": "truncate"
                   },
                   "next_steps": [
                     {
@@ -109,14 +104,7 @@
                               "name": "one line per result, with its token usage",
                               "settings": {
                                 "file": "results\/m804\/run.jsonl",
-                                "mode": "truncate",
-                                "fields": {
-                                  "id": "id",
-                                  "processorId": "step",
-                                  "@input_uri": "page",
-                                  "metadata": "metadata",
-                                  "value": "text"
-                                }
+                                "mode": "truncate"
                               },
                               "next_steps": [
                                 {

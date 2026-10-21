@@ -4,6 +4,12 @@ Storage steps are pass-through: they write the input Result somewhere and return
 they can be inserted anywhere in a pipeline (typically as ``next_steps``) without affecting the data
 flow.
 
+Everything a storage records is in the CHAI-TEA schema (``chai.schema``): ``SqliteStorage`` and
+``PostgresStorage`` write its tables -- each result a RESULT row, under the run's PROJECT, WORKFLOW
+and WORKFLOW_RUN rows -- and ``JsonLinesStorage``/``ParquetStorage`` write the same RESULT rows to
+files. ``write_rows`` is the one writer for both databases; ``store_rows``/``store_postgres_rows``
+put rows made elsewhere in.
+
 Besides the components, this module exposes plain helper functions (``list_results``, ``get_result``,
 ``save_correction``, ``list_processors``) that a viewer app can import to browse a ``SqliteStorage``
 database and record human corrections alongside the original values. The helpers open a fresh
@@ -30,7 +36,18 @@ from datetime import datetime, timezone
 import ujson as json
 
 from .core import Component, Result
+from .records import UUID_NAMESPACE, as_uuid, now  # noqa: F401 -- as_uuid/UUID_NAMESPACE re-exported
 from .result import FileItemResult
+from .schema import (
+    TABLE_ORDER,
+    check_for_clashes,
+    column_kinds,
+    column_types,
+    identifier as _pg_identifier,
+    schema_statements,
+    sqlite_statements,
+    table_names,
+)
 
 logger = logging.getLogger("chai")
 
@@ -82,6 +99,8 @@ def result_to_json(result: Result):
 
 _line_locks = {}
 _line_locks_guard = threading.Lock()
+#: path -> the run that last emptied it, so 'truncate' empties a file once per run, not once per step
+_truncated_runs = {}
 
 
 def _line_lock(path):
@@ -285,7 +304,7 @@ def correction_target(result: Result):
 
     A component that produces a corrected version of an earlier result says so by putting that
     result (or its id) in the new result's ``extra['corrects']`` -- ``metadata['corrects']`` is read
-    too -- and the storages record it in the ``corrects_id`` column, which is what makes the
+    too -- and the storages record it as the row's ``previous_id``, which is what makes the
     correction an entry in its own right rather than an overwrite of the original.
     """
     for holder in (getattr(result, "extra", None), getattr(result, "metadata", None)):
@@ -299,19 +318,118 @@ def correction_target(result: Result):
 #: JSON -- the columns the tabular storages fill in beside the result itself.
 COMPUTED_FIELDS = ("@record", "@input_uri", "@input_hash", "@input_locator", "@corrects")
 
+#: The columns of the CHAI-TEA RESULT table, in order, as ``ParquetRecordWriter`` column kinds: the
+#: shape every record-writing storage produces by default (defined in ``chai.schema``).
+RESULT_COLUMNS = column_kinds("RESULT")
 
-def build_record(result: Result, fields=None, sources=None, input_source=None):
-    """The flat, JSON-safe record for *result*: its selected fields plus any configured sources.
+
+def _sequence_of(locator):
+    """The last integer frame of an input locator (an index, a page number), if it has one."""
+    if not isinstance(locator, list):
+        return None
+    for frame in reversed(locator):
+        if isinstance(frame, int) and not isinstance(frame, bool):
+            return frame
+        if isinstance(frame, dict):
+            for key in ("sequence", "index", "page", "n"):
+                if isinstance(frame.get(key), int):
+                    return frame[key]
+    return None
+
+
+def result_sequence(result: Result):
+    """*result*'s position among its siblings: the nearest ``sequence`` up its chain, or ``None``.
+
+    An ``Iterator`` stamps each entry with its position, so this is the position of the entry the
+    result was made from -- the page a transcription and its translation came from, the line within
+    an image. Failing that, an integer frame of the input locator counts (see ``_sequence_of``).
+    """
+    for node in _provenance(result):
+        sequence = node.extra.get("sequence") if isinstance(node.extra, dict) else None
+        if isinstance(sequence, int) and not isinstance(sequence, bool):
+            return sequence
+    return _sequence_of(input_locator(result))
+
+
+def is_result_row(record):
+    """Whether *record* has exactly the CHAI-TEA RESULT columns -- what the storages write by default."""
+    return isinstance(record, dict) and list(record) == list(RESULT_COLUMNS)
+
+
+def result_row(result: Result, run_id=None, sources=None, input_source=None, constants=None, with_hash=True):
+    """*result* as a row of the CHAI-TEA RESULT table: exactly its columns, in its order.
+
+    The default record of ``JsonLinesStorage`` and ``ParquetStorage``, so a run's output loads into
+    the central database as it stands. *run_id* becomes ``workflow_run_id`` (a non-uuid id is hashed
+    into one). ``input`` is the file or URI the result was generated from (see ``input_provenance``),
+    else the id of the result it was made from; ``input_segment`` is the input locator as JSON text,
+    ``input_sequence`` the result's position among its siblings (``result_sequence``: the position
+    the nearest iterator gave the entry it was made from), for ordering rows. ``previous_id`` is the
+    result this one corrects, and
+    ``md_cost``/``md_duration``/``md_timestamp`` come from the result's metadata. The columns a
+    ``Result`` holds itself -- ``was_successful``, ``editor_user_id``, ``created``, ``modified`` --
+    are taken from it. *sources* and *constants* -- which would otherwise be extra columns -- are
+    recorded in ``extra_data`` under their keys. *with_hash* false leaves ``input_hash`` null, and
+    skips any file read the digest would need.
+    """
+    whole = result_to_json(result)
+    metadata = whole.get("metadata") or {}
+    provenance = input_provenance(result, input_source, with_hash=with_hash)
+    source_input = provenance["uri"]
+    if source_input is None and whole.get("input") is not None:
+        source_input = str(whole["input"])
+    locator = provenance["locator"]
+    extra = dict(whole.get("extraInfo") or {})
+    extra.pop("corrects", None)  # recorded as previous_id
+    extra.pop("sequence", None)  # recorded as input_sequence
+    for key, cid in (sources or {}).items():
+        extra[key] = _json_safe(source_value(result, cid))
+    for key, value in (constants or {}).items():
+        extra[key] = _json_safe(value)
+    cost = metadata.get("cost")
+    duration = metadata.get("duration")
+    created = getattr(result, "created", None) or now()
+    return {
+        "id": as_uuid(whole["id"]),
+        "workflow_run_id": as_uuid(run_id),
+        "process_id": whole.get("processorId"),
+        "input": source_input,
+        "input_hash": provenance["hash"],
+        "input_segment": json.dumps(locator) if locator else None,
+        "input_sequence": result_sequence(result),
+        "was_successful": not (metadata.get("type") == "ERROR" or "error" in metadata),
+        "value": whole.get("value"),
+        "metadata": metadata or None,
+        "extra_data": extra or None,
+        "previous_id": as_uuid(correction_target(result)),
+        "editor_user_id": as_uuid(getattr(result, "editor_user_id", None)),
+        "md_cost": float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None,
+        "md_duration": float(duration) if isinstance(duration, (int, float)) else None,
+        "md_timestamp": _as_datetime(metadata.get("timestamp")) or created,
+        "created": created,
+        "modified": getattr(result, "modified", None) or created,
+    }
+
+
+def _run_id_of(component):
+    """The run a storage's rows belong to: its ``run_id`` setting, else its workflow's current run."""
+    return component.settings.get("run_id") or getattr(component.workflow, "run_id", None)
+
+
+def build_record(result: Result, fields=None, sources=None, input_source=None, run_id=None, constants=None):
+    """The flat, JSON-safe record for *result*: a CHAI-TEA RESULT row, or the selected fields.
 
     Shared by the storage components that write one record per result (``JsonLinesStorage``,
     ``ParquetStorage``) so a run can be streamed to JSON-Lines or packed into Parquet with the same
-    columns. *fields* selects keys of the ``result_to_json`` representation -- a list to keep them as
-    they are, a ``{key: name}`` dict to keep and rename them; ``None`` keeps all of them.
+    columns. With no *fields* -- the default, and what a workflow's output should be -- the record is
+    ``result_row``: exactly the columns of the CHAI-TEA RESULT table, with *sources* and *constants*
+    kept in its ``extra_data``. *fields* instead selects keys of the ``result_to_json``
+    representation -- a list to keep them as they are, a ``{key: name}`` dict to keep and rename
+    them -- for a record meant for something other than the CHAI-TEA database.
 
-    In the dict form a key may also be one of the computed ``COMPUTED_FIELDS``, which is how a record
-    can carry the same columns ``SqliteStorage`` and ``PostgresStorage`` write:
+    In the dict form a key may also be one of the computed ``COMPUTED_FIELDS``:
 
-    * ``@record`` -- the whole result JSON (their ``value_json``)
+    * ``@record`` -- the whole result JSON
     * ``@input_uri`` / ``@input_hash`` / ``@input_locator`` -- the file or URI the entry was generated
       from, the md5 of that input's content, and where in it this entry is (see ``input_provenance``;
       *input_source* names the component whose result counts as the input, overriding the component
@@ -321,6 +439,8 @@ def build_record(result: Result, fields=None, sources=None, input_source=None):
     *sources* is a ``{key: component id}`` dict, each recording the value of the nearest ancestor
     result that component produced (see ``source_value``).
     """
+    if not fields:
+        return result_row(result, run_id, sources, input_source, constants)
     whole = result_to_json(result)
     js = whole
     if fields:
@@ -603,17 +723,25 @@ class JsonLinesStorage(Storage):
           directories are created when the workflow is built, so a run that produces nothing still
           leaves an empty file rather than none
         - mode: 'append' (default) adds to whatever the file already holds; 'truncate' empties it
-          when the component is built, so re-running replaces the previous run's lines
-        - fields: which parts of the result JSON to record -- a list of keys to keep, or a
+          when a run starts, so re-running replaces the previous run's lines. Building a workflow
+          never empties anything -- a tool that only loads or inspects a workflow leaves its output
+          alone. The file is emptied once per run however many steps write to it, and results
+          pushed through outside a ``Workflow.run`` empty it before the first is written
+        - fields: leave unset. Each line is then a row of the CHAI-TEA RESULT table -- exactly its
+          columns, in its order (see ``result_row``), with ``workflow_run_id`` the workflow's
+          ``run_id`` -- which is what a run's output must be for the central database to load it.
+          Set only for a file meant for something else: a list of result-JSON keys to keep, or a
           ``{key: name}`` dict that keeps and renames them, in which a key from ``COMPUTED_FIELDS``
           (``@record``, ``@input_uri``, ``@input_hash``, ``@corrects``) names a column computed from
-          the result rather than read off its JSON (default: the whole result JSON split into its own
-          columns, i.e. id, type, workflowId, processorId, metadata, extraInfo, input and value)
+          the result rather than read off its JSON
         - sources: ``{key: component id}`` dict; for each entry, the value of the nearest ancestor
-          result that component produced is recorded under *key* (see ``source_value``). This is how
-          a line can carry the input it was derived from next to the value derived from it
-        - input_source: component id whose result counts as the input for ``@input_uri``/
-          ``@input_hash`` (default: the result's immediate input)
+          result that component produced is recorded under *key* (see ``source_value``) -- in the
+          row's ``extra_data``, or as a key of its own when ``fields`` is set. This is how a line can
+          carry the input it was derived from next to the value derived from it
+        - input_source: component id whose result counts as the input for ``input``/``input_hash``
+          (default: the component marked ``source: true``, else the result's immediate input)
+        - run_id: the ``workflow_run_id`` to record (default: the workflow's ``run_id``, fresh for
+          each run); an id that is not a uuid is hashed into one
     """
 
     def __init__(self, tree, workflow, parent=None):
@@ -624,12 +752,28 @@ class JsonLinesStorage(Storage):
         parent_dir = os.path.dirname(self.file_name)
         if parent_dir:
             os.makedirs(parent_dir, exist_ok=True)
-        # Opened once, when the workflow is built, rather than on the first write -- so a run that
-        # produces nothing still leaves an (empty) file, and 'truncate' still clears the last run's
-        mode = "w" if str(self.settings.get("mode", "append")).lower() == "truncate" else "a"
+        # Created (never emptied) when the workflow is built, so a run that produces nothing still
+        # leaves a file; 'truncate' empties it when a run starts, not before
+        self.truncate = str(self.settings.get("mode", "append")).lower() == "truncate"
         with _line_lock(self.file_name):
-            with open(self.file_name, mode):
+            with open(self.file_name, "a"):
                 pass
+        if self.truncate and hasattr(self.workflow, "add_listener"):
+            self.workflow.add_listener(self._on_workflow_event)
+
+    def _on_workflow_event(self, payload):
+        """Empty the file when the workflow starts a run."""
+        if payload.get("component_id") == self.workflow.id and payload.get("event") == "component_start":
+            self._truncate_for_run()
+
+    def _truncate_for_run(self):
+        """Empty the file, once per run: whichever step writing to it gets there first does it."""
+        run_id = getattr(self.workflow, "run_id", None) or "standalone"
+        with _line_lock(self.file_name):
+            if _truncated_runs.get(self.file_name) != run_id:
+                with open(self.file_name, "w"):
+                    pass
+                _truncated_runs[self.file_name] = run_id
 
     def build_json(self, input: Result):
         """The record for one line: the selected result fields plus any configured source values."""
@@ -638,11 +782,16 @@ class JsonLinesStorage(Storage):
             self.settings.get("fields", None),
             self.settings.get("sources", None),
             self.settings.get("input_source", None),
+            run_id=_run_id_of(self),
         )
 
     def _process(self, input: Result) -> Result:
         """Append the result to the JSON-Lines file, then pass it through unchanged."""
-        line = json.dumps(self.build_json(input), ensure_ascii=False) + "\n"
+        # A RESULT row's timestamps are datetimes; in JSON they are ISO-8601 text
+        record = {k: v.isoformat() if isinstance(v, datetime) else v for k, v in self.build_json(input).items()}
+        line = json.dumps(record, ensure_ascii=False) + "\n"
+        if self.truncate:
+            self._truncate_for_run()  # a no-op once this run has emptied the file
         with _line_lock(self.file_name):
             with open(self.file_name, "a", encoding="utf-8") as fh:
                 fh.write(line)
@@ -787,6 +936,14 @@ class ParquetRecordWriter:
         self._writer = pq.ParquetWriter(self.path, self._schema, compression=self.compression)
 
 
+def _isoformat_rows(records):
+    """``{entity: row}`` with its datetimes as ISO-8601 text, for JSON."""
+    return {
+        entity: {k: v.isoformat() if isinstance(v, datetime) else v for k, v in row.items()}
+        for entity, row in records.items()
+    }
+
+
 def _flush_parquet_at_exit(ref):
     """atexit hook for a ``ParquetStorage``, held weakly so the component can still be collected."""
     storage = ref()
@@ -799,10 +956,14 @@ class ParquetStorage(Storage):
 
     Each result that passes through becomes one row; the file is written when the run finishes (the
     component subscribes to the workflow's ``component_end``/``component_error`` event, so a run that
-    dies part way through still leaves the rows it got to). Columns and their types are inferred from
-    the data unless declared in ``schema``; dicts, lists and columns of mixed types become
-    JSON-encoded text columns, which is what a loader on the far side can parse consistently. See
-    ``ParquetRecordWriter`` for the column kinds and how batching interacts with type inference.
+    dies part way through still leaves the rows it got to). By default each row is a row of the
+    CHAI-TEA RESULT table (see ``result_row``) and the file is typed by that table's columns
+    (``RESULT_COLUMNS``), so it loads into the central database as it stands -- a run that produced
+    nothing still leaves an empty file with those columns. With ``fields`` set, columns and their
+    types are inferred from the data unless declared in ``schema``; dicts, lists and columns of mixed
+    types become JSON-encoded text columns, which is what a loader on the far side can parse
+    consistently. See ``ParquetRecordWriter`` for the column kinds and how batching interacts with
+    type inference.
 
     Unlike ``SqliteStorage`` this stores one row per result and no derivative results: it is a table
     of a run's output, not a browsable object graph. Rows are held in memory until the file is
@@ -817,31 +978,39 @@ class ParquetStorage(Storage):
           ``{timestamp}`` in the path are substituted per run, which is how parallel runs (e.g. the
           slices of a ``SliceIterator``) each get their own file. Without a placeholder, a later run
           of the same workflow overwrites the file.
-        - run_id: identifier for this run, recorded in every row and in the file's metadata
-          (default: a generated hex id, fresh for each run)
-        - run_columns: add the ``run_id`` and ``stored_at`` columns to every row (default true)
-        - constants: ``{column: value}`` written unchanged into every row -- a batch name, a source
-          system, the slice number -- so the loaded table can be filtered by them
-        - schema: ``{column: type}`` declaring the column types and their order, with type one of
-          string, json, int, float, bool, timestamp. Columns not listed are inferred; listed columns
-          missing from the data become null columns, so every run yields the same table
-        - fields: which parts of the result JSON to record -- a list of keys to keep, or a
+        - run_id: identifier for this run, recorded in every row (as ``workflow_run_id``, hashed into
+          a uuid if it is not one) and in the file's metadata (default: the workflow's ``run_id``,
+          fresh for each run)
+        - fields: leave unset for CHAI-TEA RESULT rows, which is what a run's output must be. Set only
+          for a file meant for something else: a list of result-JSON keys to keep, or a
           ``{key: name}`` dict that keeps and renames them, in which a key from ``COMPUTED_FIELDS``
           (``@record``, ``@input_uri``, ``@input_hash``, ``@corrects``) names a column computed from
-          the result rather than read off its JSON (default: the whole result JSON split into its own
-          columns, i.e. id, type, workflowId, processorId, metadata, extraInfo, input and value)
-        - sources: ``{column: component id}`` dict; for each entry, the value of the nearest ancestor
-          result that component produced is recorded in that column (see ``source_value``)
-        - input_source: component id whose result counts as the input for ``@input_uri``/
-          ``@input_hash`` (default: the result's immediate input)
-        - null_if_empty: write an empty dict, list or string as null rather than as ``{}``/``[]``/``""``
-          (default false) -- which is what a table that treats "nothing here" as NULL wants, and what
-          ``SqliteStorage`` and ``PostgresStorage`` do with an empty ``metadata``
+          the result rather than read off its JSON. The settings below marked *fields only* apply
+          only then
+        - constants: ``{key: value}`` recorded in every row -- a batch name, a source system, the slice
+          number -- in its ``extra_data`` (with ``fields`` set: as columns of their own)
+        - sources: ``{key: component id}`` dict; for each entry, the value of the nearest ancestor
+          result that component produced is recorded under *key* (see ``source_value``), in
+          ``extra_data`` (with ``fields`` set: as a column of its own)
+        - input_source: component id whose result counts as the input for ``input``/``input_hash``
+          (default: the component marked ``source: true``, else the result's immediate input)
+        - run_columns (*fields only*): add the ``run_id`` and ``stored_at`` columns to every row
+          (default true)
+        - schema (*fields only*): ``{column: type}`` declaring the column types and their order, with
+          type one of string, json, int, float, bool, timestamp. Columns not listed are inferred;
+          listed columns missing from the data become null columns, so every run yields the same table
+        - null_if_empty (*fields only*): write an empty dict, list or string as null rather than as
+          ``{}``/``[]``/``""`` (default false) -- which is what a table that treats "nothing here" as
+          NULL wants, and what ``SqliteStorage`` and ``PostgresStorage`` do with an empty ``metadata``
         - batch_size: rows to buffer before writing a row group; 0 (the default) writes one row group
           at the end of the run, having inferred the column types from all of it
         - compression: Parquet codec, e.g. 'snappy' (default), 'zstd', 'gzip', 'none'
         - flush_on_exit: also write the file at interpreter exit if the run never ended cleanly
           (default true)
+
+    With RESULT rows the file's metadata also carries ``chai_tea_records``: the PROJECT, WORKFLOW and
+    WORKFLOW_RUN rows of the run as JSON, so a loader can create them before loading the rows that
+    reference them.
     """
 
     def __init__(self, tree, workflow, parent=None):
@@ -852,7 +1021,9 @@ class ParquetStorage(Storage):
         parent_dir = os.path.dirname(self.file_template)
         if parent_dir:
             os.makedirs(parent_dir, exist_ok=True)
-        self.run_columns = self.settings.get("run_columns", True)
+        # Without fields the rows are RESULT rows, whose workflow_run_id already says which run
+        self.result_rows = not self.settings.get("fields")
+        self.run_columns = self.settings.get("run_columns", True) and not self.result_rows
         self._lock = threading.Lock()
         self._writer = None
         self.run_id = None
@@ -867,7 +1038,7 @@ class ParquetStorage(Storage):
 
     def _start_run(self):
         """Pick the run id and resolve the file name for the run that is about to write."""
-        self.run_id = str(self.settings.get("run_id") or uuid.uuid4().hex)
+        self.run_id = str(_run_id_of(self) or uuid.uuid4())
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         self.file_name = self.file_template.replace("{run_id}", self.run_id).replace("{timestamp}", stamp)
         self._run_started = False
@@ -878,6 +1049,9 @@ class ParquetStorage(Storage):
             return
         event = payload.get("event")
         if event == "component_start":
+            if self._writer is None:
+                # The workflow has just picked this run's id; the rows and the file name follow it
+                self._start_run()
             self._run_started = True
         elif event in ("component_end", "component_error"):
             self.close()
@@ -890,7 +1064,15 @@ class ParquetStorage(Storage):
             logger.warning(f"Could not write Parquet file {self.file_name}: {e}")
 
     def build_json(self, input: Result):
-        """The row for one result: the selected result fields, the constants and the run columns."""
+        """The row for one result: a RESULT row, or the selected fields, constants and run columns."""
+        if self.result_rows:
+            return build_record(
+                input,
+                sources=self.settings.get("sources"),
+                input_source=self.settings.get("input_source"),
+                run_id=self.run_id,
+                constants=self.settings.get("constants"),
+            )
         js = build_record(
             input, self.settings.get("fields"), self.settings.get("sources"), self.settings.get("input_source")
         )
@@ -910,6 +1092,8 @@ class ParquetStorage(Storage):
         side, so the constants and run columns belong in it -- otherwise a run that produced no rows
         would leave a file missing columns that every other run has.
         """
+        if self.result_rows:
+            return dict(RESULT_COLUMNS)
         schema = self.settings.get("schema")
         if not schema:
             return None
@@ -942,7 +1126,8 @@ class ParquetStorage(Storage):
         Called automatically when the workflow finishes. Call it directly when results are pushed
         through the component outside a ``Workflow.run``. Afterwards the component starts a new run,
         so re-running the same workflow object writes a fresh file rather than appending to a closed
-        one. A run that produced no rows writes no file unless ``schema`` says what the file holds,
+        one. A run that produced no rows writes no file unless its columns are known -- RESULT rows, or a
+        ``schema`` saying what the file holds --
         in which case it leaves an empty one with those columns.
         """
         with self._lock:
@@ -951,9 +1136,14 @@ class ParquetStorage(Storage):
                 # A run that produced nothing still leaves an empty, correctly typed file when the
                 # schema says what the file holds -- but only for a run that actually happened, so a
                 # second close (the atexit hook after the workflow's own) writes nothing.
-                if not (self._run_started and self.settings.get("schema")):
+                if not (self._run_started and self._declared_schema()):
                     return None
                 writer = self._new_writer()
+            if self.result_rows and hasattr(self.workflow, "records"):
+                # The rows the file's RESULT rows hang under, for whoever loads it: a loader creates
+                # them first (``store_postgres_rows``). With the default single row group the file is
+                # written now, so they include the finished run.
+                writer.metadata["chai_tea_records"] = json.dumps(_json_safe(_isoformat_rows(self.workflow.records())))
             info = writer.close()
             logger.info(f"Wrote {info['rows']} rows to {info['path']}")
             self._start_run()
@@ -976,17 +1166,29 @@ def jsonl_to_parquet(jsonl_file, parquet_file, schema=None, batch_size=50000, co
     JSON-Lines as they are produced, then pack the finished file into Parquet for the bulk load.
     Reads and writes in batches of *batch_size* lines, so neither file is ever fully in memory; as
     with ``ParquetRecordWriter``, the column types come from the first batch unless declared in
-    *schema*. Blank lines are skipped and an unparseable line raises. Returns
+    *schema*. A file of CHAI-TEA RESULT rows (what the storages write by default) is typed by
+    ``RESULT_COLUMNS`` instead, so its JSON columns stay JSON even where every value in them happens to
+    be text. Blank lines are skipped and an unparseable line raises. Returns
     ``{"path", "rows", "columns"}``.
     """
-    writer = ParquetRecordWriter(
-        parquet_file, schema=schema, batch_size=batch_size, compression=compression, metadata=metadata
-    )
+    writer = None
     with open(jsonl_file, encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
-            if line:
-                writer.add(json.loads(line))
+            if not line:
+                continue
+            record = json.loads(line)
+            if writer is None:
+                if schema is None and is_result_row(record):
+                    schema = RESULT_COLUMNS
+                writer = ParquetRecordWriter(
+                    parquet_file, schema=schema, batch_size=batch_size, compression=compression, metadata=metadata
+                )
+            writer.add(record)
+    if writer is None:
+        writer = ParquetRecordWriter(
+            parquet_file, schema=schema, batch_size=batch_size, compression=compression, metadata=metadata
+        )
     return writer.close()
 
 
@@ -1071,7 +1273,7 @@ def token_usage_summary(
                 continue
             step = record.get(step_key) if step_key else None
             if step is None:
-                step = record.get("processorId", record.get("step", "unknown"))
+                step = record.get("process_id", record.get("processorId", record.get("step", "unknown")))
             totals = components.setdefault(str(step), dict.fromkeys(_USAGE_FIELDS, 0))
             _add_usage(totals, *found)
 
@@ -1090,17 +1292,6 @@ def token_usage_summary(
         "records": records,
         "without_usage": without_usage,
     }
-
-
-_PG_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
-
-
-def _pg_identifier(name):
-    """Validate a table or column name coming from configuration before it is put into SQL."""
-    name = str(name)
-    if not _PG_IDENTIFIER.match(name):
-        raise ValueError(f"{name!r} is not a usable PostgreSQL identifier")
-    return name
 
 
 def _pg_driver():
@@ -1126,16 +1317,18 @@ def postgres_params(settings=None, **overrides):
     used instead of the individual keywords. Otherwise ``host``, ``port``, ``database``, ``user`` and
     ``password`` are taken from the settings, falling back to the standard ``PGHOST``/``PGPORT``/
     ``PGDATABASE``/``PGUSER``/``PGPASSWORD`` environment variables and then to localhost:5432 and the
-    ``chai`` database.
+    ``chai`` database. Its own output is accepted too (``dbname``, ``conninfo``), so normalizing
+    settings twice gives the same connection rather than quietly falling back to the default database.
     """
     settings = dict(settings or {})
     settings.update(overrides)
-    if settings.get("dsn"):
-        return {"conninfo": settings["dsn"]}
+    dsn = settings.get("dsn") or settings.get("conninfo")
+    if dsn:
+        return {"conninfo": dsn}
     params = {
         "host": settings.get("host") or os.environ.get("PGHOST") or "localhost",
         "port": int(settings.get("port") or os.environ.get("PGPORT") or 5432),
-        "dbname": settings.get("database") or os.environ.get("PGDATABASE") or "chai",
+        "dbname": settings.get("database") or settings.get("dbname") or os.environ.get("PGDATABASE") or "chai",
     }
     user = settings.get("user") or os.environ.get("PGUSER")
     if user:
@@ -1194,87 +1387,219 @@ def ensure_postgres_database(params=None, **overrides):
     return database
 
 
-def _pg_ensure_schema(conn, table="results", derivatives_table=None):
-    """Create the results/derivatives tables and their indexes in PostgreSQL if they are missing.
+# --------------------------------------------------------------------------------------------------
+# Writing CHAI-TEA rows into a database -- PostgreSQL or SQLite, the same tables either way
+# --------------------------------------------------------------------------------------------------
 
-    The same tabular shape ``_ensure_schema`` builds for SQLite, with ``jsonb`` for the JSON columns.
-    There is no migration from earlier layouts -- a database from before a schema change is dropped
-    and rebuilt.
+#: Nullable references a row may make to a row the database does not hold -- a correction of a result
+#: that was never stored here, an editor with no USER row yet, a workflow version whose predecessor
+#: lives elsewhere. They are written as NULL rather than failing the foreign key and the whole write.
+_SOFT_REFERENCES = {
+    ("RESULT", "previous_id"): "RESULT",
+    ("RESULT", "editor_user_id"): "USER",
+    ("WORKFLOW", "previous_id"): "WORKFLOW",
+}
+
+#: PostgreSQL casts for parameters whose column type text would not convert to implicitly.
+_PG_CASTS = {"UUID": "::uuid", "JSONB": "::jsonb", "TIMESTAMPTZ": "::timestamptz"}
+
+
+def _db_value(value, sql_type, dialect):
+    """*value* as the parameter a *sql_type* column takes in *dialect* ('postgres' or 'sqlite')."""
+    if value is None:
+        return None
+    if sql_type == "JSONB":
+        return json.dumps(_json_safe(value), ensure_ascii=False)
+    if sql_type == "TIMESTAMPTZ":
+        value = _as_datetime(value)
+        if dialect == "sqlite" and value is not None:
+            return value.astimezone(timezone.utc).isoformat()
+        return value
+    if sql_type == "BOOLEAN":
+        return bool(value) if dialect == "postgres" else int(bool(value))
+    if sql_type == "UUID":
+        return as_uuid(value)
+    return value
+
+
+def _upsert_statement(entity, names, dialect):
+    """``INSERT ... ON CONFLICT (id) DO UPDATE`` for every column of *entity*'s table.
+
+    An update keeps the row's ``created`` (and, in PostgreSQL, the schema's trigger sets
+    ``modified``), so storing a row again refreshes it without rewriting its history.
     """
-    table = _pg_identifier(table)
-    derivatives = _pg_identifier(derivatives_table or f"{table}_derivatives")
+    types = column_types(entity)
+    holder = "%s" if dialect == "postgres" else "?"
+    values = []
+    for column, sql_type in types.items():
+        expr = holder + (_PG_CASTS.get(sql_type, "") if dialect == "postgres" else "")
+        target = _SOFT_REFERENCES.get((entity, column))
+        if target:
+            expr = f"(SELECT id FROM {names[target]} WHERE id = {expr})"
+        values.append(expr)
+    updates = ", ".join(f"{column} = excluded.{column}" for column in types if column not in ("id", "created"))
+    return (
+        f"INSERT INTO {names[entity]} ({', '.join(types)}) VALUES ({', '.join(values)}) "
+        f"ON CONFLICT (id) DO UPDATE SET {updates}"
+    )
+
+
+def write_rows(cursor, dialect, names, records):
+    """Upsert CHAI-TEA rows: *records* is ``{entity: row or [rows]}``, written parents first.
+
+    Each row must have exactly its table's columns (``Record.to_row``, ``Workflow.to_row``,
+    ``result_row``). Returns the number of rows written. The caller commits.
+    """
+    written = 0
+    for entity in TABLE_ORDER:
+        rows = records.get(entity)
+        if not rows:
+            continue
+        if isinstance(rows, dict):
+            rows = [rows]
+        types = column_types(entity)
+        sql = _upsert_statement(entity, names, dialect)
+        for row in rows:
+            if set(row) != set(types):
+                raise ValueError(
+                    f"A {entity} row must have exactly the columns {', '.join(types)}; got {', '.join(row)}"
+                )
+            cursor.execute(sql, [_db_value(row[column], sql_type, dialect) for column, sql_type in types.items()])
+            written += 1
+    return written
+
+
+def _pg_ensure_chai_tea(conn, tables=None):
+    """Create the CHAI-TEA tables in *conn*'s database unless they are all there; returns their names.
+
+    A table of one of the names that has other columns -- the pre-CHAI-TEA ``results`` table, say --
+    raises rather than being written into (see ``chai.schema.check_for_clashes``).
+    """
+    names = table_names(tables)
+    check_for_clashes(conn, names)
     cursor = conn.cursor()
-    cursor.execute(f"""
-        CREATE TABLE IF NOT EXISTS {table} (
-            id TEXT PRIMARY KEY,
-            processor_id TEXT,
-            workflow_id TEXT,
-            value_json JSONB,
-            metadata_json JSONB,
-            extra_json JSONB,
-            input_uri TEXT,
-            input_hash TEXT,
-            input_locator JSONB,
-            corrects_id TEXT,
-            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cursor.execute(f"""
-        CREATE TABLE IF NOT EXISTS {derivatives} (
-            id TEXT PRIMARY KEY,
-            source_id TEXT,
-            component_id TEXT,
-            result_json JSONB,
-            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_processor ON {table}(processor_id)")
-    cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_workflow ON {table}(workflow_id)")
-    cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_corrects ON {table}(corrects_id)")
-    cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_input_hash ON {table}(input_hash)")
-    cursor.execute(f"CREATE INDEX IF NOT EXISTS idx_{derivatives}_source ON {derivatives}(source_id)")
+    cursor.execute(
+        "SELECT count(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = ANY(%s)",
+        (list(names.values()),),
+    )
+    if cursor.fetchone()[0] < len(names):
+        for statement in schema_statements(tables):
+            cursor.execute(statement)
     conn.commit()
-    return table, derivatives
+    return names
 
 
-def ensure_postgres_schema(params=None, table="results", derivatives_table=None, create_database=True, **overrides):
-    """Create the chai tables (and, unless told not to, the database) in PostgreSQL; returns the names.
+def ensure_postgres_schema(params=None, tables=None, create_database=True, **overrides):
+    """Create the CHAI-TEA tables (and, unless told not to, the database) in PostgreSQL; returns the names.
 
     Lets an app -- or the loader that follows a Parquet upload -- prepare the tables before anything
-    has run, the PostgreSQL counterpart of ``ensure_database``.
+    has run, the PostgreSQL counterpart of ``ensure_database``. *tables* overrides table names.
     """
     params = postgres_params(params, **overrides)
     if create_database:
         ensure_postgres_database(params)
     conn = _pg_connect(params)
     try:
-        return _pg_ensure_schema(conn, table, derivatives_table)
+        return _pg_ensure_chai_tea(conn, tables)
     finally:
         conn.close()
 
 
-class PostgresStorage(Storage):
-    """Store results in PostgreSQL, in the same shape ``SqliteStorage`` uses for SQLite.
+def store_postgres_rows(records, params=None, tables=None, create_schema=True, **overrides):
+    """Upsert ``{entity: row or [rows]}`` into the CHAI-TEA tables in PostgreSQL; returns the count.
 
-    Writes the input Result into a ``results`` table and each of its ``derivative_results`` into a
-    ``results_derivatives`` table keyed by source result and component. ``value_json`` holds the full
-    bytes-safe ``to_json(recurse=False)`` representation (id, type, value, metadata, provenance), with
-    ``metadata_json``/``extra_json`` as dedicated columns for querying -- the JSON columns are
-    ``jsonb``, so they can be indexed and queried in place. ``input_uri`` and ``input_hash`` record
-    the file or URI the result was generated from and the md5 of that input's content, and
-    ``corrects_id`` points at the row this result corrects, if it is a correction of one (see
-    ``correction_target`` and ``save_correction``) -- corrections are entries in the table like any
-    other, so the agent that made one, human or model, is described by that entry's own metadata. The
-    ``processor_id``/``workflow_id`` columns are the ones in ``value_json``, so a result made by a
-    component of a workflow counts as that workflow's even when nothing stamped the workflow onto the
-    result itself. Storing a result again is an upsert that keeps the original ``created_at`` and the
-    rows correcting it. The input is returned unchanged.
+    How rows made elsewhere get in: ``workflow.records()`` before ``parquet_to_postgres`` loads a run's
+    RESULT rows, say, so the rows they reference are there first.
+    """
+    params = postgres_params(params, **overrides)
+    if create_schema:
+        ensure_postgres_database(params)
+    conn = _pg_connect(params)
+    try:
+        names = _pg_ensure_chai_tea(conn, tables) if create_schema else table_names(tables)
+        written = write_rows(conn.cursor(), "postgres", names, records)
+        conn.commit()
+        return written
+    finally:
+        conn.close()
+
+
+class _ChaiTeaStorage(Storage):
+    """What ``SqliteStorage`` and ``PostgresStorage`` share: writing a run into the CHAI-TEA tables.
+
+    Each result becomes a RESULT row (``result_row``), and so does each of its ``derivative_results``
+    -- a derivative is a result like any other. The first time a run writes, the rows its results
+    hang under go first: the workflow's PROJECT, WORKFLOW and WORKFLOW_RUN (``Workflow.records``).
+    When the run ends the WORKFLOW_RUN row is written again, now with its outcome and duration.
+    """
+
+    dialect = ""
+
+    def __init__(self, tree, workflow, parent=None):
+        super().__init__(tree, workflow, parent)
+        self.tables = self.settings.get("tables") or None
+        self.names = table_names(self.tables)
+        self._lock = threading.Lock()
+        self._run_written = None
+        if hasattr(self.workflow, "add_listener"):  # a Workflow; record the run's outcome when it ends
+            self.workflow.add_listener(self._on_workflow_event)
+
+    def _on_workflow_event(self, payload):
+        if payload.get("component_id") == self.workflow.id and payload.get("event") in (
+            "component_end",
+            "component_error",
+        ):
+            self._end_run()
+
+    def records_for(self, input: Result):
+        """The rows storing *input* writes: its RESULT row and its derivatives', and the run's if new."""
+        run_id = getattr(self.workflow, "run_id", None)
+        if run_id is None or not hasattr(self.workflow, "records"):
+            raise ValueError(f"{self} must be part of a Workflow: every RESULT row belongs to a WORKFLOW_RUN")
+        with_hash = self.settings.get("hash_input", True)
+        rows = [result_row(input, run_id, input_source=self.settings.get("input_source"), with_hash=with_hash)]
+        for results in input.derivative_results.values():
+            rows.extend(result_row(result, run_id, with_hash=with_hash) for result in results)
+        records = {"RESULT": rows}
+        if self._run_written != run_id:
+            records.update(self.workflow.records())
+        return records
+
+    def _write(self, records):
+        raise NotImplementedError
+
+    def _end_run(self):
+        """Write the finished WORKFLOW_RUN (and WORKFLOW) rows for a run this storage wrote into."""
+        with self._lock:
+            if self._run_written is not None and self._run_written == self.workflow.run_id:
+                records = self.workflow.records()
+                self._write({"WORKFLOW": records["WORKFLOW"], "WORKFLOW_RUN": records["WORKFLOW_RUN"]})
+
+    def _process(self, input: Result) -> Result:
+        with self._lock:
+            records = self.records_for(input)
+            self._write(records)
+            self._run_written = self.workflow.run_id
+        return input
+
+
+class PostgresStorage(_ChaiTeaStorage):
+    """Store results in PostgreSQL, in the CHAI-TEA schema (``chai.schema``).
+
+    Each result is a row of the RESULT table and each of its derivatives another; the run's PROJECT,
+    WORKFLOW and WORKFLOW_RUN rows are written before its first result and the WORKFLOW_RUN row again
+    when it ends (see ``_ChaiTeaStorage``). Every value comes from the objects themselves -- the
+    workflow's name, description and project, the run's timing and outcome, each result's
+    timestamps -- so the rows are the same ones ``JsonLinesStorage``/``ParquetStorage`` write to
+    files. Storing a result again is an upsert that keeps its ``created``; a correction is a row of its
+    own whose ``previous_id`` is the row it corrects (see ``save_postgres_correction``).
 
     The database and the tables are created on first use if they are missing, so a workflow can be
-    pointed at a fresh server. One connection is held per component and shared by the run's threads
-    under a lock (an ``Iterator`` with ``workers`` serializes on it); a broken connection is reopened
-    on the next result rather than failing the run, and the connection is given back when the run
-    ends (``close`` does it by hand for results pushed through outside a ``Workflow.run``).
+    pointed at a fresh server; a database holding a table of the same name in another layout is
+    refused rather than written into. One connection is held per component and shared by the run's
+    threads under a lock (an ``Iterator`` with ``workers`` serializes on it); a broken connection is
+    reopened on the next result rather than failing the run, and the connection is given back when the
+    run ends (``close`` does it by hand for results pushed through outside a ``Workflow.run``).
 
     Needs psycopg (version 3, or psycopg2), imported when the first result is written.
 
@@ -1282,9 +1607,9 @@ class PostgresStorage(Storage):
         - dsn: full connection string or ``postgresql://`` URL; overrides the keywords below
         - host / port / database / user / password: connection keywords, defaulting to the
           ``PG*`` environment variables and then to localhost:5432 and the ``chai`` database
-        - table: name of the results table (default 'results')
-        - derivatives_table: name of the derivatives table (default '<table>_derivatives')
+        - tables: ``{entity: table name}`` overriding the CHAI-TEA table names (``chai.schema.TABLES``)
         - create_database: create the database if the server does not have it yet (default true)
+        - create_schema: create the CHAI-TEA tables if they are missing (default true)
         - input_source: component id whose result counts as the input the row was generated from,
           overriding the component marked ``source: true`` (default: the marked component's result,
           or the result's immediate input when nothing is marked)
@@ -1292,25 +1617,12 @@ class PostgresStorage(Storage):
           read it would need
     """
 
+    dialect = "postgres"
+
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)
         self.params = postgres_params(self.settings)
-        self.table = _pg_identifier(self.settings.get("table", "results"))
-        self.derivatives_table = _pg_identifier(
-            self.settings.get("derivatives_table") or f"{self.table}_derivatives"
-        )
-        self._lock = threading.Lock()
         self._conn = None
-        if hasattr(self.workflow, "add_listener"):  # a Workflow; give the connection back when it ends
-            self.workflow.add_listener(self._on_workflow_event)
-
-    def _on_workflow_event(self, payload):
-        """Close the connection when the workflow finishes, rather than holding it until collection."""
-        if payload.get("component_id") == self.workflow.id and payload.get("event") in (
-            "component_end",
-            "component_error",
-        ):
-            self.close()
 
     def _connection(self):
         """The component's connection, opened (and the schema ensured) on first use."""
@@ -1318,91 +1630,92 @@ class PostgresStorage(Storage):
             if self.settings.get("create_database", True):
                 ensure_postgres_database(self.params)
             self._conn = _pg_connect(self.params)
-            _pg_ensure_schema(self._conn, self.table, self.derivatives_table)
+            if self.settings.get("create_schema", True):
+                _pg_ensure_chai_tea(self._conn, self.tables)
         return self._conn
 
     def close(self):
         """Close the connection; the next result opens a new one."""
         with self._lock:
-            conn, self._conn = self._conn, None
-            if conn is not None:
-                try:
-                    conn.close()
-                except Exception:  # pragma: no cover - already broken
-                    pass
+            self._close_connection()
 
-    def _store(self, input: Result):
-        """Upsert the result and its derivatives; assumes the caller holds the lock."""
-        conn = self._connection()
-        cursor = conn.cursor()
-        # The dedicated columns come out of the stored JSON, so a row cannot say one thing in
-        # value_json and another in the column a query filters on
-        js = self.build_json(input)
-        provenance = input_provenance(
-            input, self.settings.get("input_source"), self.settings.get("hash_input", True)
-        )
-        cursor.execute(
-            f"""
-            INSERT INTO {self.table}
-            (id, processor_id, workflow_id, value_json, metadata_json, extra_json,
-             input_uri, input_hash, input_locator, corrects_id)
-            VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s, %s::jsonb, %s)
-            ON CONFLICT (id) DO UPDATE SET
-                processor_id = excluded.processor_id,
-                workflow_id = excluded.workflow_id,
-                value_json = excluded.value_json,
-                metadata_json = excluded.metadata_json,
-                extra_json = excluded.extra_json,
-                input_uri = excluded.input_uri,
-                input_hash = excluded.input_hash,
-                input_locator = excluded.input_locator,
-                corrects_id = excluded.corrects_id
-            """,
-            (
-                input.id,
-                js.get("processorId"),
-                js.get("workflowId"),
-                json.dumps(js),
-                json.dumps(_json_safe(input.metadata)) if input.metadata else None,
-                json.dumps(_json_safe(input.extra)) if input.extra else None,
-                provenance["uri"],
-                provenance["hash"],
-                json.dumps(provenance["locator"]) if provenance["locator"] else None,
-                correction_target(input),
-            ),
-        )
-        for component, results in input.derivative_results.items():
-            for result in results:
-                cursor.execute(
-                    f"""
-                    INSERT INTO {self.derivatives_table} (id, source_id, component_id, result_json)
-                    VALUES (%s, %s, %s, %s::jsonb)
-                    ON CONFLICT (id) DO UPDATE SET
-                        source_id = excluded.source_id,
-                        component_id = excluded.component_id,
-                        result_json = excluded.result_json
-                    """,
-                    (result.id, input.id, component.id, json.dumps(result_to_json(result))),
-                )
-        conn.commit()
-
-    def _process(self, input: Result) -> Result:
-        """Store the result in PostgreSQL"""
-        with self._lock:
+    def _close_connection(self):
+        conn, self._conn = self._conn, None
+        if conn is not None:
             try:
-                self._store(input)
-            except Exception:
-                # A connection that died between results (server restart, idle timeout) should cost
-                # one result at most, not the rest of the run
-                conn, self._conn = self._conn, None
-                if conn is None:
-                    raise
-                try:
-                    conn.close()
-                except Exception:  # pragma: no cover - already broken
-                    pass
-                self._store(input)
-        return input
+                conn.close()
+            except Exception:  # pragma: no cover - already broken
+                pass
+
+    def _write_once(self, records):
+        conn = self._connection()
+        try:
+            write_rows(conn.cursor(), self.dialect, self.names, records)
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:  # pragma: no cover - the connection is gone
+                pass
+            raise
+
+    def _write(self, records):
+        """Write *records*; assumes the caller holds the lock."""
+        try:
+            self._write_once(records)
+        except Exception:
+            # A connection that died between results (server restart, idle timeout) should cost one
+            # retry, not the rest of the run; a fresh connection fails the same way on a real error
+            if self._conn is None or not getattr(self._conn, "closed", False):
+                raise
+            self._close_connection()
+            self._write_once(records)
+
+    def _end_run(self):
+        try:
+            super()._end_run()
+        finally:
+            self.close()
+
+
+def correction_row(original, corrected_value, metadata=None, process_id=None, editor_user_id=None):
+    """A RESULT row correcting the stored row *original*: a new entry pointing back at it.
+
+    The correction belongs to the same run and was made from the same input (``input``,
+    ``input_hash``, ``input_segment``, ``input_sequence`` are the original's), its ``value`` is what
+    the original should have said, its ``previous_id`` is the original and its ``metadata`` says who
+    made it. *process_id* names the component that made it, if one did; *editor_user_id* the USER who
+    did, if a person did (it is stored only if that USER row exists).
+    """
+    stamp = now()
+    row = {
+        "id": str(uuid.uuid4()),
+        "workflow_run_id": original["workflow_run_id"],
+        "process_id": process_id,
+        "input": original.get("input"),
+        "input_hash": original.get("input_hash"),
+        "input_segment": original.get("input_segment"),
+        "input_sequence": original.get("input_sequence"),
+        "was_successful": True,
+        "value": _json_safe(corrected_value),
+        "metadata": _json_safe(metadata) if metadata else None,
+        "extra_data": None,
+        "previous_id": original["id"],
+        "editor_user_id": as_uuid(editor_user_id),
+        "md_cost": None,
+        "md_duration": None,
+        "md_timestamp": stamp,
+        "created": stamp,
+        "modified": stamp,
+    }
+    return {column: row[column] for column in column_types("RESULT")}
+
+
+def _correction_metadata(agent, metadata):
+    metadata = dict(metadata or {})
+    if agent is not None:
+        metadata.setdefault("agent", agent)
+    return metadata
 
 
 def save_postgres_correction(
@@ -1410,58 +1723,35 @@ def save_postgres_correction(
     corrected_value,
     agent=None,
     metadata=None,
-    processor_id=None,
+    process_id=None,
+    editor_user_id=None,
     params=None,
-    table="results",
+    tables=None,
     **overrides,
 ):
-    """Record a correction of *result_id* in PostgreSQL as a new row pointing back at it.
+    """Record a correction of *result_id* in PostgreSQL as a new RESULT row pointing back at it.
 
     The PostgreSQL counterpart of ``save_correction``: the original row is never touched, the
-    correction is an entry of its own whose ``corrects_id`` is the corrected row and whose metadata
-    says who made it -- *agent* (the person or model, recorded as ``metadata['agent']``) plus
-    anything else in *metadata*. The correction inherits the original's ``input_uri``/``input_hash``.
-    Returns the new row's id, or ``None`` if *result_id* is not in the table.
+    correction is an entry of its own whose ``previous_id`` is the corrected row and whose metadata
+    says who made it -- *agent* (the person or model, recorded as ``metadata['agent']``) plus anything
+    else in *metadata*. See ``correction_row``. Returns the new row's id, or ``None`` if *result_id*
+    is not in the table.
     """
-    table = _pg_identifier(table)
+    names = table_names(tables)
     conn = _pg_connect(postgres_params(params, **overrides))
     try:
         cursor = conn.cursor()
-        cursor.execute(
-            f"SELECT workflow_id, input_uri, input_hash, input_locator FROM {table} WHERE id = %s",
-            (result_id,),
-        )
-        row = cursor.fetchone()
-        if row is None:
+        columns = list(column_types("RESULT"))
+        cursor.execute(f"SELECT {', '.join(columns)} FROM {names['RESULT']} WHERE id = %s::uuid", (as_uuid(result_id),))
+        found = cursor.fetchone()
+        if found is None:
             return None
-        workflow_id, input_uri, input_hash, locator = row
-        metadata = dict(metadata or {})
-        if agent is not None:
-            metadata.setdefault("agent", agent)
-        correction_id, value_json = correction_json(
-            result_id, corrected_value, metadata=metadata, processor_id=processor_id, workflow_id=workflow_id
-        )
-        cursor.execute(
-            f"""
-            INSERT INTO {table}
-            (id, processor_id, workflow_id, value_json, metadata_json,
-             input_uri, input_hash, input_locator, corrects_id)
-            VALUES (%s, %s, %s, %s::jsonb, %s::jsonb, %s, %s, %s::jsonb, %s)
-            """,
-            (
-                correction_id,
-                processor_id,
-                workflow_id,
-                json.dumps(value_json),
-                json.dumps(_json_safe(metadata)) if metadata else None,
-                input_uri,
-                input_hash,
-                json.dumps(locator) if locator else None,
-                result_id,
-            ),
-        )
+        original = {column: (str(value) if column.endswith("id") and value is not None else value)
+                    for column, value in zip(columns, found)}
+        row = correction_row(original, corrected_value, _correction_metadata(agent, metadata), process_id, editor_user_id)
+        write_rows(cursor, "postgres", names, {"RESULT": row})
         conn.commit()
-        return correction_id
+        return row["id"]
     finally:
         conn.close()
 
@@ -1588,60 +1878,39 @@ def _pg_copy_rows(cursor, table, quoted, names, records, kinds):
     return len(values)
 
 
-def _ensure_schema(conn):
-    """Create the ``results``/``derivatives`` tables and their indexes if they are missing.
+def _ensure_schema(conn, tables=None):
+    """Create the CHAI-TEA tables in a SQLite database if they are missing; returns their names.
 
-    The results table is the tabular shape both SQLite and PostgreSQL storage use: one row per
-    result, ``input_uri``/``input_hash``/``input_locator`` saying what it was generated from and
-    where in that input it is, and ``corrects_id`` pointing at the row this one corrects (see
-    ``save_correction``). There is no migration from
-    earlier layouts -- a database from before a schema change is deleted and rebuilt.
+    The same tables as in PostgreSQL (``chai.schema.sqlite_statements``). A table of one of the names
+    with other columns -- the pre-CHAI-TEA ``results`` table, say -- raises rather than being written
+    into: there is no migration from earlier layouts, so delete the database and re-run.
     """
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS results (
-            id TEXT PRIMARY KEY,
-            processor_id TEXT,
-            workflow_id TEXT,
-            value_json TEXT,
-            metadata_json TEXT,
-            extra_json TEXT,
-            input_uri TEXT,
-            input_hash TEXT,
-            input_locator TEXT,
-            corrects_id TEXT,
-            -- millisecond resolution, so results (and the corrections of one) sort in the order
-            -- they were made rather than tying on the second
-            created_at TIMESTAMP DEFAULT (strftime('%Y-%m-%d %H:%M:%f', 'now'))
-        )
-    """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS derivatives (
-            id TEXT PRIMARY KEY,
-            source_id TEXT,
-            component_id TEXT,
-            result_json TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_results_processor ON results(processor_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_results_workflow ON results(workflow_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_results_corrects ON results(corrects_id)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_results_input_hash ON results(input_hash)")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_derivatives_source ON derivatives(source_id)")
+    names = table_names(tables)
+    for entity, table in names.items():
+        columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        expected = set(column_types(entity))
+        if columns and not expected <= columns:
+            raise RuntimeError(
+                f"Table {table} already exists and is not the CHAI-TEA {entity} table "
+                f"(no {', '.join(sorted(expected - columns)[:3])} column). Delete the database and re-run."
+            )
+    for statement in sqlite_statements(tables):
+        conn.execute(statement)
     conn.commit()
+    return names
 
 
-def _connect(database):
-    """Open a fresh connection to *database* with the schema ensured and dict-style row access."""
+def _connect(database, tables=None):
+    """A fresh connection to *database*: schema ensured, foreign keys enforced, dict-style rows."""
     conn = sqlite3.connect(database)
     conn.row_factory = sqlite3.Row
-    _ensure_schema(conn)
+    conn.execute("PRAGMA foreign_keys = ON")
+    _ensure_schema(conn, tables)
     return conn
 
 
 def _loads(text):
-    """Parse a JSON column value, passing ``None`` through and tolerating non-JSON legacy content."""
+    """Parse a JSON column value, passing ``None`` through and tolerating non-JSON content."""
     if text is None:
         return None
     try:
@@ -1650,151 +1919,111 @@ def _loads(text):
         return text
 
 
-def _row_to_dict(row):
-    """Convert a ``results`` row into the dict shape returned by the viewer helpers."""
-    keys = row.keys()
-    js = {
-        "id": row["id"],
-        "processor_id": row["processor_id"],
-        "workflow_id": row["workflow_id"],
-        "value": _loads(row["value_json"]),
-        "metadata": _loads(row["metadata_json"]),
-        "extra": _loads(row["extra_json"]),
-        "input_uri": row["input_uri"],
-        "input_hash": row["input_hash"],
-        "input_locator": _loads(row["input_locator"]),
-        "corrects_id": row["corrects_id"],
-        "created_at": row["created_at"],
-    }
-    if "correction_count" in keys:
+def _row_to_dict(row, entity="RESULT"):
+    """A stored row as a dict of its columns, JSON parsed and booleans as booleans.
+
+    A RESULT row from the viewer helpers' query also has ``correction_count`` and ``corrected``,
+    saying how many rows correct it.
+    """
+    js = {}
+    for column, sql_type in column_types(entity).items():
+        value = row[column]
+        if sql_type == "JSONB":
+            value = _loads(value)
+        elif sql_type == "BOOLEAN" and value is not None:
+            value = bool(value)
+        js[column] = value
+    if "correction_count" in row.keys():
         js["correction_count"] = row["correction_count"]
         js["corrected"] = row["correction_count"] > 0
     return js
 
 
-def ensure_database(database):
-    """Create *database* (and its parent directory) with the chai schema if missing; returns the path.
+def ensure_database(database, tables=None):
+    """Create *database* (and its parent directory) with the CHAI-TEA tables if missing; returns the path.
 
     Lets an app pre-build its results database so storage viewers work before the first run.
     """
     parent = os.path.dirname(database)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    _connect(database).close()
+    _connect(database, tables).close()
     return database
 
 
-def store_json_result(
-    database,
-    result_id,
-    value,
-    processor_id=None,
-    workflow_id=None,
-    metadata=None,
-    input_uri=None,
-    input_hash=None,
-    input_locator=None,
-    corrects_id=None,
-):
-    """Insert/refresh one result row from already-serialized JSON values.
+def store_rows(database, records, tables=None):
+    """Upsert ``{entity: row or [rows]}`` into the CHAI-TEA tables of a SQLite database; returns the count.
 
-    The viewer-side counterpart of ``SqliteStorage._process`` for callers that hold a run's
-    serialized output (dicts) rather than live ``Result`` objects -- e.g. a front-end persisting
-    run results into its app-local database. Re-storing a result keeps its original ``created_at``
-    and leaves any correction rows pointing at it untouched.
+    The viewer-side counterpart of ``SqliteStorage`` for callers that hold a run's rows (from
+    ``workflow.records()``, ``result_row``, a JSON-Lines file) rather than live ``Result`` objects --
+    e.g. a front-end persisting run results into its app-local database. Storing a row again keeps its
+    ``created`` and leaves any correction rows pointing at it untouched.
     """
-    conn = _connect(database)
+    conn = _connect(database, tables)
     try:
-        conn.execute(
-            """
-            INSERT INTO results
-            (id, processor_id, workflow_id, value_json, metadata_json,
-             input_uri, input_hash, input_locator, corrects_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                processor_id = excluded.processor_id,
-                workflow_id = excluded.workflow_id,
-                value_json = excluded.value_json,
-                metadata_json = excluded.metadata_json,
-                input_uri = excluded.input_uri,
-                input_hash = excluded.input_hash,
-                input_locator = excluded.input_locator,
-                corrects_id = excluded.corrects_id
-            """,
-            (
-                result_id,
-                processor_id,
-                workflow_id,
-                json.dumps(_json_safe(value)),
-                json.dumps(_json_safe(metadata)) if metadata else None,
-                input_uri,
-                input_hash,
-                json.dumps(_json_safe(input_locator)) if input_locator else None,
-                corrects_id,
-            ),
-        )
+        written = write_rows(conn.cursor(), "sqlite", table_names(tables), records)
         conn.commit()
+        return written
     finally:
         conn.close()
-    return True
 
 
-#: Every results column plus the number of rows correcting each one, for the viewer helpers.
-_RESULTS_SELECT = (
-    "SELECT r.*, (SELECT COUNT(*) FROM results c WHERE c.corrects_id = r.id) AS correction_count FROM results r"
-)
+def _results_select(names):
+    """Every RESULT column plus the number of rows correcting each one, for the viewer helpers."""
+    table = names["RESULT"]
+    return f"SELECT r.*, (SELECT COUNT(*) FROM {table} c WHERE c.previous_id = r.id) AS correction_count FROM {table} r"
 
 
 def list_results(
-    database, processor_id=None, workflow_id=None, input_hash=None, corrects_id=None, limit=100, offset=0
+    database, process_id=None, workflow_run_id=None, input_hash=None, previous_id=None, limit=100, offset=0
 ):
-    """Return stored results as a list of dicts, newest first.
+    """Return stored RESULT rows as a list of dicts, newest first.
 
-    Each dict has ``id``, ``processor_id``, ``workflow_id``, ``value`` (parsed JSON), ``metadata``,
-    ``extra``, ``input_uri``, ``input_hash``, ``corrects_id``, ``created_at``, and the
-    ``correction_count``/``corrected`` pair saying how many rows correct this one. Corrections are
-    rows like any other, so they are listed too; pass *corrects_id* to list only the corrections of
+    Each dict has the RESULT columns (``value``, ``metadata``, ``extra_data`` parsed from JSON) and
+    the ``correction_count``/``corrected`` pair saying how many rows correct this one. Corrections are
+    rows like any other, so they are listed too; pass *previous_id* to list only the corrections of
     one result, or *input_hash* for every entry generated from the same input content. Optionally
-    filter by *processor_id* and/or *workflow_id*; page with *limit*/*offset*.
+    filter by *process_id* and/or *workflow_run_id*; page with *limit*/*offset*.
     """
-    sql = _RESULTS_SELECT
+    names = table_names()
+    sql = _results_select(names)
     clauses, params = [], []
     for column, value in (
-        ("processor_id", processor_id),
-        ("workflow_id", workflow_id),
+        ("process_id", process_id),
+        ("workflow_run_id", workflow_run_id),
         ("input_hash", input_hash),
-        ("corrects_id", corrects_id),
+        ("previous_id", previous_id),
     ):
         if value is not None:
             clauses.append(f"r.{column} = ?")
             params.append(value)
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
-    sql += " ORDER BY r.created_at DESC, r.id LIMIT ? OFFSET ?"
+    sql += " ORDER BY r.created DESC, r.id LIMIT ? OFFSET ?"
     params.extend([limit, offset])
     conn = _connect(database)
     try:
-        rows = conn.execute(sql, params).fetchall()
-        return [_row_to_dict(row) for row in rows]
+        return [_row_to_dict(row) for row in conn.execute(sql, params).fetchall()]
     finally:
         conn.close()
 
 
 def get_result(database, result_id, with_corrections=True):
-    """Return a single stored result as a dict (see ``list_results``), or ``None`` if not found.
+    """Return one stored RESULT row as a dict (see ``list_results``), or ``None`` if not found.
 
     Unless *with_corrections* is false the dict also has ``corrections``: the rows that correct this
     one, oldest first, each carrying the metadata of whoever made it.
     """
+    names = table_names()
     conn = _connect(database)
     try:
-        row = conn.execute(f"{_RESULTS_SELECT} WHERE r.id = ?", (result_id,)).fetchone()
+        row = conn.execute(f"{_results_select(names)} WHERE r.id = ?", (as_uuid(result_id),)).fetchone()
         if row is None:
             return None
         js = _row_to_dict(row)
         if with_corrections:
             corrections = conn.execute(
-                f"{_RESULTS_SELECT} WHERE r.corrects_id = ? ORDER BY r.created_at, r.id", (result_id,)
+                f"{_results_select(names)} WHERE r.previous_id = ? ORDER BY r.created, r.id", (js["id"],)
             ).fetchall()
             js["corrections"] = [_row_to_dict(correction) for correction in corrections]
         return js
@@ -1802,107 +2031,54 @@ def get_result(database, result_id, with_corrections=True):
         conn.close()
 
 
-def correction_json(result_id, corrected_value, metadata=None, processor_id=None, workflow_id=None):
-    """The ``(id, value_json)`` pair for a correction of *result_id*, shaped like a stored result.
+def save_correction(
+    database, result_id, corrected_value, agent=None, metadata=None, process_id=None, editor_user_id=None
+):
+    """Record a correction of *result_id* as a new RESULT row pointing back at it; returns the new row's id.
 
-    A correction is an entry in its own right: its ``input`` is the result it corrects, its ``value``
-    is what that result should have said, and its ``metadata`` says who made it -- so the shape a
-    viewer reads for a result works unchanged for a correction of one.
-    """
-    correction_id = str(uuid.uuid4())
-    return correction_id, {
-        "id": correction_id,
-        "type": "Correction",
-        "workflowId": workflow_id,
-        "processorId": processor_id,
-        "metadata": _json_safe(metadata or {}),
-        "extraInfo": {"corrects": result_id},
-        "input": result_id,
-        "value": _json_safe(corrected_value),
-    }
-
-
-def save_correction(database, result_id, corrected_value, agent=None, metadata=None, processor_id=None):
-    """Record a correction of *result_id* as a new row pointing back at it; returns the new row's id.
-
-    The original is never touched: the correction is stored as its own entry whose ``corrects_id`` is
+    The original is never touched: the correction is stored as its own entry whose ``previous_id`` is
     the corrected row, so a result can be corrected more than once and each correction keeps its own
     metadata -- *agent* (the person or model that made it, recorded as ``metadata['agent']``) and
     anything else in *metadata*, e.g. who reviewed it, why, or which model and prompt produced it.
-    The correction inherits the original's ``input_uri``/``input_hash``, since it is a correction of
-    what was made from that same input. Returns ``None`` if *result_id* is not in the database.
+    See ``correction_row``. Returns ``None`` if *result_id* is not in the database.
     """
-    conn = _connect(database)
-    try:
-        row = conn.execute(
-            "SELECT workflow_id, input_uri, input_hash, input_locator FROM results WHERE id = ?",
-            (result_id,),
-        ).fetchone()
-        if row is None:
-            return None
-        metadata = dict(metadata or {})
-        if agent is not None:
-            metadata.setdefault("agent", agent)
-        correction_id, value_json = correction_json(
-            result_id, corrected_value, metadata=metadata, processor_id=processor_id, workflow_id=row["workflow_id"]
-        )
-        conn.execute(
-            """
-            INSERT INTO results
-            (id, processor_id, workflow_id, value_json, metadata_json,
-             input_uri, input_hash, input_locator, corrects_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                correction_id,
-                processor_id,
-                row["workflow_id"],
-                json.dumps(value_json),
-                json.dumps(_json_safe(metadata)) if metadata else None,
-                row["input_uri"],
-                row["input_hash"],
-                row["input_locator"],
-                result_id,
-            ),
-        )
-        conn.commit()
-        return correction_id
-    finally:
-        conn.close()
+    original = get_result(database, result_id, with_corrections=False)
+    if original is None:
+        return None
+    row = correction_row(original, corrected_value, _correction_metadata(agent, metadata), process_id, editor_user_id)
+    store_rows(database, {"RESULT": row})
+    return row["id"]
 
 
 def list_processors(database):
-    """Return the distinct ``processor_id`` values with their row counts.
+    """Return the distinct ``process_id`` values with their row counts.
 
-    Each entry is ``{"processor_id": ..., "count": ...}``, ordered by processor id.
+    Each entry is ``{"process_id": ..., "count": ...}``, ordered by process id.
     """
+    table = table_names()["RESULT"]
     conn = _connect(database)
     try:
         rows = conn.execute(
-            "SELECT processor_id, COUNT(*) AS count FROM results GROUP BY processor_id ORDER BY processor_id"
+            f"SELECT process_id, COUNT(*) AS count FROM {table} GROUP BY process_id ORDER BY process_id"
         ).fetchall()
-        return [{"processor_id": row["processor_id"], "count": row["count"]} for row in rows]
+        return [{"process_id": row["process_id"], "count": row["count"]} for row in rows]
     finally:
         conn.close()
 
 
-class SqliteStorage(Storage):
-    """Store results in a SQLite database.
+class SqliteStorage(_ChaiTeaStorage):
+    """Store results in a SQLite database, in the CHAI-TEA schema (``chai.schema``).
 
-    Writes the input Result into a ``results`` table and each of its ``derivative_results`` into a
-    ``derivatives`` table keyed by source result and component. ``value_json`` holds the full
-    bytes-safe ``to_json(recurse=False)`` representation (id, type, value, metadata, provenance), so a
-    viewer app can reconstruct what was produced; ``metadata_json``/``extra_json`` are kept as
-    dedicated columns for querying. ``input_uri`` and ``input_hash`` record the file or URI the
-    result was generated from and the md5 of that input's content, and ``corrects_id`` points at the
-    row this result corrects, if it is a correction of one (see ``correction_target`` and
-    ``save_correction``) -- corrections are entries in the table like any other, so the agent that
-    made one, human or model, is described by that entry's own metadata. The schema is created lazily
-    on first use, a fresh connection is opened per operation (thread-safe for use from e.g. Flask),
-    and the input is returned unchanged.
+    The same tables and rows as ``PostgresStorage``, in SQLite's dialect: each result and each of its
+    derivatives is a RESULT row, under the run's PROJECT, WORKFLOW and WORKFLOW_RUN rows (see
+    ``_ChaiTeaStorage``), and corrections are rows of their own (``save_correction``). The viewer
+    helpers in this module (``list_results``, ``get_result``, ``list_processors``) read it back. The
+    schema is created on first use, a fresh connection is opened per operation (thread-safe for use
+    from e.g. Flask), foreign keys are enforced, and the input is returned unchanged.
 
     Settings:
         - database: path of the SQLite database file (default 'results.db')
+        - tables: ``{entity: table name}`` overriding the CHAI-TEA table names
         - input_source: component id whose result counts as the input the row was generated from,
           overriding the component marked ``source: true`` (default: the marked component's result,
           or the result's immediate input when nothing is marked)
@@ -1910,75 +2086,20 @@ class SqliteStorage(Storage):
           read it would need
     """
 
+    dialect = "sqlite"
+
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)
         if "database" not in self.settings:
             self.settings["database"] = "results.db"
 
-    def _process(self, input: Result) -> Result:
-        """Store the result in SQLite"""
-        conn = _connect(self.settings["database"])
+    def _write(self, records):
+        conn = _connect(self.settings["database"], self.tables)
         try:
-            cursor = conn.cursor()
-
-            # Build JSON representations (bytes-safe; FileItemResults store their file_name)
-            js = self.build_json(input)
-            metadata_json = json.dumps(_json_safe(input.metadata)) if input.metadata else None
-            extra_json = json.dumps(_json_safe(input.extra)) if input.extra else None
-            provenance = input_provenance(
-                input, self.settings.get("input_source"), self.settings.get("hash_input", True)
-            )
-
-            # Insert result -- an upsert (not OR REPLACE) so re-storing a result keeps the original
-            # created_at, and the rows correcting it go on pointing at it
-            cursor.execute(
-                """
-                INSERT INTO results
-                (id, processor_id, workflow_id, value_json, metadata_json, extra_json,
-                 input_uri, input_hash, input_locator, corrects_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    processor_id = excluded.processor_id,
-                    workflow_id = excluded.workflow_id,
-                    value_json = excluded.value_json,
-                    metadata_json = excluded.metadata_json,
-                    extra_json = excluded.extra_json,
-                    input_uri = excluded.input_uri,
-                    input_hash = excluded.input_hash,
-                    input_locator = excluded.input_locator,
-                    corrects_id = excluded.corrects_id
-            """,
-                (
-                    input.id,
-                    js.get("processorId"),
-                    js.get("workflowId"),
-                    json.dumps(js),
-                    metadata_json,
-                    extra_json,
-                    provenance["uri"],
-                    provenance["hash"],
-                    json.dumps(provenance["locator"]) if provenance["locator"] else None,
-                    correction_target(input),
-                ),
-            )
-
-            # Store derivatives
-            for component, results in input.derivative_results.items():
-                for result in results:
-                    result_json = json.dumps(result_to_json(result))
-                    cursor.execute(
-                        """
-                        INSERT OR REPLACE INTO derivatives
-                        (id, source_id, component_id, result_json)
-                        VALUES (?, ?, ?, ?)
-                    """,
-                        (result.id, input.id, component.id, result_json),
-                    )
-
+            write_rows(conn.cursor(), self.dialect, self.names, records)
             conn.commit()
         finally:
             conn.close()
-        return input
 
 
 class VectorStore:

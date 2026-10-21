@@ -71,27 +71,9 @@ EXPORT_ORDER = ["PROJECT", "USER", "WORKFLOW", "WORKFLOW_RUN", "RESULT", "ANNOTA
 # Added to it by --include-permissions, keeping the same parents-first order.
 PERMISSION_ORDER = ["ROLE", "WF_PERMISSION", "PJ_PERMISSION"]
 
-# The CHAI-TEA schema's SQL types as ParquetRecordWriter column kinds. Declaring them (rather than
-# letting the writer infer from the data) means every export of a table has the same columns and
-# types, including an export where the table came out empty.
-KINDS = {
-    "UUID": "string",
-    "TEXT": "string",
-    "BOOLEAN": "bool",
-    "INTEGER": "int",
-    "DOUBLE PRECISION": "float",
-    "JSONB": "json",
-    "TIMESTAMPTZ": "timestamp",
-}
-
-
-def column_kinds(entity):
-    """``{column: Parquet column kind}`` for one entity of the CHAI-TEA schema."""
-    types = chai_tea_schema.column_types(entity)
-    unknown = {t for t in types.values() if t not in KINDS}
-    if unknown:
-        raise ValueError(f"No Parquet column kind for SQL type(s) {', '.join(sorted(unknown))}")
-    return {column: KINDS[sql_type] for column, sql_type in types.items()}
+# The CHAI-TEA tables as Parquet column kinds; defined with the schema in ``chai.schema``.
+KINDS = chai_tea_schema.KINDS
+column_kinds = chai_tea_schema.column_kinds
 
 
 def export_order(include_permissions=False):

@@ -112,7 +112,8 @@ Two consequences worth internalizing:
 | **Annotator** | Human-reviewable artifacts | `ImageBoxAnnotator` (supervision boxes), `TextHighlightAnnotator` (labelled `<mark>`s) |
 | **Embedder** | Vectors + similarity | `VectorIndexer`, `VectorRetriever` (SQLite store; hash/gemini/ollama/openai services) |
 | **Decision** | System One questions: choice / score / noul answered with probabilities | `DecisionClassifier` (one question, the answer as a label), `DecisionGate` (a true/false question as a branch), `DecisionExtractor` (several questions, one record) -- see [docs/system1.md](docs/system1.md) |
-| **Storage** | Persist results | `FileSystemStorage`, `SqliteStorage` (+ human corrections) |
+| **Storage** | Persist results (CHAI-TEA rows) | `JsonLinesStorage`, `ParquetStorage`, `SqliteStorage`, `PostgresStorage` (+ human corrections), `FileSystemStorage` |
+| **Uploader** | Hand a file to another system | `S3Uploader`, `FileSystemUploader` |
 | **FanOut** | Explicit parallel split | `FanOut` (run all children on the same input; optional concurrent `workers`) |
 | **Utils** | Plumbing | `DebugStep` (print & pass) |
 
@@ -206,8 +207,12 @@ Every component accepts an error policy in `settings`:
   progress.
 - **Provenance** — any result's `.input` chain answers "where did this come
   from"; `processor` answers "who made it".
-- **Storage + corrections** — `SqliteStorage` and `PostgresStorage` keep the
-  full JSON of every result, with the file or URI it was generated from (the
+- **Storage + corrections** — every storage writes the CHAI-TEA schema
+  (`chai/schema.py`): `SqliteStorage` and `PostgresStorage` write its tables —
+  the run's PROJECT, WORKFLOW and WORKFLOW_RUN rows, taken from the workflow
+  object, and a RESULT row per result — and `JsonLinesStorage`/`ParquetStorage`
+  write the same RESULT rows to files. Each row keeps the result's value and
+  metadata, with the file or URI it was generated from (the
   component marked `source: true`, e.g. the page, not the directory), the md5
   of that input, and a locator saying where in it the row is — a bounding box
   or a character range — so millions of sentences or regions need no files of
