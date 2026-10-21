@@ -43,13 +43,13 @@ import sys
 import uuid
 
 import chai_tea_import
-import chai_tea_parquet
-from chai.storage import jsonl_to_parquet
+from chai.schema import column_kinds
+from chai.storage import jsonl_to_parquet, read_run_records, run_records_file
 
 logger = logging.getLogger(__name__)
 
 #: ``{column: Parquet column kind}`` for the RESULT table, in the table's column order.
-RESULT_KINDS = chai_tea_parquet.column_kinds("RESULT")
+RESULT_KINDS = column_kinds("RESULT")
 
 
 def run_id_for(path):
@@ -183,11 +183,13 @@ def transform_jsonl(source, target, workflow_run_id=None, prices=None, fields=No
     return {"path": target, "rows": rows, "skipped": skipped, "workflow_run_id": str(first_run)}
 
 
-def rows_to_parquet(rows_jsonl, parquet_file, workflow_run_id, compression="snappy"):
+def rows_to_parquet(rows_jsonl, parquet_file, workflow_run_id, compression="snappy", records=None):
     """Pack a file of RESULT rows into Parquet, typed by the schema rather than inferred from the data.
 
     Declaring every column means the file has the RESULT columns and types even where the data is
-    all null, and an empty run still produces a file the loader can read.
+    all null, and an empty run still produces a file the loader can read. *records* are the run rows
+    to carry in its ``chai_tea_records`` metadata (see ``jsonl_to_parquet``) -- for a file
+    ``JsonLinesStorage`` wrote, those it recorded beside the source (``read_run_records``).
     """
     return jsonl_to_parquet(
         rows_jsonl,
@@ -195,6 +197,7 @@ def rows_to_parquet(rows_jsonl, parquet_file, workflow_run_id, compression="snap
         schema=RESULT_KINDS,
         compression=compression,
         metadata={"chai_tea_entity": "RESULT", "chai_tea_workflow_run_id": str(workflow_run_id)},
+        records=records or {},
     )
 
 
@@ -252,7 +255,13 @@ def main(argv=None):
     )
     print(f"{info['rows']} RESULT rows ({info['skipped']} skipped) -> {info['path']}")
     print(f"workflow_run_id {info['workflow_run_id']}")
-    packed = rows_to_parquet(info["path"], args.parquet or f"{stem}.result.parquet", info["workflow_run_id"])
+    packed = rows_to_parquet(
+        info["path"],
+        args.parquet or f"{stem}.result.parquet",
+        info["workflow_run_id"],
+        # an overriding run id leaves the recorded runs naming rows the file no longer has
+        records=None if args.workflow_run_id else read_run_records(run_records_file(args.source)),
+    )
     print(f"{packed['rows']} rows -> {packed['path']}")
     if args.bucket:
         sent = upload(packed["path"], args.bucket, args.prefix, args.profile, args.region, args.overwrite)

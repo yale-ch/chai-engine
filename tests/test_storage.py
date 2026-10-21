@@ -33,6 +33,10 @@ from chai.storage import (
     ensure_postgres_schema,
     get_result,
     jsonl_to_parquet,
+    load_run_parquet,
+    parquet_run_records,
+    read_run_records,
+    run_records_file,
     list_processors,
     list_results,
     parquet_to_postgres,
@@ -69,9 +73,7 @@ class TestResultRows(unittest.TestCase):
         return self.wf._make_step({"type": "storage.JsonLinesStorage", "settings": settings}, self.wf)
 
     def test_the_columns_are_the_chai_tea_result_table(self):
-        import chai_tea_parquet  # top level, outside the package -- the schema's own definition
-
-        self.assertEqual(RESULT_COLUMNS, chai_tea_parquet.column_kinds("RESULT"))
+        self.assertEqual(RESULT_COLUMNS, chai_schema.column_kinds("RESULT"))
 
     def test_a_line_is_exactly_a_result_row(self):
         res = ItemResult(
@@ -349,6 +351,56 @@ class TestJsonLinesStorage(unittest.TestCase):
         self.assertEqual([js["value"] for js in self.lines()], ["aa", "aa", "bb", "bb"])
         wf.run()
         self.assertEqual(len(self.lines()), 4)
+
+    def records(self):
+        return read_run_records(run_records_file(self.out))
+
+    def test_the_run_a_file_holds_is_recorded_beside_it(self):
+        wf = Workflow(self.truncating_workflow(["a", "b"]))
+        wf.run()
+        self.assertEqual(run_records_file(self.out), os.path.join(self.dir, "nested", "out.records.json"))
+        records = self.records()
+        self.assertEqual(list(records), ["PROJECT", "WORKFLOW", "WORKFLOW_RUN"])
+        (run,) = records["WORKFLOW_RUN"]
+        self.assertEqual({line["workflow_run_id"] for line in self.lines()}, {run["id"]})
+        self.assertEqual(run["workflow_id"], records["WORKFLOW"][0]["id"])
+        # rewritten when the run ended, so it says how the run went
+        self.assertTrue(run["was_successful"])
+        self.assertGreater(run["duration"], 0)
+
+    def test_each_run_in_a_file_is_recorded_until_it_is_truncated(self):
+        tree = self.truncating_workflow(["a"])
+        store = tree["steps"][0]["steps"][0]["steps"][0]["next_steps"][0]
+        store["settings"]["mode"] = "append"
+        wf = Workflow(tree)
+        wf.run()
+        wf.run()
+        self.assertEqual(len(self.records()["WORKFLOW_RUN"]), 2)
+        self.assertEqual(len(self.records()["WORKFLOW"]), 1)  # the same workflow, recorded once
+        store["settings"]["mode"] = "truncate"
+        Workflow(tree).run()  # the lines of earlier runs go, and so do their runs
+        self.assertEqual(
+            [run["id"] for run in self.records()["WORKFLOW_RUN"]], [self.lines()[0]["workflow_run_id"]]
+        )
+
+    def test_a_run_that_writes_nothing_records_no_run(self):
+        Workflow(self.truncating_workflow([])).run()
+        self.assertEqual(self.records(), {})
+
+    def test_lines_that_are_not_result_rows_record_no_run(self):
+        self.make_storage(fields=["value"]).process(ItemResult("x"))
+        self.make_storage(run_id="slice-3").process(ItemResult("y"))  # a run the workflow never made
+        self.assertFalse(os.path.exists(run_records_file(self.out)))
+
+    def test_jsonl_to_parquet_carries_the_recorded_runs(self):
+        wf = Workflow(self.truncating_workflow(["a", "b"]))
+        wf.run()
+        out = os.path.join(self.dir, "run.parquet")
+        jsonl_to_parquet(self.out, out)
+        self.assertEqual(parquet_run_records(out), self.records())
+        # given outright, they replace whatever was recorded beside the file
+        jsonl_to_parquet(self.out, out, records=wf.records())
+        self.assertEqual(parquet_run_records(out)["WORKFLOW_RUN"]["id"], wf.run_id)
 
     def test_fields_list_selects_keys(self):
         self.make_storage(fields=["value", "processorId"]).process(
@@ -1485,6 +1537,44 @@ class TestPostgresStorage(_ThrowawayDatabase):
                 self.query(f"SELECT id::text, was_successful, duration > 0 FROM {names['WORKFLOW_RUN']}"),
                 [(wf.run_id, True, True)],
             )
+
+    def test_a_streamed_run_loads_with_the_run_it_belongs_to(self):
+        jsonl = os.path.join(self.dir, "run.jsonl")
+        tree = {
+            "id": "streamed_wf",
+            "type": "workflow.Workflow",
+            "project": "Tests",
+            "steps": [
+                {
+                    "type": "provider.StaticProvider",
+                    "settings": {"values": ["a", "b", "c"]},
+                    "input": "x",
+                    "steps": [
+                        {
+                            "type": "iterator.Iterator",
+                            "settings": {"retain_results": False},
+                            "steps": [
+                                {
+                                    "type": "extractor.DoubleExtractor",
+                                    "next_steps": [{"type": "storage.JsonLinesStorage", "settings": {"file": jsonl}}],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+        wf = Workflow(tree)
+        wf.run()
+        jsonl_to_parquet(jsonl, self.out)
+        # the RESULT rows' runs are in the file, so they load into tables that have never seen them
+        self.assertEqual(load_run_parquet(self.out, self.params, tables=self.tables), {"records": 3, "rows": 3})
+        self.assertEqual(
+            self.query(f"SELECT id::text, was_successful FROM {self.names['WORKFLOW_RUN']}"), [(wf.run_id, True)]
+        )
+        self.assertEqual(
+            self.query(f"SELECT DISTINCT workflow_run_id::text FROM {self.names['RESULT']}"), [(wf.run_id,)]
+        )
 
     def test_a_table_in_the_old_layout_is_refused(self):
         self.execute(f"CREATE TABLE {self.tables['RESULT']} (id TEXT PRIMARY KEY, value_json JSONB)")

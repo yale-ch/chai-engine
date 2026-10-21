@@ -4,7 +4,9 @@ A long run streams its results into a ``.jsonl`` file with ``JsonLinesStorage`` 
 ``experiment-ppl-jsonl.py``). This is the hand-off afterwards:
 
 * ``jsonl_to_parquet`` packs each ``.jsonl`` file (e.g. one per slice of a ``SliceIterator`` run) into
-  a ``.parquet`` file next to it (or into ``--out-dir``);
+  a ``.parquet`` file next to it (or into ``--out-dir``), with the PROJECT/WORKFLOW/WORKFLOW_RUN rows
+  ``JsonLinesStorage`` recorded beside it (``run.records.json``) in its ``chai_tea_records`` metadata,
+  so the ingester can create a run before loading the rows that reference it;
 * a workflow of ``FileListProvider`` + ``Iterator`` + ``S3Uploader`` puts each Parquet file in the
   bucket under ``--prefix``, tagged with its md5 and the workflow it came from.
 
