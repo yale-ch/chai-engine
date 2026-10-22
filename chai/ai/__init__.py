@@ -56,23 +56,30 @@ except ImportError as e:  # pragma: no cover -- Apple Silicon only
     logger.info(f"MLXVLMComponent unavailable on this platform: {e}")
 
 
-def create_all_components(base_class: type) -> dict:
+def create_all_components(base_class: type, delegate: str = "_process") -> dict:
     """Generate one composite class per backend in ``__all__`` for a given role base class.
 
     Called at import time by the role modules (``chai.transcriber``, ``chai.classifier``, ...), which
     splat the returned ``{name: class}`` dict into their module globals. Names are formed as
     ``<Backend><Role>``, e.g. ``GeminiTranscriber`` from ``GeminiComponent`` + ``Transcriber`` and
     ``LLMExtractor`` from ``LLMComponent`` + ``Extractor``.
+
+    *delegate* is the method the backend supplies. Text roles hand the backend their whole
+    ``_process``; a role that keeps its own ``_process`` and only needs a service call from the
+    backend names that call instead (``chai.embedder`` uses ``embed``), and composites are made only
+    for the backends that have it.
     """
     clss = {}
     for ai_class in __all__:
+        if not hasattr(ai_class, delegate):
+            continue
         name = f"{ai_class.__name__.replace('Component', '')}{base_class.__name__}"
-        new = create_ai_component(name, base_class, ai_class)
+        new = create_ai_component(name, base_class, ai_class, delegate)
         clss[name] = new
     return clss
 
 
-def create_ai_component(name: str, base_class: type, ai_class: type) -> type:
+def create_ai_component(name: str, base_class: type, ai_class: type, delegate: str = "_process") -> type:
     """
     Dynamically generates a composite AI component class (e.g. GeminiSegmenter).
     This avoids having to hand-craft boilerplate multiple inheritance classes.
@@ -80,8 +87,9 @@ def create_ai_component(name: str, base_class: type, ai_class: type) -> type:
     The generated class inherits ``(base_class, ai_class)``. Its ``__init__`` runs the AI backend's
     initializer first (which reaches ``Component.__init__`` via super), then the role base's
     ``__init__`` for role defaults like the fallback prompt -- ``Component.__init__``'s
-    already-initialized guard prevents double initialization. ``_process`` always delegates to the AI
-    backend, so the composite takes the role's name/prompt defaults but the backend's behaviour.
+    already-initialized guard prevents double initialization. *delegate* (``_process`` unless the
+    role says otherwise) always goes to the AI backend, so the composite takes the role's name/prompt
+    defaults but the backend's behaviour.
     """
 
     def __init__(self, tree, workflow, parent=None):
@@ -97,16 +105,18 @@ def create_ai_component(name: str, base_class: type, ai_class: type) -> type:
             except TypeError:
                 pass
 
-    def _process(self, input):
-        # AI composite classes always delegate their core processing to the AI implementation
-        return ai_class._process(self, input)
+    backend_method = getattr(ai_class, delegate)
+
+    def delegated(self, *args, **kwargs):
+        # AI composite classes always delegate their core call to the AI implementation
+        return backend_method(self, *args, **kwargs)
 
     return type(
         name,
         (base_class, ai_class),
         {
             "__init__": __init__,
-            "_process": _process,
+            delegate: delegated,
             "__module__": base_class.__module__,
         },
     )

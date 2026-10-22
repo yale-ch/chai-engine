@@ -21,7 +21,8 @@ class OpenAIComponent(LLMComponent):
     Settings:
         - api_host: host:port or URL of the server; '/v1' is appended if missing (default: api.openai.com)
         - api_key: bearer token (default: OPENAI_API_KEY for OpenAI, 'EMPTY' for a custom host)
-        - model: model id, as the server advertises it in /v1/models (required)
+        - model: model id, as the server advertises it in /v1/models (required; 'text-embedding-3-small'
+          in an embedding role)
         - temperature: sampling temperature (default 0.4)
         - top_p: nucleus sampling threshold (default 0.9)
         - max_output_tokens: response token cap (default 4096)
@@ -35,6 +36,7 @@ class OpenAIComponent(LLMComponent):
     DEFAULT_TEMPERATURE = 0.4
     DEFAULT_TOP_P = 0.9
     DEFAULT_MAX_OUTPUT_TOKENS = 4096
+    DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
     ENGINE_NAME = "openai"
 
     def __init__(self, tree, workflow, parent=None):

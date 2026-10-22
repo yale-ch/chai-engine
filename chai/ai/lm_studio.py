@@ -14,7 +14,8 @@ class LMStudioComponent(LLMComponent):
 
     Settings:
         - api_host: host:port (or URL) of the LM Studio server; '/v1' is appended (default 'localhost:1234')
-        - model: model identifier as LM Studio advertises it (default 'qwen/qwen3.5-9b')
+        - model: model identifier as LM Studio advertises it (default 'qwen/qwen3.5-9b';
+          'text-embedding-nomic-embed-text-v1.5' in an embedding role)
         - temperature: sampling temperature (default 0.4)
         - max_output_tokens: response token cap (default 32000)
         - max_image_size: long-edge pixel limit; images are downscaled before upload if set (default 0 = off)
@@ -28,4 +29,5 @@ class LMStudioComponent(LLMComponent):
     DEFAULT_TEMPERATURE = 0.4
     DEFAULT_MAX_OUTPUT_TOKENS = 32000
     DEFAULT_API_KEY = "EMPTY"
+    DEFAULT_EMBEDDING_MODEL = "text-embedding-nomic-embed-text-v1.5"
     ENGINE_NAME = "lm-studio"  # as stored on main before the LiteLLM backend; the provider is "lm_studio"
