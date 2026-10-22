@@ -1,6 +1,6 @@
 """Decision components: System One questions as chai roles.
 
-A System One model (see ``chai.ai.system1``) answers a typed question about a state with a
+A System One model (see ``chai.system_one``) answers a typed question about a state with a
 probability per option instead of generating text. In chai that is three roles:
 
 * ``DecisionClassifier`` -- asks ONE question (choice, score or noul) about the input and labels it
@@ -27,7 +27,7 @@ import json
 import logging
 from typing import Dict, List, Optional
 
-from .ai.system1 import LAYOUTS, NONE_KEY, NULL_KEYS, QUESTION_TYPES, System1Model, make_question, normalize_options
+from .system_one import LAYOUTS, NONE_KEY, NULL_KEYS, QUESTION_TYPES, System1Model, make_question, normalize_options
 from .classifier import Classifier
 from .extractor import Extractor
 from .gate import Gate
@@ -106,7 +106,7 @@ class DecisionBase:
           placeholders are filled from a dict input (default 'Options:')
         - max_options: cap on options sent to the model, before any none option (default 0 = all)
         - the model's own settings pass through: api_key, api_base, timeout, device, subfolder,
-          use_instruction, temperature, pricing, litellm_params, ... (see chai.ai.system1)
+          use_instruction, temperature, pricing, litellm_params, ... (see chai.system_one)
     """
 
     def _init_decision(self):
@@ -316,7 +316,7 @@ class DecisionExtractor(DecisionBase, Extractor):
     """Ask a System One model several questions about one state and return the answers as a record.
 
     Input as for ``DecisionClassifier``. Output is an ``ItemResult`` whose value is
-    ``{question name: canonical answer}`` (see chai.ai.system1 for the answer shapes), with
+    ``{question name: canonical answer}`` (see chai.system_one for the answer shapes), with
     ``decision`` metadata holding the exact state and questions sent, plus
     ``model``/``token_usage``/``cost`` for the usage ledger. Jev answers all questions in one API
     call; the other providers loop.

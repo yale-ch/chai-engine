@@ -1,4 +1,4 @@
-"""Tests for System One support: the decision data model (chai.ai.system1) and the decision roles
+"""Tests for System One support: the decision data model (chai.system_one) and the decision roles
 (chai.decision). No models and no network: the generative provider is exercised through LiteLLM's
 local mock replies, and the Jev API through a throwaway HTTP server in this process."""
 
@@ -9,8 +9,8 @@ import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest import mock
 
-from chai.ai import system1
-from chai.ai.system1 import (
+from chai import system_one as system1
+from chai.system_one import (
     GenerativeProvider,
     GlinerProvider,
     JevOmniProvider,
@@ -137,6 +137,10 @@ class TestProviders(unittest.TestCase):
         self.assertIsInstance(omni, JevOmniProvider)  # nothing is loaded until the first decision
         self.assertEqual((omni.model, omni.device), ("akhilaaa3/Jev-Omni", "cpu"))
         self.assertEqual(System1Model({"model": "jev-omni/"}).provider.model, "akhilaaa3/Jev-Omni")
+        kev = System1Model({"model": "kev/yale-cultural-heritage/kev-4b-europeana-persons", "dtype": "float32"}).provider
+        self.assertEqual((kev.name, kev.checkpoint, kev.cfg["dtype"]), ("pointer", "yale-cultural-heritage/kev-4b-europeana-persons", "float32"))
+        self.assertEqual(System1Model({"model": "pointer//tmp/my-export"}).provider.checkpoint, "/tmp/my-export")
+        self.assertEqual(System1Model({"model": "kev/"}).provider.checkpoint, "jaredpalmer/kev-4b")
         self.assertIsInstance(System1Model({"model": MODEL}).provider, GenerativeProvider)
         with self.assertRaises(ValueError):
             System1Model({})

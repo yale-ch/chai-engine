@@ -107,7 +107,7 @@ def find_result(result, component):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--workflow", default=os.path.join(ROOT, "workflow-ppl.json"))
+    ap.add_argument("--workflow", default=os.path.join(ROOT, "examples", "workflow-ppl.json"))
     ap.add_argument("--csv", default=None, help="CSV to read (default: the workflow's own input)")
     ap.add_argument("--limit", type=int, default=None, help="rows to read; 0 for all of them")
     ap.add_argument("--slice", type=int, default=None, help="zero-based slice of the rows to process")
