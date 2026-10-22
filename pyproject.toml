@@ -15,7 +15,7 @@ authors = [
 dependencies = [
     "accelerate>=1.13.0",
     "boto3",
-    "litellm>=1.105.1",
+    "litellm==1.106.2",  # pinned: 1.107.0 was a compromised release (BerriAI/litellm#47826)
     "peft",
     "lxml",
     "Pillow",
