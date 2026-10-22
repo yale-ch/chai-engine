@@ -6,8 +6,8 @@ the provider is part of the model id (``gemini/...``, ``vertex_ai/...``, ``ollam
 (``GeminiComponent``, ``OllamaComponent``, ``LMStudioComponent``, ``OpenAIComponent``,
 ``VLLMComponent``, ``SGLangComponent``) are thin subclasses that keep each provider's defaults and
 the component names existing workflows use. ``TransformersComponent`` and ``MLXVLMComponent`` run
-models in-process instead. System One decision models live in ``system1`` and are used by the
-``chai.decision`` roles rather than mixed into the text roles.
+models in-process instead. System One decision models live in ``chai.system_one`` and are used by
+the ``chai.decision`` roles rather than mixed into the text roles.
 
 Two exported lists drive how role-mixin classes (``GeminiTranscriber``, ``LLMClassifier``,
 ``VLLMSegmenter`` ...) are auto-generated:

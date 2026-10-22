@@ -126,7 +126,7 @@ def report_usage(log_file, input_price, output_price):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--workflow", default=os.path.join(ROOT, "workflow-m804.json"))
+    ap.add_argument("--workflow", default=os.path.join(ROOT, "examples", "workflow-m804.json"))
     ap.add_argument("--dir", default=None, help="directory of page images (default: the workflow's own)")
     ap.add_argument("--limit", type=int, default=0, help="only the first N pages; 0 for all of them")
     ap.add_argument("--text-dir", default=None, help="where the transcriptions go")

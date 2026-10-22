@@ -141,10 +141,12 @@ Settings that are not set are not sent (the provider's defaults apply); a settin
 always sent, so a model that rejects it fails loudly instead of being silently ignored. In-process
 backends: `TransformersComponent` (text) and `MLXVLMComponent` (vision, Apple Silicon).
 
-**System One decision models** (the Jev API, and Jev-Omni, Laya and GLiNER2.5-Decide in process, or
-any chat model as a baseline) are a
-different kind of backend -- they answer typed questions with calibrated probabilities instead of
-text -- and have their own roles in `chai/decision.py`; see [docs/system1.md](docs/system1.md).
+**System One decision models** are a different kind of backend -- they answer typed questions with
+calibrated probabilities instead of text -- and live in their own package, `chai/system_one/`: one
+provider per architecture family (kev, the letter-readout models, Open-Jev, openjev-NLI, JEV, Laya,
+von, bekko, GLiNER2.5-Decide, Jev-Omni, the hosted Jev API, or any chat model as a baseline), named
+by preset (`kev-4b`, `laya`, `gliner-decide-europeana-persons`) or as `<family>/<checkpoint>`, with
+their roles in `chai/decision.py`; see [docs/system1.md](docs/system1.md).
 
 ### Usage and cost
 

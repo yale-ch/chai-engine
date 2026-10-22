@@ -106,14 +106,16 @@ With LiteLLM a pipeline switches providers by editing one string -- per step. A
 component that does not set its own, would make "run this whole pipeline on the local Ollama
 instead of Vertex" one edit.
 
-## 14. More in-process decision models
+## 14. The remaining System One checks
 
-v2 ships Jev (API), Jev-Omni, Laya and GLiNER2.5-Decide (in process) and a generative baseline,
-and a fine-tuned GLiNER loads from its folder. The bench's other adapter families (pointer,
-letter-slot, per-candidate yes/no, NLI, slot heads) are the remaining System One models; a
-`System1Model` provider that loads a bench checkpoint (`best/` + `s1bench.json`) directly would let
-any fine-tuned model go straight into a workflow. Laya's `predict_batch` (many states per forward
-pass) is unused so far; see item 8.
+`chai/system_one/` now covers every architecture the bench runs -- pointer (kev), letters, candidate
+(Open-Jev), NLI, slots (JEV/GEV), Laya, von, bekko, GLiNER, Jev-Omni -- plus the hosted Jev API and
+a generative baseline, with the bench's model presets and support for kev-layout and bench exports.
+Verified live here: kev, letters (decider-2b), Laya, von, bekko, GLiNER and the three Yale
+fine-tunes. Still to verify against real weights: the candidate, NLI and slots families (their
+backbones are 9-19 GB each and were not downloaded), a real bench export (only a fabricated one was
+loaded), and the Jev API (no key). Laya's `predict_batch` (many states per forward pass) is unused;
+see item 8.
 
 ## 15. Dataset providers
 
