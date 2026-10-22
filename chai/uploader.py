@@ -165,7 +165,8 @@ class S3Uploader(Uploader):
     Settings (as well as ``key``/``prefix``/``overwrite``, see ``Uploader``):
         - bucket: the bucket to upload to (default: the ``S3_BUCKET`` environment variable)
         - region: AWS region (default: boto3's, e.g. ``AWS_REGION``/``AWS_DEFAULT_REGION``)
-        - profile: named AWS profile to take credentials from (default: boto3's)
+        - profile: named AWS profile to take credentials from (default: the ``S3_PROFILE`` environment
+          variable, else boto3's own choice, e.g. ``AWS_PROFILE``)
         - endpoint_url: for an S3-compatible service other than AWS (default: boto3's, which honours
           ``AWS_ENDPOINT_URL``)
         - extra_args: dict passed to boto3 as ``ExtraArgs`` -- e.g. ``{"ServerSideEncryption":
@@ -204,7 +205,7 @@ class S3Uploader(Uploader):
                         "S3Uploader requires boto3: pip install boto3"
                     ) from e
                 session = boto3.session.Session(
-                    profile_name=self.settings.get("profile") or None,
+                    profile_name=self.settings.get("profile") or os.environ.get("S3_PROFILE") or None,
                     region_name=self.settings.get("region") or None,
                 )
                 self._client = session.client(

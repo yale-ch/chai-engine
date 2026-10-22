@@ -1,0 +1,161 @@
+{
+  "id": "m804_lines",
+  "type": "workflow.Workflow",
+  "name": "M804: find the lines and images of a page, and transcribe each line with its neighbors as context",
+  "description": "Detect the text lines and the images (miniatures, drop capitals) of f0001r with a medieval-manuscript layout model, keep every region with its bounding box, transcribe each line with Gemini given the line images above and below it as context, and keep each line's text against its box -- all as CHAI-TEA RESULT rows in one Parquet file, uploaded to S3 when the run ends for loading into the central database",
+  "project": "M804",
+  "steps": [
+    {
+      "id": "m804_page",
+      "type": "provider.FileListProvider",
+      "input": [
+        "inputs/m804/split/f0001r.jpg"
+      ],
+      "steps": [
+        {
+          "id": "each_page",
+          "type": "iterator.Iterator",
+          "source": true,
+          "settings": {
+            "workers": 1,
+            "continue_on_error": true
+          },
+          "steps": [
+            {
+              "id": "find_images",
+              "type": "segmenter.YoloSegmenter",
+              "name": "miniatures and drop capitals",
+              "settings": {
+                "model": "hf://small-models-for-glam/medieval-manuscript-yolov11/medieval-yolov11m.pt",
+                "classes": [
+                  "GraphicZone",
+                  "DropCapitalZone"
+                ],
+                "confidence": 0.4,
+                "crop": false,
+                "order": "reading"
+              },
+              "next_steps": [
+                {
+                  "id": "each_image",
+                  "type": "iterator.Iterator",
+                  "steps": [
+                    {
+                      "id": "store_image",
+                      "type": "storage.ParquetStorage",
+                      "name": "one row per image region: its box, class and confidence (and the run's one Parquet file, uploaded when the run ends)",
+                      "settings": {
+                        "file": "results/m804-lines/run-{run_id}.parquet",
+                        "compression": "snappy"
+                      },
+                      "file_steps": [
+                        {
+                          "id": "upload_run",
+                          "type": "uploader.S3Uploader",
+                          "name": "hand the run's Parquet file to the CHAI-TEA loader",
+                          "settings": {
+                            "prefix": "incoming/chai/",
+                            "key": "{date}/{name}",
+                            "overwrite": false
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "id": "find_lines",
+              "type": "segmenter.YoloSegmenter",
+              "name": "text lines, in reading order",
+              "settings": {
+                "model": "hf://small-models-for-glam/medieval-manuscript-yolov11/medieval-yolov11m.pt",
+                "classes": [
+                  "DefaultLine",
+                  "HeadingLine",
+                  "DropCapitalLine"
+                ],
+                "confidence": 0.4,
+                "crop": true,
+                "order": "reading"
+              },
+              "next_steps": [
+                {
+                  "id": "each_line_region",
+                  "type": "iterator.Iterator",
+                  "steps": [
+                    {
+                      "id": "store_line_region",
+                      "type": "storage.ParquetStorage",
+                      "name": "one row per line region: its box, class and confidence",
+                      "settings": {
+                        "file": "results/m804-lines/run-{run_id}.parquet",
+                        "compression": "snappy"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "id": "line_neighbors",
+                  "type": "context.NeighborContext",
+                  "name": "each line with the lines above and below it",
+                  "settings": {
+                    "before": 1,
+                    "after": 1,
+                    "labels": {
+                      "before": "Previous line (context only, do not transcribe):",
+                      "target": "Line to transcribe:",
+                      "after": "Next line (context only, do not transcribe):"
+                    },
+                    "empty": {
+                      "before": "(none: this is the first line found on the page)",
+                      "after": "(none: this is the last line found on the page)"
+                    }
+                  },
+                  "next_steps": [
+                    {
+                      "id": "each_line",
+                      "type": "iterator.Iterator",
+                      "settings": {
+                        "workers": 4,
+                        "continue_on_error": true
+                      },
+                      "steps": [
+                        {
+                          "id": "transcribe_line",
+                          "type": "transcriber.GeminiTranscriber",
+                          "settings": {
+                            "model": "gemini-3.1-flash-lite",
+                            "thinking_level": "low",
+                            "tools": [],
+                            "max_output_tokens": 4096,
+                            "timeout": 60,
+                            "retries": 3,
+                            "retry_delay": 2,
+                            "prompt": "You are a careful and thorough palaeographer transcribing a medieval manuscript one line at a time. This transcription is the only record anyone will have of the line, so it must be as accurate as possible.\n\nYou have been given up to three images cut from the same page, each introduced by a label: the line before, the line to transcribe, and the line after. Transcribe ONLY the image labelled \"Line to transcribe\".\n\nThe neighboring lines are context only. Use them to follow the scribe's hand, abbreviations and spelling, and to settle a word that is divided across a line break, but never include any of their text in your response. The line image may also catch the tops or bottoms of letters from the lines above and below it: ignore those.\n\nTranscribe the text as it is written: preserve the spelling, word division and punctuation of the original language. Expand an abbreviation only where the expansion is certain, and never modernize or correct the text.\nWhere a word or letter genuinely cannot be read, write [...] in its place rather than guessing.\nReturn the line as a single line of text, with no commentary, notes or explanation.\nIf there is no recognizable text in the line to transcribe, return the string \"VLM-NO-TEXT\".\n"
+                          },
+                          "next_steps": [
+                            {
+                              "id": "store_line_text",
+                              "type": "storage.ParquetStorage",
+                              "name": "one row per line: its text, against the line's box",
+                              "settings": {
+                                "file": "results/m804-lines/run-{run_id}.parquet",
+                                "compression": "snappy"
+                              }
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

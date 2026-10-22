@@ -52,9 +52,26 @@ COMPUTED_FIELDS = ("@record", "@input_uri", "@input_hash", "@input_locator", "@c
 RESULT_COLUMNS = column_kinds("RESULT")
 
 
+#: RESULT columns a Parquet file of RESULT rows leaves out. The central loader refuses a file that
+#: has them, and the table fills them in itself (``CURRENT_TIMESTAMP``) when the rows are loaded; when
+#: a result was made is still in the file, as ``md_timestamp``.
+PARQUET_OMITTED_COLUMNS = ("created", "modified")
+
+#: The columns of a Parquet file of RESULT rows -- ``RESULT_COLUMNS`` less ``PARQUET_OMITTED_COLUMNS``
+#: -- as ``ParquetStorage`` and ``jsonl_to_parquet`` write them.
+PARQUET_RESULT_COLUMNS = {
+    column: kind for column, kind in RESULT_COLUMNS.items() if column not in PARQUET_OMITTED_COLUMNS
+}
+
+
 def is_result_row(record):
     """Whether *record* has exactly the CHAI-TEA RESULT columns -- what the storages write by default."""
     return isinstance(record, dict) and list(record) == list(RESULT_COLUMNS)
+
+
+def parquet_result_row(row):
+    """A RESULT *row* as a Parquet file holds it: without the ``PARQUET_OMITTED_COLUMNS``."""
+    return {column: value for column, value in row.items() if column not in PARQUET_OMITTED_COLUMNS}
 
 
 def result_row(

@@ -9,7 +9,6 @@ Pillow
 requests
 ultralytics
 pi-heif
-supervision
 transformers>=5.5.0
 python-dotenv
 accelerate>=1.13.0

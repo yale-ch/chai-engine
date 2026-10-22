@@ -37,7 +37,7 @@ wf = Workflow({
         {"type": "extractor.GeminiExtractor", "id": "ner",
          "settings": {"model": "gemini-3.1-flash-lite",
                       "prompt": "Extract entities as a JSON list of {\"type\":..., \"text\":...}"},
-         "next_steps": [{"type": "annotator.TextHighlightAnnotator", "id": "highlight"}]}
+         "next_steps": [{"type": "segmenter.TextSpanLocator", "id": "locate"}]}
     ],
 })
 result = wf.run("Tom visited D.C. with Ada Lovelace in 1922.")
@@ -103,14 +103,13 @@ Two consequences worth internalizing:
 | **Classifier** | Assign labels | `KeywordClassifier`, `FileTypeClassifier`, `YoloClassifier`, `GeminiClassifier`, ... |
 | **Gate** | Conditional branch (`true_steps`/`false_steps`) | `ConditionGate`, `ValueTestGate`, `MetadataTestGate`, `ThresholdGate`, `FileTypeGate`, `LabelTestGate` |
 | **SwitchGate** | Per-label branch (`case_steps`), for-each over lists | `SwitchGate` |
-| **Segmenter** | Break content into parts | `TextSegmenter`, `WordSegmenter`, `YoloSegmenter` (detection crops), `GeminiSegmenter`, ... |
+| **Segmenter** | Break content into parts | `TextSegmenter`, `WordSegmenter`, `TextSpanLocator` (where extracted values are in their text), `YoloSegmenter` (detection crops), `GeminiSegmenter`, ... |
 | **Transcriber** | Image/audio → text | `TextFileTranscriber`, `GeminiTranscriber` and other vision backends |
 | **Describer** | Content → descriptive text | `FileInfoDescriber`, `GeminiDescriber`, ... |
-| **Extractor** | Content → structured data | `WordCountExtractor`, `JsonXpathExtractor`, `GeminiExtractor`, ... |
+| **Extractor** | Content → structured data | `KeywordExtractor`, `WordCountExtractor`, `JsonXpathExtractor`, `GeminiExtractor`, ... |
 | **Translator** | Language transforms | `GlossaryTranslator`, `GeminiTranslator`, ... |
 | **Reducer** | Merge branched runs into one result | `FlattenReducer`, `CollectReducer`, `MergeDictReducer`, `TextJoinReducer`, `GeminiReducer`, ... |
-| **Annotator** | Human-reviewable artifacts | `ImageBoxAnnotator` (supervision boxes), `TextHighlightAnnotator` (labelled `<mark>`s) |
-| **Embedder** | Vectors + similarity | `VectorIndexer`, `VectorRetriever` (SQLite store; hash/gemini/ollama/openai services) |
+| **Embedder** | Vectors + similarity | `VectorIndexer`, `VectorRetriever` (SQLite store; local hash, or `GeminiVectorIndexer`, `OllamaVectorRetriever`, ... per AI backend) |
 | **Decision** | System One questions: choice / score / noul answered with probabilities | `DecisionClassifier` (one question, the answer as a label), `DecisionGate` (a true/false question as a branch), `DecisionExtractor` (several questions, one record) -- see [docs/system1.md](docs/system1.md) |
 | **Storage** | Persist results (CHAI-TEA rows) | `JsonLinesStorage`, `ParquetStorage`, `SqliteStorage`, `PostgresStorage` (+ human corrections), `FileSystemStorage` |
 | **Uploader** | Hand a file to another system | `S3Uploader`, `FileSystemUploader` |
@@ -223,9 +222,13 @@ Every component accepts an error policy in `settings`:
   A correction is an entry of its own pointing back at the row it corrects,
   so originals are never overwritten and each correction carries the metadata
   of the agent — human or model — that made it.
-- **Annotators** — burn detection boxes into images (`ImageBoxAnnotator`) or
-  highlight extracted entities in their source text, one visualization per
-  task, labels colored per entity type (`TextHighlightAnnotator`).
+- **Regions and spans are data, not pictures** — the engine records what was
+  found and where, and a front end draws it. A `YoloSegmenter` region is a row
+  whose `input_segment` is its bounding box; `TextSpanLocator` turns an
+  extractor's values into one row per occurrence, `{"label", "text"}` with the
+  character range it occupies in the text row it names
+  (`chai.persistence.locators` defines the frames). `viewer/` draws them: boxes
+  over the page image, highlights in the text, a colour per label.
 
 ## Workflow JSON reference
 
@@ -256,8 +259,7 @@ Default prompts live in `chai/data/prompts.json`; reusable step templates in
 
 - **chai-workflow-builder** (`uv run app.py`, port 5057): drag components
   onto a canvas, wire ports (steps / next / err / true / false / case),
-  run with live per-node progress and outputs, preview annotated
-  images/text, run-up-to-any-node. Custom components drop into its
+  run with live per-node progress and outputs, run-up-to-any-node. Custom components drop into its
   `custom_components/` folder and appear under *Custom*.
 - **chai-ui-builder** (`uv run app.py`, port 5067): design a front-end for a
   workflow (inputs, run button, live progress, output viewers, storage

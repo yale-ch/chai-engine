@@ -1,4 +1,4 @@
-"""Small PIL-based image helpers shared by the AI backends and annotators.
+"""Small PIL-based image helpers shared by the AI backends and describers.
 
 Conversions between bytes and ``PIL.Image``, EXIF-aware rotation, normalized-coordinate cropping and
 long-edge downscaling (used to shrink images before sending them to vision models).

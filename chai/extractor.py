@@ -1,16 +1,18 @@
 """Extractors: components that pull structured data out of their input.
 
 AI-backed variants (``GeminiExtractor``, ...) prompt a model for JSON; the deterministic ones here
-count words or apply XPath expressions to JSON values.
+count words, pick out keywords as labelled entities, or apply XPath expressions to JSON values.
 """
 
 import json
+import re
 from collections import Counter
 
 from .ai import TransformersComponent, create_ai_component, create_all_components
 from .core import Component
 from .data_utils import extract_xpath
 from .result import ItemResult, ListResult, Result
+from .utils import text_from_input
 
 
 class Extractor(Component):
@@ -71,6 +73,44 @@ class WordCountExtractor(Extractor):
         words = text.lower().split()
         counts = dict(Counter(words))
         return ItemResult(json.dumps(counts), input=input, processor=self)
+
+
+class KeywordExtractor(Extractor):
+    """Extracts the configured keywords (or regex matches) found in text, as labelled entities -- no model.
+
+    The deterministic stand-in for an entity-extracting model: output is an ``ItemResult`` whose
+    value is ``[{"label": ..., "text": ...}]``, one entry per distinct text found under each label,
+    in the shape an AI extractor is usually asked for. It reports *what* was found, not where;
+    ``segmenter.TextSpanLocator`` finds that.
+
+    Settings:
+        - labels:         dict of {label: [patterns]} (a bare string is also accepted) (required)
+        - regex:          if true, patterns are regular expressions (default false)
+        - case_sensitive: default false
+    """
+
+    def __init__(self, tree, workflow, parent=None):
+        super().__init__(tree, workflow, parent)
+        raw = self.settings.get("labels")
+        if not isinstance(raw, dict) or not raw:
+            raise ValueError(f"KeywordExtractor ({self!r}) needs the `labels` setting: {{label: [patterns]}}")
+        flags = 0 if self.settings.get("case_sensitive", False) else re.IGNORECASE
+        regex = bool(self.settings.get("regex", False))
+        self.label_patterns = {
+            label: [re.compile(p if regex else re.escape(p), flags) for p in ([ps] if isinstance(ps, str) else ps)]
+            for label, ps in raw.items()
+        }
+
+    def _process(self, input):
+        text = text_from_input(input)
+        entities, seen = [], set()
+        for label, patterns in self.label_patterns.items():
+            for pattern in patterns:
+                for match in pattern.finditer(text):
+                    if match.group(0) and (label, match.group(0)) not in seen:
+                        seen.add((label, match.group(0)))
+                        entities.append({"label": label, "text": match.group(0)})
+        return ItemResult(entities, input=input, processor=self, metadata={"type": "DATA"})
 
 
 class JsonXpathExtractor(Extractor):

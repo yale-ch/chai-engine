@@ -21,4 +21,5 @@ class VLLMComponent(OpenAIComponent):
     PROVIDER = "hosted_vllm"
     DEFAULT_API_BASE = "http://localhost:8000"
     DEFAULT_API_KEY = "EMPTY"
+    DEFAULT_EMBEDDING_MODEL = ""  # whatever the server was started with; not OpenAI's
     ENGINE_NAME = "vllm"

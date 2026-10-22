@@ -17,6 +17,7 @@ import pyarrow.parquet as pq
 
 from chai.persistence import (
     COMPUTED_FIELDS,
+    PARQUET_RESULT_COLUMNS,
     RESULT_COLUMNS,
     result_row,
     build_record,
@@ -164,7 +165,7 @@ class TestResultRows(unittest.TestCase):
         parquet = pq.read_table(os.path.join(self.dir, "run.parquet")).to_pydict()
         self.assertEqual({r["workflow_run_id"] for r in self.lines()}, {first})
         self.assertEqual(set(parquet["workflow_run_id"]), {first})
-        self.assertEqual(list(parquet), list(RESULT_COLUMNS))
+        self.assertEqual(list(parquet), list(PARQUET_RESULT_COLUMNS))
         wf.run()
         self.assertNotEqual(wf.run_id, first)
         self.assertEqual({r["workflow_run_id"] for r in self.lines()[2:]}, {wf.run_id})
@@ -182,7 +183,7 @@ class TestResultRows(unittest.TestCase):
         storage.process(ItemResult({"a": 1}))
         out = os.path.join(self.dir, "run.parquet")
         info = jsonl_to_parquet(self.out, out)
-        self.assertEqual(info["columns"], RESULT_COLUMNS)
+        self.assertEqual(info["columns"], PARQUET_RESULT_COLUMNS)
         values = [json.loads(v) for v in pq.read_table(out).column("value").to_pylist()]
         self.assertEqual(values, ["plain text", {"a": 1}])
 
@@ -206,7 +207,7 @@ class TestResultRows(unittest.TestCase):
             ],
         }
         Workflow(tree).run()
-        self.assertEqual(pq.read_schema(out).names, list(RESULT_COLUMNS))
+        self.assertEqual(pq.read_schema(out).names, list(PARQUET_RESULT_COLUMNS))
 
     def test_token_usage_is_totalled_per_process(self):
         usage = {"total": 30, "prompt": 10, "images": 0, "thinking": 5, "result": 15}
@@ -799,7 +800,7 @@ class TestParquetStorage(unittest.TestCase):
         self.assertEqual(info["rows"], 2)
         cols = self.columns()
         # the default row is a CHAI-TEA RESULT row: value is a jsonb column, so it holds JSON text
-        self.assertEqual(list(cols), list(RESULT_COLUMNS))
+        self.assertEqual(list(cols), list(PARQUET_RESULT_COLUMNS))
         self.assertEqual([json.loads(v) for v in cols["value"]], ["one", "two"])
         self.assertEqual(cols["id"][0], first.id)
         self.assertEqual(json.loads(cols["metadata"][0])["type"], "TEXT")
@@ -1531,9 +1532,10 @@ class TestPostgresStorage(_ThrowawayDatabase):
         # the run's rows say what they were made from: the CSV, and the md5 of the row itself
         self.assertEqual(self.query(f"SELECT DISTINCT input FROM {direct}"), [(csv_path,)])
         self.assertEqual(self.query(f"SELECT count(DISTINCT input_hash) FROM {direct}")[0][0], 6)
-        columns = ", ".join(RESULT_COLUMNS)
+        columns = ", ".join(PARQUET_RESULT_COLUMNS)
         self.assertEqual(self.query(f"SELECT count(*) FROM {direct}")[0][0], 6)
-        # what one route stored and the other loaded is the same set of rows -- every column, both ways
+        # what one route stored and the other loaded is the same set of rows -- every column the Parquet file
+        # carries, both ways (created/modified are not in it: the table stamps them when the file is loaded)
         self.assertEqual(self.query(f"SELECT {columns} FROM {direct} EXCEPT SELECT {columns} FROM {loaded['RESULT']}"), [])
         self.assertEqual(self.query(f"SELECT {columns} FROM {loaded['RESULT']} EXCEPT SELECT {columns} FROM {direct}"), [])
         # and the run finished in both: successful, with its duration
@@ -1986,11 +1988,11 @@ class TestOlderFiles(unittest.TestCase):
     def test_the_parquet_file_has_the_result_columns_and_types(self):
         jsonl_to_result_rows(self.source, self.rows, fields=M804_FIELDS)
         jsonl_to_parquet(self.rows, self.parquet)
-        self.assertEqual(pq.read_schema(self.parquet).names, list(RESULT_COLUMNS))
-        self.assertEqual(parquet_columns(self.parquet), RESULT_COLUMNS)
+        self.assertEqual(pq.read_schema(self.parquet).names, list(PARQUET_RESULT_COLUMNS))
+        self.assertEqual(parquet_columns(self.parquet), PARQUET_RESULT_COLUMNS)
         table = pq.read_table(self.parquet).to_pylist()
         self.assertEqual(json.loads(table[0]["value"]), "Ci commencent les croniques")
-        self.assertIsNotNone(table[0]["created"].tzinfo)
+        self.assertIsNotNone(table[0]["md_timestamp"].tzinfo)
 
     def test_an_empty_file_still_makes_a_parquet_file_with_the_columns(self):
         empty = write_jsonl(os.path.join(self.dir, "empty.jsonl"), [])
