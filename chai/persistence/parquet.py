@@ -12,7 +12,7 @@ import ujson as json
 
 from .jsonl import read_run_records, run_records_file
 from .records import as_datetime
-from .rows import RESULT_COLUMNS, is_result_row
+from .rows import PARQUET_RESULT_COLUMNS, is_result_row, parquet_result_row
 from .values import _isoformat_rows, _json_safe
 
 logger = logging.getLogger("chai")
@@ -238,6 +238,17 @@ class ParquetRecordWriter:
         self._writer = pq.ParquetWriter(self.path, self._schema, compression=self.compression)
 
 
+def run_records_metadata(records):
+    """The ``chai_tea_records`` metadata text for a Parquet file of RESULT rows: *records* as JSON.
+
+    *records* is ``{entity: row or [rows]}`` -- the PROJECT, WORKFLOW and WORKFLOW_RUN rows the file's
+    RESULT rows hang under (``Workflow.records``), which a loader creates before it loads the RESULT
+    rows. They are whole rows, ``created``/``modified`` included: they are the file's metadata, not
+    its columns, and a loader writes them as the rows of their tables (``store_postgres_rows``).
+    """
+    return json.dumps(_json_safe(_isoformat_rows(records)))
+
+
 def jsonl_to_parquet(
     jsonl_file, parquet_file, schema=None, batch_size=50000, compression="snappy", metadata=None, records=None
 ):
@@ -248,21 +259,24 @@ def jsonl_to_parquet(
     Reads and writes in batches of *batch_size* lines, so neither file is ever fully in memory; as
     with ``ParquetRecordWriter``, the column types come from the first batch unless declared in
     *schema*. A file of CHAI-TEA RESULT rows (what the storages write by default) is typed by
-    ``RESULT_COLUMNS`` instead, so its JSON columns stay JSON even where every value in them happens to
-    be text. Blank lines are skipped and an unparseable line raises. Returns
+    ``PARQUET_RESULT_COLUMNS`` instead, so its JSON columns stay JSON even where every value in them
+    happens to be text, and its rows leave out ``created``/``modified``, which the central loader
+    refuses (the table fills them in on load). Blank lines are skipped and an unparseable line raises. Returns
     ``{"path", "rows", "columns"}``.
 
     *records* (``{entity: row or [rows]}``) are the PROJECT/WORKFLOW/WORKFLOW_RUN rows the file's
     RESULT rows hang under, carried in the Parquet file's ``chai_tea_records`` metadata as
     ``ParquetStorage`` carries them; by default those ``JsonLinesStorage`` recorded beside the file
-    (``run_records_file``), if it did.
+    (``run_records_file``), if it did. A file of RESULT rows with no run rows to carry is still
+    written, with a warning: a loader can only place its rows under runs it already has.
     """
     if records is None:
         records = read_run_records(run_records_file(jsonl_file))
     if records:
         metadata = dict(metadata or {})
-        metadata.setdefault("chai_tea_records", json.dumps(_json_safe(_isoformat_rows(records))))
+        metadata.setdefault("chai_tea_records", run_records_metadata(records))
     writer = None
+    result_rows = False
     with open(jsonl_file, encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
@@ -271,14 +285,20 @@ def jsonl_to_parquet(
             record = json.loads(line)
             if writer is None:
                 if schema is None and is_result_row(record):
-                    schema = RESULT_COLUMNS
+                    schema, result_rows = PARQUET_RESULT_COLUMNS, True
                 writer = ParquetRecordWriter(
                     parquet_file, schema=schema, batch_size=batch_size, compression=compression, metadata=metadata
                 )
-            writer.add(record)
+            writer.add(parquet_result_row(record) if result_rows else record)
     if writer is None:
         writer = ParquetRecordWriter(
             parquet_file, schema=schema, batch_size=batch_size, compression=compression, metadata=metadata
+        )
+    if result_rows and not records:
+        logger.warning(
+            f"{parquet_file} holds RESULT rows but no PROJECT/WORKFLOW/WORKFLOW_RUN rows to go with them "
+            f"(no {run_records_file(jsonl_file)}, and none given as records): a loader can only place its "
+            "rows under runs it already has"
         )
     return writer.close()
 

@@ -29,9 +29,9 @@ from .bundle import (  # noqa: F401
     read_bundle_manifest,
 )
 from .jsonl import add_run_records, read_jsonl, read_run_records, run_records_file, token_usage_summary  # noqa: F401
-from .locators import bbox_frame, frame_kind, segment_frames, text_frame  # noqa: F401
+from .locators import bbox_frame, frame_kind, frame_size, segment_frames, text_frame  # noqa: F401
 from .legacy import jsonl_to_result_rows, record_to_result_row  # noqa: F401
-from .parquet import ParquetRecordWriter, jsonl_to_parquet, parquet_columns, parquet_run_records  # noqa: F401
+from .parquet import ParquetRecordWriter, jsonl_to_parquet, parquet_columns, parquet_run_records, run_records_metadata  # noqa: F401
 from .postgres import (  # noqa: F401
     ensure_postgres_database,
     ensure_postgres_schema,
@@ -54,10 +54,13 @@ from .provenance import (  # noqa: F401
 from .records import Project, WorkflowRun, as_datetime, as_uuid, now  # noqa: F401
 from .rows import (  # noqa: F401
     COMPUTED_FIELDS,
+    PARQUET_OMITTED_COLUMNS,
+    PARQUET_RESULT_COLUMNS,
     RESULT_COLUMNS,
     build_record,
     correction_row,
     is_result_row,
+    parquet_result_row,
     recorded_cost,
     result_row,
     result_to_json,

@@ -281,6 +281,26 @@ class TextSpanLocator(Segmenter):
         return spans
 
 
+def yolo_model(name):
+    """An ultralytics ``YOLO`` model from a local path, a stock name, or ``hf://owner/repo/file.pt``.
+
+    A Hugging Face reference is downloaded once into the Hugging Face cache, so a workflow can name a
+    published model (``hf://small-models-for-glam/medieval-manuscript-yolov11/medieval-yolov11m.pt``)
+    rather than a file someone has to fetch first.
+    """
+    from ultralytics import YOLO
+
+    name = str(name)
+    if name.startswith("hf://"):
+        parts = name[len("hf://") :].split("/")
+        if len(parts) < 3:
+            raise ValueError(f"A Hugging Face model is hf://owner/repo/file.pt, not {name!r}")
+        from huggingface_hub import hf_hub_download
+
+        name = hf_hub_download("/".join(parts[:2]), "/".join(parts[2:]))
+    return YOLO(name)
+
+
 #: The orders ``YoloSegmenter`` can put its regions in.
 ORDERS = ("reading", "top_to_bottom", "detected")
 
@@ -343,7 +363,8 @@ class YoloSegmenter(Segmenter):
     of a page sort into the order they are read in (``input_sequence``).
 
     Settings:
-        - model:      path or name of a YOLO detection model (default 'yolo11n.pt')
+        - model:      path or name of a YOLO detection model, or ``hf://owner/repo/file.pt`` for one
+                      published on Hugging Face (default 'yolo11n.pt')
         - confidence: minimum box confidence to keep (default 0.25)
         - crop:       if true (default), emit cropped PNG bytes; otherwise only metadata
         - classes:    optional list of class names to keep; others are dropped
@@ -353,9 +374,7 @@ class YoloSegmenter(Segmenter):
 
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)
-        from ultralytics import YOLO
-
-        self.model = YOLO(self.settings.get("model", "yolo11n.pt"))
+        self.model = yolo_model(self.settings.get("model", "yolo11n.pt"))
         self.confidence = self.settings.get("confidence", 0.25)
         self.crop = self.settings.get("crop", True)
         self.keep_classes = set(self.settings.get("classes", []) or [])
@@ -375,6 +394,7 @@ class YoloSegmenter(Segmenter):
         out = ListResult([], input=input, processor=self)
 
         for result in self.model(image_path, verbose=False):
+            height, width = result.orig_shape[:2]  # the boxes are in this image's pixels
             for box in result.boxes:
                 conf = float(box.conf[0])
                 if conf < self.confidence:
@@ -395,9 +415,9 @@ class YoloSegmenter(Segmenter):
                         "confidence": conf,
                     },
                 )
-                # Where the crop is in the page, so a stored row can point at the region even when
-                # the crop itself is never written anywhere
-                crop.locator = bbox_frame(x1, y1, x2, y2)
+                # Where the crop is in the page, and the page's size, so a stored row can point at
+                # the region on any rendition of the page even when the crop is never written anywhere
+                crop.locator = bbox_frame(x1, y1, x2, y2, size=(width, height))
                 if self.crop:
                     buf = io.BytesIO()
                     img.crop((x1, y1, x2, y2)).save(buf, format="PNG")

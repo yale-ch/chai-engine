@@ -14,7 +14,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from chai.persistence import bbox_frame, frame_kind, list_results, segment_frames, text_frame  # noqa: E402
+from chai.persistence import bbox_frame, frame_kind, frame_size, list_results, segment_frames, text_frame  # noqa: E402
 from chai.result import FileItemResult, ItemResult  # noqa: E402
 from chai.workflow import Workflow  # noqa: E402
 
@@ -23,6 +23,13 @@ class TestFrames(unittest.TestCase):
     def test_a_bbox_frame(self):
         self.assertEqual(bbox_frame(1, 2, 3, 4), {"bbox": [1.0, 2.0, 3.0, 4.0]})
         self.assertEqual(frame_kind(bbox_frame(1, 2, 3, 4)), "bbox")
+
+    def test_a_bbox_frame_records_the_size_of_its_image(self):
+        frame = bbox_frame(1, 2, 3, 4, size=(1548, 2217))
+        self.assertEqual(frame, {"bbox": [1.0, 2.0, 3.0, 4.0], "size": [1548, 2217]})
+        self.assertEqual(frame_size(frame), (1548, 2217))
+        self.assertIsNone(frame_size(bbox_frame(1, 2, 3, 4)))  # older frames: the original file's pixels
+        self.assertIsNone(frame_size({"bbox": [1, 2, 3, 4], "size": [0, 10]}))
 
     def test_a_text_frame_names_the_result_it_indexes(self):
         transcript = ItemResult("Ada wrote it.")

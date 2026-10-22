@@ -1,4 +1,4 @@
-"""Sequential context: carry part of one entry's output into the next entry's input.
+"""Context for one entry from the others: what was made from the previous entry, or the neighbors themselves.
 
 Some work is not entry-independent. Transcribing a page of a manuscript is easier when the model can
 see the last line of the page before it (a sentence, or even a word, runs across the page break);
@@ -15,6 +15,10 @@ Because the carry-over is sequential, the entries must be processed in order: an
 a ``ContextWindow`` must run with ``workers: 1`` (the default), and the input cannot be divided
 between parallel runs with a ``SliceIterator``. The component warns when it finds itself inside a
 concurrent iterator.
+
+``NeighborContext`` is the other kind of context: not what was made from the entry before, but the
+neighboring entries themselves -- the line images above and below a line -- so each entry can still be
+worked on independently, in parallel.
 """
 
 import logging
@@ -252,3 +256,89 @@ class ContextWindow(Component):
             out = merged
         out.metadata["context_used"] = bool(carried)
         return out
+
+
+class NeighborContext(Component):
+    """Pairs each entry of a list with its neighbors, for a step that reads one entry in their context.
+
+    Where ``ContextWindow`` carries what was *made* from the previous entry into the next (so it is
+    sequential), this hands over the neighboring entries *themselves* -- the line images above and
+    below a line, the sentences around a sentence -- so the entries stay independent and an
+    ``Iterator`` over the output may run with ``workers``. Put it between the step that made the list
+    (a ``YoloSegmenter`` finding lines) and an ``Iterator``; each entry of its output is a list of
+
+        TEXT "<before label>", <entry before>, ..., TEXT "<target label>", <the entry>,
+        TEXT "<after label>", <entry after>, ...
+
+    which every AI backend takes in order (a TEXT part with no ``{text_input_<i>}`` slot in the prompt
+    is sent as text, so each label introduces the image after it). Where there is no neighbor -- the
+    first and last lines of a page -- the label is followed by the ``empty`` text instead.
+
+    Each bundle records where its entry is (the entry's ``locator``, e.g. a line's bounding box) and
+    its position (``sequence``), so a row made from it -- the line's transcription -- says which line
+    it is, just as if the entry had been handed over on its own.
+
+    Settings:
+        - before / after: how many neighbors on each side (default 1 and 1)
+        - labels: ``{"before": ..., "target": ..., "after": ...}`` texts introducing each part
+          (defaults: 'Previous line (context only):', 'Line to transcribe:', 'Next line (context only):')
+        - empty:  ``{"before": ..., "after": ...}`` texts used when there is no neighbor on that side
+    """
+
+    LABELS = {
+        "before": "Previous line (context only):",
+        "target": "Line to transcribe:",
+        "after": "Next line (context only):",
+    }
+    EMPTY = {
+        "before": "(none: this is the first line)",
+        "after": "(none: this is the last line)",
+    }
+
+    def __init__(self, tree, workflow, parent=None):
+        super().__init__(tree, workflow, parent)
+        self.before = int(self.settings.get("before", 1))
+        self.after = int(self.settings.get("after", 1))
+        if self.before < 0 or self.after < 0:
+            raise ValueError(f"{self!r}: before and after must not be negative")
+        self.labels = {**self.LABELS, **(self.settings.get("labels") or {})}
+        self.empty = {**self.EMPTY, **(self.settings.get("empty") or {})}
+
+    def label(self, text, input):
+        return ItemResult(text, metadata={"type": "TEXT", "context": True}, input=input, processor=self)
+
+    def bundle(self, entries, i):
+        """The list for entry *i*: its neighbors before, itself, its neighbors after, each labelled."""
+        target = entries[i]
+        values = []
+        sides = (
+            ("before", entries[max(0, i - self.before) : i], self.before),
+            ("target", [target], 1),
+            ("after", entries[i + 1 : i + 1 + self.after], self.after),
+        )
+        for side, members, wanted in sides:
+            if not wanted:
+                continue
+            if members:
+                values.append(self.label(self.labels[side], target))
+                values.extend(members)
+            else:
+                values.append(self.label(f"{self.labels[side]} {self.empty[side]}", target))
+        bundle = ListResult(
+            values,
+            input=target,
+            processor=self,
+            metadata={"neighbors": {"before": i - max(0, i - self.before), "after": len(sides[2][1])}},
+        )
+        # An Iterator re-points its entries' input at the list it iterates, so the bundle itself must
+        # carry where its entry is and its position for the rows made from it
+        if isinstance(target, Result):
+            if target.locator:
+                bundle.locator = target.locator
+            if target.sequence is not None:
+                bundle.sequence = target.sequence
+        return bundle
+
+    def _process(self, input: Result) -> Result:
+        entries = list(input) if isinstance(input, ListResult) else [input]
+        return ListResult([self.bundle(entries, i) for i in range(len(entries))], input=input, processor=self)

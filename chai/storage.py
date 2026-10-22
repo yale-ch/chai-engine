@@ -23,7 +23,7 @@ import ujson as json
 
 from .core import Component, Result
 from .persistence.jsonl import _line_lock, add_run_records, run_records_file
-from .persistence.parquet import ParquetRecordWriter, _value_kind
+from .persistence.parquet import ParquetRecordWriter, _value_kind, run_records_metadata
 from .persistence.postgres import (
     _pg_connect,
     _pg_ensure_chai_tea,
@@ -31,12 +31,12 @@ from .persistence.postgres import (
     postgres_params,
 )
 from .persistence.provenance import _source_result, _uri_for
-from .persistence.rows import RESULT_COLUMNS, build_record, result_row, result_to_json
+from .persistence.rows import PARQUET_RESULT_COLUMNS, build_record, parquet_result_row, result_row, result_to_json
 from .persistence.schema import table_names
 from .persistence.sql import write_rows
 from .persistence.sqlite import _connect
 from .persistence.values import _isoformat_rows, _json_safe
-from .result import FileItemResult
+from .result import FileItemResult, ItemResult
 
 logger = logging.getLogger("chai")
 
@@ -44,6 +44,8 @@ logger = logging.getLogger("chai")
 _truncated_runs = {}
 #: path -> the run whose PROJECT/WORKFLOW/WORKFLOW_RUN rows were last recorded beside it
 _recorded_runs = {}
+#: workflow -> {file template: the ParquetStorage that writes it}, so steps naming one file share it
+_parquet_files = weakref.WeakKeyDictionary()
 
 
 def _run_id_of(component):
@@ -350,12 +352,25 @@ class ParquetStorage(Storage):
     component subscribes to the workflow's ``component_end``/``component_error`` event, so a run that
     dies part way through still leaves the rows it got to). By default each row is a row of the
     CHAI-TEA RESULT table (see ``result_row``) and the file is typed by that table's columns
-    (``RESULT_COLUMNS``), so it loads into the central database as it stands -- a run that produced
+    (``PARQUET_RESULT_COLUMNS``: the RESULT columns less ``created``/``modified``, which the central
+    loader refuses and the table fills in on load), so it loads into the central database as it stands -- a run that produced
     nothing still leaves an empty file with those columns. With ``fields`` set, columns and their
     types are inferred from the data unless declared in ``schema``; dicts, lists and columns of mixed
     types become JSON-encoded text columns, which is what a loader on the far side can parse
     consistently. See ``ParquetRecordWriter`` for the column kinds and how batching interacts with
     type inference.
+
+    Several ``ParquetStorage`` steps of one workflow that name the same ``file`` share it: a run that
+    stores from several places (the regions of a page, and the text of each) still leaves one file.
+    The first of them in the workflow writes it, with its own ``compression``/``batch_size``; each
+    step still makes its own rows (its ``sources``, ``constants``, ...).
+
+    The ``file_steps`` branch runs on the written file -- a ``FileItemResult`` of the ``.parquet``
+    -- once the run has ended and the file is complete, which is the only point at which its
+    ``chai_tea_records`` hold the finished run. That is where an ``uploader.S3Uploader`` goes to hand
+    the run to the system that loads it into the central database. A failing file step is logged as
+    an error and leaves the file where it is; the run itself has already finished. Its results are
+    kept in ``file_results``. Every sharing step's ``file_steps`` run, once per file.
 
     Unlike ``SqliteStorage`` this stores one row per result and no derivative results: it is a table
     of a run's output, not a browsable object graph. Rows are held in memory until the file is
@@ -418,6 +433,23 @@ class ParquetStorage(Storage):
         self.run_columns = (
             self.settings.get("run_columns", True) and not self.result_rows
         )
+        self.file_steps = []
+        for step_tree in tree.get("file_steps", []):
+            step = self._make_step(step_tree, workflow)
+            step.parent = self
+            self.file_steps.append(step)
+        self.file_results = []
+        # The first step of the workflow naming this file writes it; any later one adds its rows there
+        shared = _parquet_files.setdefault(workflow, {}) if workflow is not None else {}
+        self.primary = shared.setdefault(self.file_template, self)
+        if self.primary is not self:
+            if self.primary.result_rows != self.result_rows:
+                raise ValueError(
+                    f"{self} and {self.primary} write {self.settings['file']}, but only one of them sets "
+                    "fields: a file holds RESULT rows or other records, not both"
+                )
+            self.primary.file_steps.extend(self.file_steps)
+            return
         self._lock = threading.Lock()
         self._writer = None
         self.run_id = None
@@ -455,21 +487,27 @@ class ParquetStorage(Storage):
             self.close()
 
     def _close_quietly(self):
-        """``close`` for the atexit hook: a failure there must not mask what ended the process."""
+        """``close`` for the atexit hook: a failure there must not mask what ended the process.
+
+        The ``file_steps`` are not run: a run that never ended is not one to hand on, and an upload
+        at interpreter exit could not be relied on anyway.
+        """
         try:
-            self.close()
+            self.close(run_file_steps=False)
         except Exception as e:  # pragma: no cover - interpreter shutdown
             logger.warning(f"Could not write Parquet file {self.file_name}: {e}")
 
     def build_json(self, input: Result):
         """The row for one result: a RESULT row, or the selected fields, constants and run columns."""
         if self.result_rows:
-            return build_record(
-                input,
-                sources=self.settings.get("sources"),
-                input_source=self.settings.get("input_source"),
-                run_id=self.run_id,
-                constants=self.settings.get("constants"),
+            return parquet_result_row(
+                build_record(
+                    input,
+                    sources=self.settings.get("sources"),
+                    input_source=self.settings.get("input_source"),
+                    run_id=self.primary.run_id,
+                    constants=self.settings.get("constants"),
+                )
             )
         js = build_record(
             input,
@@ -485,7 +523,7 @@ class ParquetStorage(Storage):
         for column, value in (self.settings.get("constants") or {}).items():
             js[column] = value
         if self.run_columns:
-            js["run_id"] = self.run_id
+            js["run_id"] = self.primary.run_id
             js["stored_at"] = datetime.now(timezone.utc)
         return js
 
@@ -497,7 +535,7 @@ class ParquetStorage(Storage):
         would leave a file missing columns that every other run has.
         """
         if self.result_rows:
-            return dict(RESULT_COLUMNS)
+            return dict(PARQUET_RESULT_COLUMNS)
         schema = self.settings.get("schema")
         if not schema:
             return None
@@ -524,7 +562,7 @@ class ParquetStorage(Storage):
             },
         )
 
-    def close(self):
+    def close(self, run_file_steps=True):
         """Write the Parquet file for the current run; returns ``{"path", "rows", "columns"}``.
 
         Called automatically when the workflow finishes. Call it directly when results are pushed
@@ -532,8 +570,11 @@ class ParquetStorage(Storage):
         so re-running the same workflow object writes a fresh file rather than appending to a closed
         one. A run that produced no rows writes no file unless its columns are known -- RESULT rows, or a
         ``schema`` saying what the file holds --
-        in which case it leaves an empty one with those columns.
+        in which case it leaves an empty one with those columns. The ``file_steps`` then run on the
+        file, unless *run_file_steps* is false. A step sharing another's file closes that one.
         """
+        if self.primary is not self:
+            return self.primary.close(run_file_steps)
         with self._lock:
             writer, self._writer = self._writer, None
             if writer is None:
@@ -547,20 +588,41 @@ class ParquetStorage(Storage):
                 # The rows the file's RESULT rows hang under, for whoever loads it: a loader creates
                 # them first (``store_postgres_rows``). With the default single row group the file is
                 # written now, so they include the finished run.
-                writer.metadata["chai_tea_records"] = json.dumps(
-                    _json_safe(_isoformat_rows(self.workflow.records()))
-                )
+                writer.metadata["chai_tea_records"] = run_records_metadata(self.workflow.records())
             info = writer.close()
             logger.info(f"Wrote {info['rows']} rows to {info['path']}")
             self._start_run()
-            return info
+        if run_file_steps and self.file_steps:
+            self.run_file_steps(info)
+        return info
+
+    def run_file_steps(self, info):
+        """Run the ``file_steps`` on the file *info* describes; their results go to ``file_results``."""
+        written = FileItemResult(info["path"], processor=self)
+        written.metadata["rows"] = info["rows"]
+        self.file_results = []
+        for step in self.file_steps:
+            try:
+                self.file_results.append(step.process(written))
+            except Exception as e:
+                logger.error(f"{step} failed on {info['path']}, which is still there: {e}")
+                self.file_results.append(
+                    ItemResult(
+                        None,
+                        metadata={"type": "ERROR", "error": str(e), "error_class": e.__class__.__name__},
+                        input=written,
+                        processor=step,
+                    )
+                )
+        return self.file_results
 
     def _process(self, input: Result) -> Result:
         """Add the result as a row of the run's Parquet file, then pass it through unchanged."""
-        with self._lock:
-            if self._writer is None:
-                self._writer = self._new_writer()
-            writer = self._writer
+        primary = self.primary
+        with primary._lock:
+            if primary._writer is None:
+                primary._writer = primary._new_writer()
+            writer = primary._writer
         writer.add(self.build_json(input))
         return input
 

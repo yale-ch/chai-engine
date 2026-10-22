@@ -6,9 +6,12 @@ source into the RESULT row's ``input_segment``, outermost first. What a front en
 a box over an image, a highlight in a text -- is up to the front end; the engine stores only the
 data. These are the frames the engine's own components write:
 
-* **bbox** -- ``{"bbox": [x1, y1, x2, y2]}``: a region of an image, in that image's pixels, so an
-  overlay drawn in the image's own coordinates (an SVG ``viewBox`` of its natural size) lines up
-  however the image is scaled. Written by ``YoloSegmenter``.
+* **bbox** -- ``{"bbox": [x1, y1, x2, y2], "size": [width, height]}``: a region of an image, in the
+  pixels of the image it was found in, and that image's size. With the size a front end can draw the
+  box on any rendition of the image -- a downscaled copy, an IIIF derivative -- by scaling from
+  ``size`` to what it shows, rather than trusting that it holds the very file the model saw.
+  ``size`` may be missing (frames written before it was recorded): the box is then in the pixels of
+  the original file. Written by ``YoloSegmenter``.
 * **text** -- ``{"start": 120, "end": 132}``: a character range, ``text[start:end]``. Two optional
   keys say more: ``result``, the id of the result whose (text) value the offsets index, when that
   is not a file's content -- a transcription of a page image, say, whose row's ``input`` is the
@@ -28,9 +31,24 @@ import ujson as json
 from ..result import FileItemResult, Result
 
 
-def bbox_frame(x1, y1, x2, y2):
-    """A region of an image, in its pixels: ``{"bbox": [x1, y1, x2, y2]}``."""
-    return {"bbox": [float(x1), float(y1), float(x2), float(y2)]}
+def bbox_frame(x1, y1, x2, y2, size=None):
+    """A region of an image, in its pixels, and the image's ``(width, height)`` when known.
+
+    ``{"bbox": [x1, y1, x2, y2], "size": [width, height]}``; without *size* the frame has no ``size``.
+    """
+    frame = {"bbox": [float(x1), float(y1), float(x2), float(y2)]}
+    if size is not None:
+        width, height = size
+        frame["size"] = [int(width), int(height)]
+    return frame
+
+
+def frame_size(frame):
+    """The ``(width, height)`` of the image a bbox frame's coordinates are in, or ``None``."""
+    size = frame.get("size") if isinstance(frame, dict) else None
+    if isinstance(size, (list, tuple)) and len(size) == 2 and all(isinstance(v, (int, float)) and v > 0 for v in size):
+        return int(size[0]), int(size[1])
+    return None
 
 
 def text_frame(start, end, result=None, exact=None):

@@ -123,17 +123,17 @@ class YoloClassifier(Classifier):
     for detection models with bounding boxes, use ``segmenter.YoloSegmenter``.
 
     Settings:
-        - model:      YOLO classification model (default: "yolo11n-cls.pt")
+        - model:      YOLO classification model, or ``hf://owner/repo/file.pt`` (default: "yolo11n-cls.pt")
         - confidence: minimum probability to emit a label (default: 0.5)
     """
 
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)
-        from ultralytics import YOLO
+        from .segmenter import yolo_model
 
         model_name = self.settings.get("model", "yolo11n-cls.pt")
         self.confidence = self.settings.get("confidence", 0.5)
-        self.model = YOLO(model_name)
+        self.model = yolo_model(model_name)
 
     def _process(self, input):
         if isinstance(input, FileItemResult):
