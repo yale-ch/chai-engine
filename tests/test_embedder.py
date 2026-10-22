@@ -1,5 +1,7 @@
+import os
 import tempfile
 import unittest
+from unittest import mock
 
 from chai.result import ItemResult
 from chai.workflow import Workflow
@@ -95,6 +97,83 @@ class TestEmbeddings(unittest.TestCase):
             {"type": "embedder.LMStudioVectorRetriever", "id": "lms", "settings": {"model": "my-embedder"}}, self.wf
         )
         self.assertEqual(named.model, "lm_studio/my-embedder")
+
+    def test_vector_store_refuses_mismatched_vectors(self):
+        from chai.persistence.vectors import VectorStore
+
+        store = VectorStore(self.db)
+        with self.assertRaises(ValueError):
+            store.add("short", ["one", "two", "three"], [[1.0, 0.0]])
+        self.assertEqual(store.count("short"), 0)
+
+    def test_one_vector_for_many_texts_refused(self):
+        # litellm's mock_response answers any request with a single vector, as Vertex AI's
+        # embedContent does for a batch: the texts must not be paired with it
+        indexer = self.wf._make_step(
+            {
+                "type": "embedder.OpenAIVectorIndexer",
+                "id": "oai_short",
+                "settings": {"api_key": "test", "litellm_params": {"mock_response": [1.0, 0.0, 0.0]}},
+            },
+            self.wf,
+        )
+        self.assertFalse(indexer.embeds_separately())
+        with self.assertRaises(ValueError):
+            indexer.embed(["one", "two"])
+
+    def test_embed_content_models_get_a_request_per_text(self):
+        from chai.persistence.vectors import VectorStore
+
+        vertex = {"GEMINI_API_KEY": "", "GOOGLE_API_KEY": "", "GOOGLE_CLOUD_PROJECT": "test-project", "VERTEXAI_PROJECT": ""}
+        settings = {"database": self.db, "collection": "vertex", "litellm_params": {"mock_response": [1.0, 0.0, 0.0]}}
+        with mock.patch.dict(os.environ, vertex):
+            indexer = self.wf._make_step(
+                {
+                    "type": "embedder.GeminiVectorIndexer",
+                    "id": "vertex_index",
+                    "settings": {**settings, "documents": ["one", "two", "three"]},
+                },
+                self.wf,
+            )
+            older = self.wf._make_step(
+                {"type": "embedder.GeminiVectorIndexer", "id": "vertex_001", "settings": {"model": "gemini-embedding-001"}},
+                self.wf,
+            )
+        self.assertEqual(indexer.model, "vertex_ai/gemini-embedding-2")
+        self.assertTrue(indexer.embeds_separately())
+        self.assertFalse(older.embeds_separately())
+        vectors, call = indexer.embed(["one", "two", "three"])
+        self.assertEqual(len(vectors), 3)
+        self.assertEqual(call["token_usage"]["prompt"], 30)  # the mock reports 10 prompt tokens a request
+        indexer.process(ItemResult("query"))
+        self.assertEqual(VectorStore(self.db).count("vertex"), 3)
+
+    def test_indexing_usage_reaches_the_ledger(self):
+        settings = {
+            "database": self.db,
+            "collection": "ledger",
+            "api_key": "test",
+            "litellm_params": {"mock_response": [1.0, 0.0, 0.0]},
+        }
+        wf = Workflow(
+            {
+                "id": "ledger_wf",
+                "type": "workflow.Workflow",
+                "steps": [
+                    {
+                        "type": "embedder.OpenAIVectorIndexer",
+                        "id": "index",
+                        "settings": {**settings, "documents": ["one"]},
+                        "next_steps": [{"type": "embedder.OpenAIVectorRetriever", "id": "retrieve", "settings": settings}],
+                    }
+                ],
+            }
+        )
+        wf.run(ItemResult("query"))
+        usage = wf.usage_summary()
+        self.assertEqual(set(usage["by_component"]), {"index", "retrieve"})
+        self.assertEqual(usage["by_component"]["index"]["prompt_tokens"], 10)
+        self.assertEqual(usage["calls"], 2)
 
     def test_service_setting_refused(self):
         with self.assertRaises(ValueError):

@@ -540,25 +540,56 @@ class LLMComponent(Component):
     # what an embedding call shares with the chat request: where to send it and how to authenticate
     EMBEDDING_KWARGS = ("model", "timeout", "api_base", "api_key", "vertex_project", "vertex_location")
 
+    def embeds_separately(self) -> bool:
+        """Whether each text needs an embedding request of its own.
+
+        Some endpoints make *one* vector of everything a request carries: Vertex AI's
+        ``embedContent``, which LiteLLM uses for ``gemini-embedding-2``, reads a list of texts as the
+        parts of a single input. LiteLLM's model map flags those models (``uses_embed_content``).
+        """
+        try:
+            info = litellm_module().get_model_info(model=self.model, custom_llm_provider=self.provider or None)
+        except Exception:
+            return False
+        return bool(info.get("uses_embed_content"))
+
+    @staticmethod
+    def _sum_usage(usages: List[dict]) -> dict:
+        """Token counts of several calls added up; ``None`` where none of them reported a count."""
+        total = {}
+        for key in ("total", "prompt", "result", "thinking", "images"):
+            counts = [u[key] for u in usages if u.get(key) is not None]
+            total[key] = sum(counts) if counts else None
+        return total
+
     def embed(self, texts: List[str]) -> Tuple[List[List[float]], dict]:
         """``(vectors, metadata)`` for *texts*, one vector per text, through ``litellm.embedding``.
 
         *metadata* is the call's ``token_usage``, ``cost``, ``duration``, ``engine``, ``provider`` and
-        ``model``, as ``_process`` records for a chat call.
+        ``model``, as ``_process`` records for a chat call. A model that ``embeds_separately`` gets one
+        request per text, and *metadata* adds them up. A response that does not hold one vector per
+        text raises ``ValueError`` rather than pair texts with the wrong vectors.
         """
+        texts = [str(t) for t in texts]
         kw = {k: self.base_kwargs[k] for k in self.EMBEDDING_KWARGS if k in self.base_kwargs}
         if self.settings.get("dimensions"):
             kw["dimensions"] = int(self.settings["dimensions"])
         kw.update(self.settings.get("litellm_params") or {})
+        batches = [[t] for t in texts] if self.embeds_separately() else [texts]
         start = time.time()
-        response = litellm_module().embedding(input=[str(t) for t in texts], **kw)
+        responses = [litellm_module().embedding(input=batch, **kw) for batch in batches]
         duration = time.time() - start
 
-        vectors = [list(d["embedding"] if isinstance(d, dict) else d.embedding) for d in response.data]
-        usage = self.get_usage(response)
+        vectors = [
+            list(d["embedding"] if isinstance(d, dict) else d.embedding) for response in responses for d in response.data
+        ]
+        if len(vectors) != len(texts):
+            raise ValueError(f"{self}: {self.model} returned {len(vectors)} vectors for {len(texts)} texts")
+        usages = [self.get_usage(response) for response in responses]
+        costs = [self.get_cost(response, usage) for response, usage in zip(responses, usages)]
         metadata = {
-            "token_usage": usage,
-            "cost": self.get_cost(response, usage),
+            "token_usage": self._sum_usage(usages),
+            "cost": None if None in costs else sum(costs),
             "duration": duration,
             "engine": self.ENGINE_NAME,
             "provider": self.provider,
