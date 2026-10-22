@@ -24,7 +24,6 @@ dependencies = [
     "pyarrow",
     "python-dotenv",
     "requests",
-    "supervision",
     "tenacity",
     "transformers>=5.5.0",
     "ujson",

@@ -82,19 +82,46 @@
       "database": "chai"
     }
   },
-  "YoloDetectAndAnnotate": {
+  "YoloDetectRegions": {
     "id": "yolo_detect",
     "type": "segmenter.YoloSegmenter",
-    "name": "YOLO Detect + Annotated Preview",
+    "name": "YOLO Detect + Stored Regions",
     "settings": {
       "model": "yolo11n.pt",
-      "confidence": 0.25
+      "confidence": 0.25,
+      "crop": false
     },
     "next_steps": [
       {
-        "id": "yolo_annotate",
-        "type": "annotator.ImageBoxAnnotator",
-        "name": "Annotated Detection Image"
+        "id": "each_region",
+        "type": "iterator.Iterator",
+        "steps": [
+          {
+            "type": "storage.PostgresStorage",
+            "settings": {
+              "database": "chai"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "LocateExtractedValues": {
+    "id": "locate_values",
+    "type": "segmenter.TextSpanLocator",
+    "name": "Locate Extracted Values in Text",
+    "next_steps": [
+      {
+        "id": "each_span",
+        "type": "iterator.Iterator",
+        "steps": [
+          {
+            "type": "storage.PostgresStorage",
+            "settings": {
+              "database": "chai"
+            }
+          }
+        ]
       }
     ]
   }

@@ -5,6 +5,7 @@ What the ``chai.storage`` components write, and how -- with no components here:
 * ``schema`` -- the CHAI-TEA tables (``TABLES``, the DDL, ``column_types``/``column_kinds``)
 * ``records`` -- ``Project`` and ``WorkflowRun``, the PROJECT and WORKFLOW_RUN rows as objects
 * ``provenance`` -- where a result came from: its input, that input's md5, where in it the result is
+* ``locators`` -- the frames ``input_segment`` is made of (a bbox, a character range), for a UI to draw
 * ``rows`` -- a result as a RESULT row (``result_row``), or a file storage's record (``build_record``)
 * ``jsonl`` -- JSON-Lines files, the run records kept beside them, and ``token_usage_summary``
 * ``parquet`` -- ``ParquetRecordWriter``, ``jsonl_to_parquet`` and reading a Parquet file back
@@ -28,6 +29,7 @@ from .bundle import (  # noqa: F401
     read_bundle_manifest,
 )
 from .jsonl import add_run_records, read_jsonl, read_run_records, run_records_file, token_usage_summary  # noqa: F401
+from .locators import bbox_frame, frame_kind, segment_frames, text_frame  # noqa: F401
 from .legacy import jsonl_to_result_rows, record_to_result_row  # noqa: F401
 from .parquet import ParquetRecordWriter, jsonl_to_parquet, parquet_columns, parquet_run_records  # noqa: F401
 from .postgres import (  # noqa: F401
