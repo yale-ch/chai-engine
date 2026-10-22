@@ -15,6 +15,10 @@ provider prefix, the default host and each provider's defaults, so existing work
 working. Role composites (``LLMExtractor``, ``GeminiTranscriber``, ...) are generated from all of
 them by ``chai.ai.create_all_components``.
 
+The same backends serve the embedding role (``chai.embedder``): ``embed`` sends texts to LiteLLM's
+``embedding`` call, and in an embedding role ``model`` names an embedding model, with each backend's
+``DEFAULT_EMBEDDING_MODEL`` and ``EMBEDDING_PROVIDER`` in place of its chat defaults.
+
 ``litellm`` itself is imported lazily, when a component is built, so a deterministic pipeline never
 pays for it.
 """
@@ -126,6 +130,11 @@ class LLMComponent(Component):
     ``type``, ``engine`` (the provider) and ``model`` metadata. A leading ``</think>`` block from a
     reasoning model is stripped.
 
+    Mixed into an embedding role (``MODEL_KIND`` 'embedding', see ``chai.embedder``) the backend is
+    used through ``embed`` instead, and ``model`` is the embedding model (default
+    ``DEFAULT_EMBEDDING_MODEL``); of the settings below, the connection ones (``api_base``,
+    ``api_key``, ``timeout``, ``pricing``, ``litellm_params``) apply, plus ``dimensions``.
+
     Settings that are not set are not sent, so each provider's own defaults apply; a setting that is
     set is always sent, and a model that rejects it fails loudly rather than being quietly ignored.
 
@@ -167,6 +176,8 @@ class LLMComponent(Component):
         - extra_body: dict passed to the provider verbatim, e.g. vLLM/sglang extras (default: none)
         - litellm_params: extra keyword arguments passed verbatim to litellm.completion, e.g.
           drop_params or mock_response (default {})
+        - dimensions: length of the vectors an embedding model returns, for models that can
+          shorten them (embedding roles only; default: the model's)
     """
 
     DEFAULT_MODEL: str = ""
@@ -180,6 +191,9 @@ class LLMComponent(Component):
     DEFAULT_TOOLS: list = []
     DEFAULT_SAFETY: Optional[str] = None
     DEFAULT_API_KEY: Optional[str] = None  # e.g. 'EMPTY' for local servers that ignore it
+    DEFAULT_EMBEDDING_MODEL: str = ""
+    EMBEDDING_PROVIDER: str = ""  # prefix for bare embedding model ids when not PROVIDER ('ollama')
+    MODEL_KIND: str = "chat"  # 'embedding' when mixed into an embedding role (chai.embedder.Embedder)
 
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)
@@ -189,7 +203,8 @@ class LLMComponent(Component):
         self.substitutions = {"ADDITIONAL_CONTEXT": ""}
         self.system_instruction = self.settings.get("system_instruction", "") or None
 
-        self.model = self.resolve_model(str(self.settings.get("model", self.DEFAULT_MODEL) or ""))
+        default_model = self.DEFAULT_EMBEDDING_MODEL if self.MODEL_KIND == "embedding" else self.DEFAULT_MODEL
+        self.model = self.resolve_model(str(self.settings.get("model", default_model) or ""))
         if not self.model:
             raise ValueError(f"{self} needs the `model` setting (a LiteLLM model id such as 'gemini/gemini-3.1-flash-lite')")
         self.provider = self.model.split("/", 1)[0] if "/" in self.model else ""
@@ -210,12 +225,15 @@ class LLMComponent(Component):
 
     def resolve_model(self, model: str) -> str:
         """The full LiteLLM id: a bare model name gets this backend's provider prefix."""
-        if not model or not self.PROVIDER:
+        provider = self.PROVIDER
+        if self.MODEL_KIND == "embedding" and self.EMBEDDING_PROVIDER:
+            provider = self.EMBEDDING_PROVIDER
+        if not model or not provider:
             return model
         head = model.split("/", 1)[0]
         if known_provider(head):
             return model
-        return f"{self.PROVIDER}/{model}"
+        return f"{provider}/{model}"
 
     def validate_model(self):
         """Fail at build time when LiteLLM cannot tell which provider the model id belongs to."""
@@ -516,6 +534,39 @@ class LLMComponent(Component):
         if self.expects == "yaml":
             return extract_yaml(text), "DATA"
         return text, "TEXT"
+
+    # ------------------------------------------------------------------ embeddings
+
+    # what an embedding call shares with the chat request: where to send it and how to authenticate
+    EMBEDDING_KWARGS = ("model", "timeout", "api_base", "api_key", "vertex_project", "vertex_location")
+
+    def embed(self, texts: List[str]) -> Tuple[List[List[float]], dict]:
+        """``(vectors, metadata)`` for *texts*, one vector per text, through ``litellm.embedding``.
+
+        *metadata* is the call's ``token_usage``, ``cost``, ``duration``, ``engine``, ``provider`` and
+        ``model``, as ``_process`` records for a chat call.
+        """
+        kw = {k: self.base_kwargs[k] for k in self.EMBEDDING_KWARGS if k in self.base_kwargs}
+        if self.settings.get("dimensions"):
+            kw["dimensions"] = int(self.settings["dimensions"])
+        kw.update(self.settings.get("litellm_params") or {})
+        start = time.time()
+        response = litellm_module().embedding(input=[str(t) for t in texts], **kw)
+        duration = time.time() - start
+
+        vectors = [list(d["embedding"] if isinstance(d, dict) else d.embedding) for d in response.data]
+        usage = self.get_usage(response)
+        metadata = {
+            "token_usage": usage,
+            "cost": self.get_cost(response, usage),
+            "duration": duration,
+            "engine": self.ENGINE_NAME,
+            "provider": self.provider,
+            "model": self.model,
+        }
+        return vectors, metadata
+
+    # ------------------------------------------------------------------ processing
 
     def _process(self, input):
         messages = self.build_messages(input)

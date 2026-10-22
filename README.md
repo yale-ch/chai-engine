@@ -109,7 +109,7 @@ Two consequences worth internalizing:
 | **Extractor** | Content → structured data | `KeywordExtractor`, `WordCountExtractor`, `JsonXpathExtractor`, `GeminiExtractor`, ... |
 | **Translator** | Language transforms | `GlossaryTranslator`, `GeminiTranslator`, ... |
 | **Reducer** | Merge branched runs into one result | `FlattenReducer`, `CollectReducer`, `MergeDictReducer`, `TextJoinReducer`, `GeminiReducer`, ... |
-| **Embedder** | Vectors + similarity | `VectorIndexer`, `VectorRetriever` (SQLite store; hash/gemini/ollama/openai services) |
+| **Embedder** | Vectors + similarity | `VectorIndexer`, `VectorRetriever` (SQLite store; local hash, or `GeminiVectorIndexer`, `OllamaVectorRetriever`, ... per AI backend) |
 | **Decision** | System One questions: choice / score / noul answered with probabilities | `DecisionClassifier` (one question, the answer as a label), `DecisionGate` (a true/false question as a branch), `DecisionExtractor` (several questions, one record) -- see [docs/system1.md](docs/system1.md) |
 | **Storage** | Persist results (CHAI-TEA rows) | `JsonLinesStorage`, `ParquetStorage`, `SqliteStorage`, `PostgresStorage` (+ human corrections), `FileSystemStorage` |
 | **Uploader** | Hand a file to another system | `S3Uploader`, `FileSystemUploader` |
