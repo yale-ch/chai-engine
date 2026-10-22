@@ -48,9 +48,8 @@ python -m sglang.launch_server \
 Driving the workflow from a dev box:
 
 ```bash
-SGLANG_API_HOST=my-gpu-host:30000 \
-SGLANG_MODEL=Qwen/Qwen3-VL-4B-Instruct \
-python experiment_sglang.py
+python scripts/smoke_backend.py sglang path/to/images/ \
+  --api-host my-gpu-host:30000 --model Qwen/Qwen3-VL-4B-Instruct
 ```
 
 ### Apple Silicon Mac (text-only, via MLX backend)
@@ -81,7 +80,7 @@ SGLANG_USE_MLX=1 ~/.venv-sglang/bin/python -m sglang.launch_server \
   --trust-remote-code
 
 # Smoke-test the chai integration
-~/.venv-chai/bin/python experiment_sglang_text.py
+~/.venv-chai/bin/python scripts/smoke_backend.py sglang --text "Name three kinds of archival record."
 ```
 
 Notes:

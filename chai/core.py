@@ -6,6 +6,7 @@ Defines ``Component`` (the unit of processing that turns a ``Result`` into a new
 subclasses ``Component``.
 """
 
+import copy
 import importlib
 import logging
 import time
@@ -141,7 +142,8 @@ class Component(BaseThing):
             if not self.workflow:
                 raise ValueError("Cannot use a library based configuration for or without a Workflow")
             # merge the library's configuration with tree
-            base_config = self.workflow.library.get(base, {})
+            # a copy: the library entry is a template for every step that names it
+            base_config = copy.deepcopy(self.workflow.library.get(base, {}))
             if base_config:
                 for k, v in tree.items():
                     if k == "settings":

@@ -1,0 +1,36 @@
+%%{init: {"flowchart": {"wrappingWidth": 1000}}}%%
+flowchart TD
+    n0(["<b>m804_lines</b><br/><i>workflow.Workflow</i><br/>M804: find the lines and images of a<br/>page, and transcribe each line with<br/>its neighbors as context"]):::workflow
+    n1[/"<b>m804_page</b><br/><i>provider.FileListProvider</i>"/]:::provider
+    n2{{"<b>each_page</b><br/><i>iterator.Iterator</i><br/><small>source</small>"}}:::iterator
+    n3["<b>find_images</b><br/><i>segmenter.YoloSegmenter</i><br/>miniatures and drop capitals"]:::ai
+    n4{{"<b>each_image</b><br/><i>iterator.Iterator</i>"}}:::iterator
+    n5[("<b>store_image</b><br/><i>storage.ParquetStorage</i><br/>one row per image region: its box,<br/>class and confidence (and the run's<br/>one Parquet file, uploaded when the<br/>run ends)")]:::storage
+    n6[/"<b>upload_run</b><br/><i>uploader.S3Uploader</i><br/>hand the run's Parquet file to the<br/>CHAI-TEA loader"\]:::uploader
+    n7["<b>find_lines</b><br/><i>segmenter.YoloSegmenter</i><br/>text lines, in reading order"]:::ai
+    n8{{"<b>each_line_region</b><br/><i>iterator.Iterator</i>"}}:::iterator
+    n9[("<b>store_line_region</b><br/><i>storage.ParquetStorage</i><br/>one row per line region: its box,<br/>class and confidence")]:::storage
+    n10[["<b>line_neighbors</b><br/><i>context.NeighborContext</i><br/>each line with the lines above and<br/>below it"]]:::context
+    n11{{"<b>each_line</b><br/><i>iterator.Iterator</i>"}}:::iterator
+    n12["<b>transcribe_line</b><br/><i>transcriber.GeminiTranscriber</i>"]:::ai
+    n13[("<b>store_line_text</b><br/><i>storage.ParquetStorage</i><br/>one row per line: its text, against<br/>the line's box")]:::storage
+    n0 --> n1
+    n1 --> n2
+    n2 --> n3
+    n3 ==>|"next"| n4
+    n4 --> n5
+    n5 -.->|"file"| n6
+    n2 --> n7
+    n7 ==>|"next"| n8
+    n8 --> n9
+    n7 ==>|"next"| n10
+    n10 ==>|"next"| n11
+    n11 --> n12
+    n12 ==>|"next"| n13
+    classDef workflow fill:#37474f,stroke:#263238,color:#fff
+    classDef provider fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    classDef iterator fill:#fff3e0,stroke:#ef6c00,color:#e65100
+    classDef storage fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+    classDef uploader fill:#e0f2f1,stroke:#00695c,color:#004d40
+    classDef context fill:#fffde7,stroke:#f9a825,color:#5d4000
+    classDef ai fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c

@@ -1,0 +1,42 @@
+{
+  "id": "iiif_transcribe",
+  "type": "workflow.Workflow",
+  "name": "Transcribe the images of a IIIF manifest with a local model",
+  "description": "Download the painting images of a IIIF Presentation manifest (cached in downloads/manifest_images), transcribe each with a model served by LM Studio, and write one CHAI-TEA RESULT row per image to results/iiif/run.jsonl. Another manifest: python scripts/run_workflow.py examples/workflow-iiif.json --input MANIFEST_URL",
+  "steps": [
+    {
+      "id": "manifest_images",
+      "type": "provider.IIIFDirFileProvider",
+      "input": "https://collections.library.yale.edu/manifests/16694456",
+      "steps": [
+        {
+          "id": "each_image",
+          "type": "iterator.Iterator",
+          "source": true,
+          "settings": {
+            "continue_on_error": true
+          },
+          "steps": [
+            {
+              "id": "transcribe",
+              "type": "transcriber.LMStudioTranscriber",
+              "settings": {
+                "model": "qwen/qwen3.5-35b-a3b"
+              },
+              "next_steps": [
+                {
+                  "id": "store",
+                  "type": "storage.JsonLinesStorage",
+                  "settings": {
+                    "file": "results/iiif/run.jsonl",
+                    "mode": "truncate"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

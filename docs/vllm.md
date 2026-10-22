@@ -52,9 +52,8 @@ A 24 GB GPU (e.g. RTX 3090, 4090, A10) is comfortable for the 4B VL model.
 Then from your dev box:
 
 ```bash
-VLLM_API_HOST=my-gpu-host:8000 \
-VLLM_MODEL=Qwen/Qwen3-VL-4B-Instruct \
-python experiment_vllm.py
+python scripts/smoke_backend.py vllm path/to/images/ \
+  --api-host my-gpu-host:8000 --model Qwen/Qwen3-VL-4B-Instruct
 ```
 
 ### Apple Silicon Mac (text-only, via vllm-metal plugin)
@@ -73,7 +72,7 @@ curl -fsSL https://raw.githubusercontent.com/vllm-project/vllm-metal/main/instal
   --host 127.0.0.1 --port 8000 --max-model-len 4096
 
 # Smoke-test the chai integration
-~/.venv-chai/bin/python experiment_vllm_text.py
+~/.venv-chai/bin/python scripts/smoke_backend.py vllm --text "Name three kinds of archival record."
 ```
 
 Requires Python 3.12 in the server venv. The installer manages this for you.
