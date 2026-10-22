@@ -47,16 +47,20 @@ class GeminiComponent(LLMComponent):
     DEFAULT_MAX_OUTPUT_TOKENS = 8192
     DEFAULT_TOOLS = ["search"]
     DEFAULT_SAFETY = "OFF"
-    DEFAULT_EMBEDDING_MODEL = "gemini-embedding-001"
+    DEFAULT_EMBEDDING_MODEL = "gemini-embedding-2"
     ENGINE_NAME = "gemini"
 
     def __init__(self, tree, workflow, parent=None):
         # project name is treated as sensitive; it comes from the environment only
-        self.project = os.getenv("GOOGLE_CLOUD_PROJECT", "") or os.getenv("VERTEXAI_PROJECT", "")
+        self.project = os.getenv("GOOGLE_CLOUD_PROJECT", "") or os.getenv(
+            "VERTEXAI_PROJECT", ""
+        )
         self.env_api_key = os.getenv("GEMINI_API_KEY", os.getenv("GOOGLE_API_KEY", ""))
         settings = tree.get("settings", {}) or {}
         if not self.project and not self.env_api_key and not settings.get("api_key"):
-            raise ValueError("Either GOOGLE_CLOUD_PROJECT (Vertex AI) or GEMINI_API_KEY / GOOGLE_API_KEY must be set")
+            raise ValueError(
+                "Either GOOGLE_CLOUD_PROJECT (Vertex AI) or GEMINI_API_KEY / GOOGLE_API_KEY must be set"
+            )
         super().__init__(tree, workflow, parent)
         self.model_version = self._model_version(self.model)
 
@@ -91,7 +95,10 @@ class GeminiComponent(LLMComponent):
         kw = super().build_base_kwargs()
 
         if version >= (3, 0):
-            if "thinking_budget" in self.settings and "thinking_level" not in self.settings:
+            if (
+                "thinking_budget" in self.settings
+                and "thinking_level" not in self.settings
+            ):
                 logger.warning(
                     "%s: %s takes `thinking_level` (low/medium/high), not `thinking_budget`; "
                     "using the default level 'low'",
@@ -99,8 +106,14 @@ class GeminiComponent(LLMComponent):
                     self.model,
                 )
             kw.pop("thinking", None)
-            kw["reasoning_effort"] = str(self.settings.get("thinking_level", self.settings.get("reasoning_effort", "low")))
-        elif version == (2, 5) and "thinking" not in kw and "reasoning_effort" not in kw:
+            kw["reasoning_effort"] = str(
+                self.settings.get(
+                    "thinking_level", self.settings.get("reasoning_effort", "low")
+                )
+            )
+        elif (
+            version == (2, 5) and "thinking" not in kw and "reasoning_effort" not in kw
+        ):
             # Default to turning thinking off: it can run away and ignore the budget
             kw["thinking"] = {"type": "disabled", "budget_tokens": 0}
 
