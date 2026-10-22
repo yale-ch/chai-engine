@@ -36,6 +36,8 @@ class VectorStore:
     def add(self, collection, texts, vectors, metadatas=None, ids=None):
         import hashlib
 
+        if len(vectors) != len(texts):
+            raise ValueError(f"{len(texts)} texts but {len(vectors)} vectors for collection {collection!r}; nothing stored")
         rows = []
         for i, (text, vec) in enumerate(zip(texts, vectors)):
             rid = (ids[i] if ids else None) or hashlib.sha256(f"{collection}:{text}".encode()).hexdigest()[:32]

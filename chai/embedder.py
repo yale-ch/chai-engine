@@ -120,8 +120,13 @@ class VectorIndexer(Embedder):
         return [text] if text.strip() else []
 
     def _index(self, texts):
-        vectors, _ = self.embed(texts)
-        return self._store().add(self._collection(), texts, vectors)
+        vectors, call = self.embed(texts)
+        count = self._store().add(self._collection(), texts, vectors)
+        # the input passes on unchanged, so no result of this step carries the embedding call's
+        # usage: report it to the run's ledger here
+        if self.workflow is not None and self.workflow is not self:
+            self.workflow.record_usage(self, call)
+        return count
 
     def _process(self, input):
         docs = self.settings.get("documents")
