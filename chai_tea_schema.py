@@ -2,7 +2,7 @@
 
 One table per entity in the diagram (PROJECT, WORKFLOW, RESULT, ANNOTATION, USER, ROLE, and the two
 permission tables), with the columns, types and keys the diagram declares. Connection settings come
-from ``chai.storage.postgres_params`` -- the same ``dsn``/``host``/``port``/``database``/``user``
+from ``chai.persistence.postgres_params`` -- the same ``dsn``/``host``/``port``/``database``/``user``
 settings and ``PG*`` environment variables ``PostgresStorage`` uses -- and the database itself is
 created if it is missing, like the storage components do.
 
@@ -29,7 +29,7 @@ easy to change:
   ``ANNOTATION_TABLE`` if annotations are meant to accept several replies.
 * Each permission row is unique on (user, workflow/project, role), and every FK column is indexed.
 
-The tables themselves are defined in ``chai/schema.py`` (re-exported here), so the storages and this
+The tables themselves are defined in ``chai/persistence/schema.py`` (re-exported here), so the storages and this
 tool build exactly the same schema; ``SqliteStorage`` and ``PostgresStorage`` write it directly. A
 table of one of these names left over from an older layout (the pre-CHAI-TEA ``results`` table
 ``PostgresStorage`` used to write, say) is detected and reported rather than silently left alone.
@@ -38,7 +38,7 @@ table of one of these names left over from an older layout (the pre-CHAI-TEA ``r
 import argparse
 import sys
 
-from chai.schema import (  # noqa: F401 -- the schema lives in the package; re-exported here
+from chai.persistence.schema import (  # noqa: F401 -- the schema lives in the package; re-exported here
     CREATE_TABLES,
     INDEXED_COLUMNS,
     KINDS,
@@ -53,7 +53,7 @@ from chai.schema import (  # noqa: F401 -- the schema lives in the package; re-e
     sqlite_statements,
     table_names,
 )
-from chai.storage import _pg_connect, ensure_postgres_database, postgres_params
+from chai.persistence.postgres import _pg_connect, ensure_postgres_database, postgres_params
 
 def connection_settings(params=None, **overrides):
     """Connection settings, tolerating a dict ``postgres_params`` has already been through.

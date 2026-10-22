@@ -14,9 +14,10 @@ import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import chai.persistence as chai_persistence  # noqa: E402
 import chai_tea_parquet  # noqa: E402
 import chai_tea_schema  # noqa: E402
-from chai.storage import _pg_connect, ensure_postgres_database, postgres_params  # noqa: E402
+from chai.persistence.postgres import _pg_connect, ensure_postgres_database, postgres_params  # noqa: E402
 
 
 def postgres_available():
@@ -55,19 +56,19 @@ class TestSchemaColumns(unittest.TestCase):
 
     def test_every_entity_maps_to_parquet_kinds(self):
         for entity in chai_tea_schema.TABLE_ORDER:
-            kinds = chai_tea_parquet.column_kinds(entity)
+            kinds = chai_persistence.column_kinds(entity)
             self.assertEqual(list(kinds), list(chai_tea_schema.column_types(entity)))
             self.assertEqual(kinds["id"], "string")
 
     def test_export_order_puts_parents_first(self):
-        for order in (chai_tea_parquet.export_order(), chai_tea_parquet.export_order(True)):
+        for order in (chai_persistence.bundle_order(), chai_persistence.bundle_order(True)):
             self.assertLess(order.index("PROJECT"), order.index("WORKFLOW"))
             self.assertLess(order.index("WORKFLOW"), order.index("WORKFLOW_RUN"))
             self.assertLess(order.index("WORKFLOW_RUN"), order.index("RESULT"))
             self.assertLess(order.index("RESULT"), order.index("ANNOTATION"))
             self.assertLess(order.index("USER"), order.index("RESULT"))
-        self.assertNotIn("WF_PERMISSION", chai_tea_parquet.export_order())
-        self.assertIn("WF_PERMISSION", chai_tea_parquet.export_order(True))
+        self.assertNotIn("WF_PERMISSION", chai_persistence.bundle_order())
+        self.assertIn("WF_PERMISSION", chai_persistence.bundle_order(True))
 
 
 @unittest.skipUnless(HAS_POSTGRES, "no PostgreSQL server on localhost:5432")
@@ -202,16 +203,16 @@ class TestChaiTeaParquet(unittest.TestCase):
         ]
 
     def assert_same_rows(self, entities=None):
-        for entity in entities or chai_tea_parquet.EXPORT_ORDER:
+        for entity in entities or chai_persistence.BUNDLE_ORDER:
             self.assertEqual(
                 self.rows(self.local, entity), self.rows(self.central, entity), f"{entity} differs"
             )
 
     def export(self, directory=None, **kwargs):
-        return chai_tea_parquet.export_parquet(directory or self.bundle, {"database": self.local}, **kwargs)
+        return chai_persistence.postgres_to_parquet(directory or self.bundle, {"database": self.local}, **kwargs)
 
     def load(self, directory=None, **kwargs):
-        return chai_tea_parquet.load_parquet(directory or self.bundle, {"database": self.central}, **kwargs)
+        return chai_persistence.parquet_bundle_to_postgres(directory or self.bundle, {"database": self.central}, **kwargs)
 
     def test_a_full_export_reproduces_the_local_rows_centrally(self):
         manifest = self.export()
@@ -242,7 +243,7 @@ class TestChaiTeaParquet(unittest.TestCase):
         self.export(include_permissions=True)
         self.load()
         self.assertEqual(self.query(self.central, "SELECT count(*) FROM users"), [(3,)])
-        self.assert_same_rows(chai_tea_parquet.export_order(include_permissions=True))
+        self.assert_same_rows(chai_persistence.bundle_order(include_permissions=True))
 
     def test_loading_twice_changes_nothing_the_second_time(self):
         self.export()
@@ -326,7 +327,7 @@ class TestChaiTeaParquet(unittest.TestCase):
 
     def test_a_bundle_missing_its_parents_leaves_the_central_database_alone(self):
         self.export()
-        path = os.path.join(self.bundle, chai_tea_parquet.MANIFEST)
+        path = os.path.join(self.bundle, chai_persistence.BUNDLE_MANIFEST)
         with open(path) as fh:
             manifest = json.load(fh)
         manifest["tables"] = [t for t in manifest["tables"] if t["entity"] in ("RESULT", "ANNOTATION")]
@@ -354,15 +355,15 @@ class TestChaiTeaParquet(unittest.TestCase):
         annotations = [t for t in manifest["tables"] if t["entity"] == "ANNOTATION"][0]
         self.assertEqual(annotations["rows"], 0)
         self.assertEqual(
-            chai_tea_parquet.parquet_columns(os.path.join(self.bundle, annotations["file"])),
-            chai_tea_parquet.column_kinds("ANNOTATION"),
+            chai_persistence.parquet_columns(os.path.join(self.bundle, annotations["file"])),
+            chai_persistence.column_kinds("ANNOTATION"),
         )
         self.load()  # and an empty file is nothing to trip over on the way in
         self.assertEqual(self.query(self.central, "SELECT count(*) FROM annotations"), [(0,)])
 
     def test_the_manifest_records_where_the_export_came_from(self):
         manifest = self.export(since="2026-09-06", project="Ledgers")
-        self.assertEqual(manifest["chai_tea_export"], chai_tea_parquet.MANIFEST_VERSION)
+        self.assertEqual(manifest["chai_tea_export"], chai_persistence.BUNDLE_VERSION)
         self.assertEqual(manifest["source"]["dbname"], self.local)
         self.assertEqual(manifest["filters"]["since"], "2026-09-06")
         self.assertEqual(manifest["filters"]["project"], "Ledgers")
@@ -370,10 +371,10 @@ class TestChaiTeaParquet(unittest.TestCase):
 
     def test_a_bundle_from_a_later_version_is_refused(self):
         self.export()
-        path = os.path.join(self.bundle, chai_tea_parquet.MANIFEST)
+        path = os.path.join(self.bundle, chai_persistence.BUNDLE_MANIFEST)
         with open(path) as fh:
             manifest = json.load(fh)
-        manifest["chai_tea_export"] = chai_tea_parquet.MANIFEST_VERSION + 1
+        manifest["chai_tea_export"] = chai_persistence.BUNDLE_VERSION + 1
         with open(path, "w") as fh:
             json.dump(manifest, fh)
         with self.assertRaises(ValueError):
@@ -381,10 +382,10 @@ class TestChaiTeaParquet(unittest.TestCase):
 
     def test_a_bundle_with_no_manifest_is_read_from_its_files(self):
         self.export()
-        os.remove(os.path.join(self.bundle, chai_tea_parquet.MANIFEST))
-        manifest = chai_tea_parquet.read_manifest(self.bundle)
+        os.remove(os.path.join(self.bundle, chai_persistence.BUNDLE_MANIFEST))
+        manifest = chai_persistence.read_bundle_manifest(self.bundle)
         self.assertEqual(
-            [t["entity"] for t in manifest["tables"]], chai_tea_parquet.export_order()
+            [t["entity"] for t in manifest["tables"]], chai_persistence.bundle_order()
         )
         self.load()
         self.assert_same_rows(["PROJECT", "WORKFLOW", "RESULT", "ANNOTATION"])
@@ -393,6 +394,11 @@ class TestChaiTeaParquet(unittest.TestCase):
         self.export()
         with self.assertRaises(ValueError):
             self.load(on_conflict="replace")
+
+    def test_the_command_line_exports_and_loads(self):
+        self.assertEqual(chai_tea_parquet.main(["export", self.bundle, "--database", self.local]), 0)
+        self.assertEqual(chai_tea_parquet.main(["load", self.bundle, "--database", self.central]), 0)
+        self.assert_same_rows(["PROJECT", "WORKFLOW", "RESULT", "ANNOTATION"])
 
 
 if __name__ == "__main__":

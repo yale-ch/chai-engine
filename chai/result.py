@@ -37,7 +37,7 @@ class Result(BaseThing):
       assigning a new ``value`` updates ``modified``), and ``editor_user_id`` -- the USER who edited
       it, for a result a person made or corrected (``None`` for a component's own output). With
       ``was_successful`` (false for an ERROR result) these are the RESULT columns a result holds
-      itself; ``storage.result_row`` renders the whole row.
+      itself; ``chai.persistence.result_row`` renders the whole row.
 
     ``to_json`` serializes the result (optionally recursing into child Results); ``view`` prints an
     indented tree of nested results for debugging.

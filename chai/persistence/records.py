@@ -1,6 +1,6 @@
 """The CHAI-TEA rows chai objects stand for: each carries its table's columns and can render its row.
 
-Every object a run is made of corresponds to a row of the CHAI-TEA schema (``chai.schema``), and holds
+Every object a run is made of corresponds to a row of the CHAI-TEA schema (``chai.persistence.schema``), and holds
 that row's values itself rather than leaving them for a storage to make up:
 
 * ``Project`` -- a PROJECT row: name, description, is_active, auth_key, planned_enddate
@@ -8,7 +8,7 @@ that row's values itself rather than leaving them for a storage to make up:
   is_active, created and modified, all settable in the workflow's config
 * ``WorkflowRun`` -- a WORKFLOW_RUN row: one per ``Workflow.run``, recording when it ran, how long
   it took, whether it succeeded, and what it consumed
-* ``Result`` (``chai.result``) -- a RESULT row (``storage.result_row`` renders it), with its own
+* ``Result`` (``chai.result``) -- a RESULT row (``persistence.rows.result_row`` renders it), with its own
   created/modified timestamps and editor
 
 ``Record.to_row()`` gives exactly the table's columns, in order -- which is what the storages write.
@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from .schema import column_types
 
 #: Namespace for ids derived from a name (a project's, a workflow's config id) -- the same namespace
-#: ``storage.as_uuid`` and ``chai_tea_import`` hash non-uuid ids with, so the derivations agree.
+#: ``as_uuid`` and ``persistence.legacy.record_to_result_row`` hash non-uuid ids with, so the derivations agree.
 UUID_NAMESPACE = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
 
 

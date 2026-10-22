@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from chai.result import FileItemResult, ItemResult, ListResult
 import pyarrow.parquet as pq
 
-from chai.storage import (
+from chai.persistence import (
     COMPUTED_FIELDS,
     RESULT_COLUMNS,
     result_row,
@@ -26,13 +26,19 @@ from chai.storage import (
     recorded_source,
     result_md5,
     ParquetRecordWriter,
-    PostgresStorage,
-    _pg_connect,
-    _pg_identifier,
     ensure_postgres_database,
     ensure_postgres_schema,
     get_result,
+    as_datetime,
     jsonl_to_parquet,
+    jsonl_to_result_rows,
+    parquet_columns,
+    recorded_cost,
+    record_to_result_row,
+    load_run_parquet,
+    parquet_run_records,
+    read_run_records,
+    run_records_file,
     list_processors,
     list_results,
     parquet_to_postgres,
@@ -44,8 +50,11 @@ from chai.storage import (
     source_value,
     token_usage_summary,
 )
+from chai.persistence.postgres import _pg_connect
+from chai.persistence.schema import identifier as _pg_identifier
+from chai.storage import PostgresStorage
 from chai.workflow import Workflow
-import chai.schema as chai_schema
+import chai.persistence.schema as chai_schema
 
 
 class TestResultRows(unittest.TestCase):
@@ -69,9 +78,7 @@ class TestResultRows(unittest.TestCase):
         return self.wf._make_step({"type": "storage.JsonLinesStorage", "settings": settings}, self.wf)
 
     def test_the_columns_are_the_chai_tea_result_table(self):
-        import chai_tea_parquet  # top level, outside the package -- the schema's own definition
-
-        self.assertEqual(RESULT_COLUMNS, chai_tea_parquet.column_kinds("RESULT"))
+        self.assertEqual(RESULT_COLUMNS, chai_schema.column_kinds("RESULT"))
 
     def test_a_line_is_exactly_a_result_row(self):
         res = ItemResult(
@@ -349,6 +356,56 @@ class TestJsonLinesStorage(unittest.TestCase):
         self.assertEqual([js["value"] for js in self.lines()], ["aa", "aa", "bb", "bb"])
         wf.run()
         self.assertEqual(len(self.lines()), 4)
+
+    def records(self):
+        return read_run_records(run_records_file(self.out))
+
+    def test_the_run_a_file_holds_is_recorded_beside_it(self):
+        wf = Workflow(self.truncating_workflow(["a", "b"]))
+        wf.run()
+        self.assertEqual(run_records_file(self.out), os.path.join(self.dir, "nested", "out.records.json"))
+        records = self.records()
+        self.assertEqual(list(records), ["PROJECT", "WORKFLOW", "WORKFLOW_RUN"])
+        (run,) = records["WORKFLOW_RUN"]
+        self.assertEqual({line["workflow_run_id"] for line in self.lines()}, {run["id"]})
+        self.assertEqual(run["workflow_id"], records["WORKFLOW"][0]["id"])
+        # rewritten when the run ended, so it says how the run went
+        self.assertTrue(run["was_successful"])
+        self.assertGreater(run["duration"], 0)
+
+    def test_each_run_in_a_file_is_recorded_until_it_is_truncated(self):
+        tree = self.truncating_workflow(["a"])
+        store = tree["steps"][0]["steps"][0]["steps"][0]["next_steps"][0]
+        store["settings"]["mode"] = "append"
+        wf = Workflow(tree)
+        wf.run()
+        wf.run()
+        self.assertEqual(len(self.records()["WORKFLOW_RUN"]), 2)
+        self.assertEqual(len(self.records()["WORKFLOW"]), 1)  # the same workflow, recorded once
+        store["settings"]["mode"] = "truncate"
+        Workflow(tree).run()  # the lines of earlier runs go, and so do their runs
+        self.assertEqual(
+            [run["id"] for run in self.records()["WORKFLOW_RUN"]], [self.lines()[0]["workflow_run_id"]]
+        )
+
+    def test_a_run_that_writes_nothing_records_no_run(self):
+        Workflow(self.truncating_workflow([])).run()
+        self.assertEqual(self.records(), {})
+
+    def test_lines_that_are_not_result_rows_record_no_run(self):
+        self.make_storage(fields=["value"]).process(ItemResult("x"))
+        self.make_storage(run_id="slice-3").process(ItemResult("y"))  # a run the workflow never made
+        self.assertFalse(os.path.exists(run_records_file(self.out)))
+
+    def test_jsonl_to_parquet_carries_the_recorded_runs(self):
+        wf = Workflow(self.truncating_workflow(["a", "b"]))
+        wf.run()
+        out = os.path.join(self.dir, "run.parquet")
+        jsonl_to_parquet(self.out, out)
+        self.assertEqual(parquet_run_records(out), self.records())
+        # given outright, they replace whatever was recorded beside the file
+        jsonl_to_parquet(self.out, out, records=wf.records())
+        self.assertEqual(parquet_run_records(out)["WORKFLOW_RUN"]["id"], wf.run_id)
 
     def test_fields_list_selects_keys(self):
         self.make_storage(fields=["value", "processorId"]).process(
@@ -1486,6 +1543,60 @@ class TestPostgresStorage(_ThrowawayDatabase):
                 [(wf.run_id, True, True)],
             )
 
+    def test_a_streamed_run_loads_with_the_run_it_belongs_to(self):
+        jsonl = os.path.join(self.dir, "run.jsonl")
+        tree = {
+            "id": "streamed_wf",
+            "type": "workflow.Workflow",
+            "project": "Tests",
+            "steps": [
+                {
+                    "type": "provider.StaticProvider",
+                    "settings": {"values": ["a", "b", "c"]},
+                    "input": "x",
+                    "steps": [
+                        {
+                            "type": "iterator.Iterator",
+                            "settings": {"retain_results": False},
+                            "steps": [
+                                {
+                                    "type": "extractor.DoubleExtractor",
+                                    "next_steps": [{"type": "storage.JsonLinesStorage", "settings": {"file": jsonl}}],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+        wf = Workflow(tree)
+        wf.run()
+        jsonl_to_parquet(jsonl, self.out)
+        # the RESULT rows' runs are in the file, so they load into tables that have never seen them
+        self.assertEqual(load_run_parquet(self.out, self.params, tables=self.tables), {"records": 3, "rows": 3})
+        self.assertEqual(
+            self.query(f"SELECT id::text, was_successful FROM {self.names['WORKFLOW_RUN']}"), [(wf.run_id, True)]
+        )
+        self.assertEqual(
+            self.query(f"SELECT DISTINCT workflow_run_id::text FROM {self.names['RESULT']}"), [(wf.run_id,)]
+        )
+
+    def test_an_older_file_loads_under_a_run_given_for_it(self):
+        source = os.path.join(self.dir, "m804.jsonl")
+        with open(source, "w") as fh:
+            for step in ("transcribe", "translate"):
+                fh.write(json.dumps({"id": str(uuid.uuid4()), "step": step, "text": step, "metadata": {}}) + "\n")
+        rows = os.path.join(self.dir, "m804.rows.jsonl")
+        # the run the file's rows hang under, made up for it: the workflow that wrote it, run once
+        wf = Workflow({"id": "m804", "type": "workflow.Workflow", "project": "M804"})
+        jsonl_to_result_rows(source, rows, workflow_run_id=wf.run_id, fields={"text": "value"})
+        jsonl_to_parquet(rows, self.out, records=wf.records())
+        self.assertEqual(load_run_parquet(self.out, self.params, tables=self.tables)["rows"], 2)
+        self.assertEqual(
+            sorted(self.query(f"SELECT process_id, value FROM {self.names['RESULT']}")),
+            [("transcribe", "transcribe"), ("translate", "translate")],
+        )
+
     def test_a_table_in_the_old_layout_is_refused(self):
         self.execute(f"CREATE TABLE {self.tables['RESULT']} (id TEXT PRIMARY KEY, value_json JSONB)")
         with self.assertRaises(RuntimeError):
@@ -1546,10 +1657,10 @@ class TestPostgresStorage(_ThrowawayDatabase):
             import psycopg2
         except ImportError:
             self.skipTest("psycopg2 is not installed")
-        import chai.storage
+        import chai.persistence.postgres as postgres
 
-        driver = chai.storage._pg_driver
-        chai.storage._pg_driver = lambda: psycopg2  # the older driver, used when psycopg 3 is absent
+        driver = postgres._pg_driver
+        postgres._pg_driver = lambda: psycopg2  # the older driver, used when psycopg 3 is absent
         try:
             storage = self.make_storage()
             res = ItemResult("through psycopg2", metadata={"type": "TEXT"})
@@ -1561,7 +1672,7 @@ class TestPostgresStorage(_ThrowawayDatabase):
             # the uploader has no COPY on psycopg2 and inserts the batch instead
             self.assertEqual(parquet_to_postgres(self.out, self.loaded_table, self.params)["rows"], 1)
         finally:
-            chai.storage._pg_driver = driver
+            postgres._pg_driver = driver
         self.assertEqual(self.query(f"SELECT value FROM {self.tables['RESULT']}")[0][0], "through psycopg2")
         self.assertEqual(self.query(f"SELECT payload FROM {self.loaded_table}")[0][0], {"a": 1})
 
@@ -1658,3 +1769,231 @@ class TestTokenUsageSummary(unittest.TestCase):
     def test_renamed_step_column(self):
         self.write([{"step": "transcribe", "metadata": self.usage()}])
         self.assertIn("transcribe", token_usage_summary(self.log)["components"])
+
+
+def gemini_metadata(prompt=1200, images=800, thinking=150, result=640, duration=2.5):
+    """The metadata ``GeminiTranscriber`` records for one call."""
+    return {
+        "token_usage": {
+            "total": prompt + images + thinking + result,
+            "prompt": prompt,
+            "images": images,
+            "thinking": thinking,
+            "result": result,
+        },
+        "duration": duration,
+        "type": "TEXT",
+        "engine": "gemini",
+        "model": "gemini-3.1-flash-lite-preview",
+    }
+
+
+class TestRecordedCost(unittest.TestCase):
+    """md_cost is the cost the component recorded for its call -- the same in every storage."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def stored_costs(self, metadata):
+        jsonl = os.path.join(self.dir, "run.jsonl")
+        parquet = os.path.join(self.dir, "run.parquet")
+        db = os.path.join(self.dir, "run.db")
+        wf = Workflow({"id": "cost_wf", "type": "workflow.Workflow"})
+        storages = [
+            wf._make_step({"type": "storage.JsonLinesStorage", "settings": {"file": jsonl, "mode": "truncate"}}, wf),
+            wf._make_step({"type": "storage.ParquetStorage", "settings": {"file": parquet, "flush_on_exit": False}}, wf),
+            wf._make_step({"type": "storage.SqliteStorage", "settings": {"database": db}}, wf),
+        ]
+        result = ItemResult("the text", metadata=metadata)
+        for storage in storages:
+            storage.process(result)
+        storages[1].close()
+        with open(jsonl) as fh:
+            from_jsonl = json.loads(fh.readline())["md_cost"]
+        from_parquet = pq.read_table(parquet).column("md_cost").to_pylist()[0]
+        return from_jsonl, from_parquet, get_result(db, result.id)["md_cost"]
+
+    def test_every_storage_records_the_cost_of_the_call(self):
+        self.assertEqual(self.stored_costs(dict(gemini_metadata(), cost=0.00123)), (0.00123,) * 3)
+
+    def test_a_call_nobody_priced_has_no_cost(self):
+        self.assertEqual(self.stored_costs(gemini_metadata()), (None,) * 3)
+
+    def test_a_free_call_costs_zero(self):
+        self.assertEqual(self.stored_costs(dict(gemini_metadata(), cost=0)), (0.0,) * 3)
+
+    def test_bad_recorded_costs_are_ignored(self):
+        for bad in (True, -1, "0.5", None):
+            self.assertIsNone(recorded_cost({"cost": bad}), bad)
+
+
+# Two lines as the m804 workflow's JsonLinesStorage wrote them, before the storages wrote RESULT rows:
+# value stored as "text", the page the result was made from as "page", the component as "step".
+M804_FIELDS = {"text": "value", "page": "input_uri"}
+
+
+def m804_record(step="transcribe", text="Ci commencent les croniques", page="inputs/m804/split/f0001r.jpg"):
+    return {
+        "id": str(uuid.uuid4()),
+        "step": step,
+        "page": page,
+        "metadata": {
+            "token_usage": {"total": 6450, "prompt": 364, "images": 1080, "thinking": 4393, "result": 613},
+            "duration": 31.85,
+            "type": "TEXT",
+            "timestamp": 1789336426.17,
+            "model": "gemini-3.8-flash",
+        },
+        "text": text,
+    }
+
+
+def write_jsonl(path, records):
+    with open(path, "w", encoding="utf-8") as fh:
+        for record in records:
+            fh.write(json.dumps(record) + "\n")
+    return path
+
+
+class TestOlderRecords(unittest.TestCase):
+    """Records in the layouts the storages wrote before RESULT rows, reshaped into RESULT rows."""
+
+    def test_a_row_has_exactly_the_result_columns_in_order(self):
+        row = record_to_result_row(m804_record(), uuid.uuid4(), fields=M804_FIELDS)
+        self.assertEqual(list(row), list(RESULT_COLUMNS))
+
+    def test_renamed_fields_land_in_their_columns(self):
+        record = m804_record()
+        run = uuid.uuid4()
+        row = record_to_result_row(record, run, fields=M804_FIELDS)
+        self.assertEqual(row["id"], record["id"])
+        self.assertEqual(row["workflow_run_id"], str(run))
+        self.assertEqual(row["process_id"], "transcribe")
+        self.assertEqual(row["value"], "Ci commencent les croniques")
+        self.assertEqual(row["input"], "inputs/m804/split/f0001r.jpg")
+        self.assertEqual(row["metadata"], record["metadata"])
+        self.assertEqual(row["md_duration"], 31.85)
+        self.assertTrue(row["was_successful"])
+        self.assertIsNone(row["editor_user_id"])
+
+    def test_without_the_mapping_the_value_is_lost(self):
+        row = record_to_result_row(m804_record(), uuid.uuid4())
+        self.assertIsNone(row["value"])
+        self.assertIsNone(row["input"])
+
+    def test_the_old_tabular_columns(self):
+        row = record_to_result_row(
+            {
+                "id": str(uuid.uuid4()),
+                "processor_id": "transcribe1",
+                "value_json": json.dumps("the text"),
+                "metadata_json": json.dumps(gemini_metadata()),
+                "extra_json": json.dumps({"note": "x"}),
+                "input_uri": "page00.jpg",
+                "input_hash": "abc",
+                "input_locator": json.dumps([{"page": 3}, {"start": 10, "end": 40}]),
+                "corrects_id": None,
+                "created_at": "2026-01-15 10:00:00",
+            }
+        )
+        self.assertEqual(row["process_id"], "transcribe1")
+        self.assertEqual(row["value"], "the text")
+        self.assertEqual(row["metadata"]["model"], "gemini-3.1-flash-lite-preview")
+        self.assertEqual(row["input"], "page00.jpg")
+        self.assertEqual(row["input_hash"], "abc")
+        self.assertEqual(json.loads(row["input_segment"]), [{"page": 3}, {"start": 10, "end": 40}])
+        self.assertEqual(row["input_sequence"], 3)
+        self.assertEqual(row["extra_data"], {"note": "x"})
+        self.assertEqual(row["md_timestamp"], datetime(2026, 1, 15, 10, tzinfo=timezone.utc))
+
+    def test_timestamps_come_from_the_result_and_the_conversion(self):
+        at = datetime(2026, 10, 20, tzinfo=timezone.utc)
+        row = record_to_result_row(m804_record(), uuid.uuid4(), fields=M804_FIELDS, at=at)
+        self.assertEqual(row["md_timestamp"].timestamp(), 1789336426.17)
+        self.assertEqual((row["created"], row["modified"]), (at, at))
+        record = m804_record()
+        del record["metadata"]["timestamp"]
+        self.assertEqual(record_to_result_row(record, uuid.uuid4(), at=at)["md_timestamp"], at)
+
+    def test_cost_is_what_was_recorded_or_null(self):
+        record = m804_record()
+        self.assertIsNone(record_to_result_row(record, uuid.uuid4())["md_cost"])
+        record["metadata"]["cost"] = 0.004
+        self.assertEqual(record_to_result_row(record, uuid.uuid4())["md_cost"], 0.004)
+
+    def test_an_error_result_is_not_successful(self):
+        record = m804_record()
+        record["metadata"] = {"type": "ERROR", "error": "boom"}
+        self.assertFalse(record_to_result_row(record, uuid.uuid4())["was_successful"])
+
+    def test_ids(self):
+        record = m804_record()
+        del record["id"]
+        self.assertIsNone(record_to_result_row(record, uuid.uuid4()))  # no id, no row
+        first = record_to_result_row(dict(record, id="page-1-transcript"))["id"]
+        self.assertEqual(record_to_result_row(dict(record, id="page-1-transcript"))["id"], first)
+        self.assertEqual(str(uuid.UUID(first)), first)  # a non-uuid id is hashed into a stable one
+        given = str(uuid.uuid4())
+        self.assertEqual(record_to_result_row(dict(record, id=given))["id"], given)
+
+    def test_a_current_row_passes_through_unchanged(self):
+        wf = Workflow({"id": "out_wf", "type": "workflow.Workflow"})
+        made = ItemResult("Ci commencent", metadata={"duration": 2.0, "cost": 0.01})
+        stored = {k: v.isoformat() if isinstance(v, datetime) else v for k, v in result_row(made, wf.run_id).items()}
+        row = record_to_result_row(stored)
+        for column in RESULT_COLUMNS:
+            expected = as_datetime(stored[column]) if column in ("md_timestamp", "created", "modified") else stored[column]
+            self.assertEqual(row[column], expected, column)
+
+
+class TestOlderFiles(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.source = write_jsonl(
+            os.path.join(self.dir, "run.jsonl"), [m804_record(), m804_record("translate", "Here begin the chronicles")]
+        )
+        self.rows = os.path.join(self.dir, "run.rows.jsonl")
+        self.parquet = os.path.join(self.dir, "run.parquet")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def read_rows(self):
+        with open(self.rows) as fh:
+            return [json.loads(line) for line in fh]
+
+    def test_every_line_is_a_result_row(self):
+        with open(self.source, "a") as fh:
+            fh.write(json.dumps({"step": "x"}) + "\n")  # no id
+            fh.write("{partial line\n")  # a run killed mid-write
+        info = jsonl_to_result_rows(self.source, self.rows, fields=M804_FIELDS)
+        self.assertEqual((info["rows"], info["skipped"]), (2, 1))
+        rows = self.read_rows()
+        self.assertEqual([list(r) for r in rows], [list(RESULT_COLUMNS)] * 2)
+        self.assertEqual({r["workflow_run_id"] for r in rows}, {info["workflow_run_id"]})
+        # one page, so both rows carry its position
+        self.assertEqual({r["input_sequence"] for r in rows}, {0})
+
+    def test_the_run_id_is_stable_for_the_same_file(self):
+        first = jsonl_to_result_rows(self.source, self.rows)["workflow_run_id"]
+        self.assertEqual(jsonl_to_result_rows(self.source, self.rows)["workflow_run_id"], first)
+        given = str(uuid.uuid4())
+        self.assertEqual(jsonl_to_result_rows(self.source, self.rows, given)["workflow_run_id"], given)
+
+    def test_the_parquet_file_has_the_result_columns_and_types(self):
+        jsonl_to_result_rows(self.source, self.rows, fields=M804_FIELDS)
+        jsonl_to_parquet(self.rows, self.parquet)
+        self.assertEqual(pq.read_schema(self.parquet).names, list(RESULT_COLUMNS))
+        self.assertEqual(parquet_columns(self.parquet), RESULT_COLUMNS)
+        table = pq.read_table(self.parquet).to_pylist()
+        self.assertEqual(json.loads(table[0]["value"]), "Ci commencent les croniques")
+        self.assertIsNotNone(table[0]["created"].tzinfo)
+
+    def test_an_empty_file_still_makes_a_parquet_file_with_the_columns(self):
+        empty = write_jsonl(os.path.join(self.dir, "empty.jsonl"), [])
+        jsonl_to_result_rows(empty, self.rows)
+        self.assertEqual(jsonl_to_parquet(self.rows, self.parquet, schema=RESULT_COLUMNS)["rows"], 0)
+        self.assertEqual(pq.read_schema(self.parquet).names, list(RESULT_COLUMNS))

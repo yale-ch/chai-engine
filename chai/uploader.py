@@ -2,7 +2,7 @@
 
 An uploader takes a file (a ``FileItemResult``, or a result whose value is a path) and copies it to a
 destination -- an S3 bucket, a shared directory -- returning a result that says where it went. This
-is the hand-off at the end of a run: ``storage.jsonl_to_parquet`` (or a ``ParquetStorage``) packs the
+is the hand-off at the end of a run: ``chai.persistence.jsonl_to_parquet`` (or a ``ParquetStorage``) packs the
 run into a Parquet file, an ``S3Uploader`` puts that file in a bucket, and the system that maintains
 the central database ingests it from there.
 

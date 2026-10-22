@@ -1,13 +1,13 @@
-"""The objects a run is made of carry the columns of their CHAI-TEA rows (``chai.records``)."""
+"""The objects a run is made of carry the columns of their CHAI-TEA rows (``chai.persistence.records``)."""
 
 import time
 import unittest
 import uuid
 from datetime import datetime, timezone
 
-from chai.records import Project, WorkflowRun, as_uuid
+from chai.persistence.records import Project, WorkflowRun, as_uuid
 from chai.result import ItemResult
-from chai.schema import column_types
+from chai.persistence.schema import column_types
 from chai.workflow import Workflow
 
 

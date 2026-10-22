@@ -4,7 +4,7 @@ The single definition of the shared PostgreSQL schema drawn in ``mermaid-er-data
 PROJECT -> WORKFLOW -> WORKFLOW_RUN -> RESULT, with ANNOTATION, USER, ROLE and the two permission
 tables. Everything that has to agree with it reads it from here: the storages that write it
 (``SqliteStorage``, ``PostgresStorage``, and the RESULT rows of ``JsonLinesStorage``/
-``ParquetStorage``), the objects that carry its values (``chai.records``, ``Workflow``, ``Result``),
+``ParquetStorage``), the objects that carry its values (``chai.persistence.records``, ``Workflow``, ``Result``),
 and the top-level ``chai_tea_*`` tools, which re-export it. ``column_types(entity)`` describes each
 table's columns, ``column_kinds(entity)`` the same as Parquet column kinds, and
 ``schema_statements``/``sqlite_statements`` build the tables in PostgreSQL and SQLite.
@@ -151,7 +151,8 @@ CREATE TABLE IF NOT EXISTS {WORKFLOW_RUN} (
 #
 # The metadata an AI call records (token_usage, duration, type, engine, model) is stored whole in
 # the ``metadata`` column; ``md_duration``/``md_cost``/``md_timestamp`` are promoted out of it for
-# querying without reaching into the JSON. See ``chai_tea_import.py``.
+# querying without reaching into the JSON; ``md_cost`` is the ``cost`` the component recorded for its
+# call (LiteLLM's figure, or the component's ``pricing`` setting).
 RESULT_TABLE = """
 CREATE TABLE IF NOT EXISTS {RESULT} (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
