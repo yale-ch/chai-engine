@@ -9,7 +9,7 @@ import uuid
 import pyarrow.parquet as pq
 
 from chai.result import FileItemResult, ItemResult
-from chai.storage import jsonl_to_parquet
+from chai.persistence import jsonl_to_parquet
 from chai.workflow import Workflow
 
 

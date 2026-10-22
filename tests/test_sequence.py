@@ -13,7 +13,7 @@ import unittest
 
 from chai.result import ItemResult, ListResult
 from chai.segmenter import reading_order
-from chai.storage import result_row
+from chai.persistence import result_row
 from chai.workflow import Workflow
 
 PAGES = {

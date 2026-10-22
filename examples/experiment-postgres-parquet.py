@@ -36,15 +36,15 @@ sys.path.insert(0, ROOT)
 
 import pyarrow.parquet as pq  # noqa: E402
 
-from chai.schema import TABLE_ORDER, TABLES  # noqa: E402
-from chai.storage import (  # noqa: E402
+from chai.persistence.schema import TABLE_ORDER, TABLES  # noqa: E402
+from chai.persistence import (  # noqa: E402
     RESULT_COLUMNS,
-    _pg_connect,
     ensure_postgres_database,
     parquet_to_postgres,
     postgres_params,
     store_postgres_rows,
 )
+from chai.persistence.postgres import _pg_connect  # noqa: E402
 from chai.workflow import Workflow  # noqa: E402
 
 

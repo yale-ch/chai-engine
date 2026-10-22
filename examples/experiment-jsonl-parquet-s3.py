@@ -32,7 +32,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # examples/ sits outside the package, so put the repository root on the path to import chai
 sys.path.insert(0, ROOT)
 
-from chai.storage import jsonl_to_parquet  # noqa: E402
+from chai.persistence import jsonl_to_parquet  # noqa: E402
 from chai.workflow import Workflow  # noqa: E402
 
 

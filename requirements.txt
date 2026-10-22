@@ -16,7 +16,7 @@ accelerate>=1.13.0
 lxml
 # Every hosted/served chat model (Gemini, Vertex, OpenAI, Anthropic, Ollama, LM Studio,
 # vLLM, sglang, ...) and remote embeddings go through LiteLLM
-litellm>=1.105.1
+litellm==1.106.2
 # Apple Silicon vision-language backend (MLXVLMComponent). Optional;
 # installs gracefully as a no-op on Linux/Windows -- the backend just
 # won't register.

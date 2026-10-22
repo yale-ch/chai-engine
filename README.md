@@ -208,7 +208,7 @@ Every component accepts an error policy in `settings`:
 - **Provenance** — any result's `.input` chain answers "where did this come
   from"; `processor` answers "who made it".
 - **Storage + corrections** — every storage writes the CHAI-TEA schema
-  (`chai/schema.py`): `SqliteStorage` and `PostgresStorage` write its tables —
+  (`chai/persistence/schema.py`): `SqliteStorage` and `PostgresStorage` write its tables —
   the run's PROJECT, WORKFLOW and WORKFLOW_RUN rows, taken from the workflow
   object, and a RESULT row per result — and `JsonLinesStorage`/`ParquetStorage`
   write the same RESULT rows to files. Each row keeps the result's value and
@@ -216,7 +216,7 @@ Every component accepts an error policy in `settings`:
   component marked `source: true`, e.g. the page, not the directory), the md5
   of that input, and a locator saying where in it the row is — a bounding box
   or a character range — so millions of sentences or regions need no files of
-  their own; `chai.storage` viewer helpers (`list_results`,
+  their own; `chai.persistence` viewer helpers (`list_results`,
   `save_correction`, …) let an app show stored rows and record corrections.
   A correction is an entry of its own pointing back at the row it corrects,
   so originals are never overwritten and each correction carries the metadata

@@ -44,7 +44,7 @@ sys.path.insert(0, ROOT)
 import ujson as json  # noqa: E402
 
 from chai.result import Result  # noqa: E402
-from chai.storage import token_usage_summary  # noqa: E402
+from chai.persistence import token_usage_summary  # noqa: E402
 from chai.workflow import Workflow  # noqa: E402
 
 BRANCHES = ("steps", "next_steps", "error_steps", "true_steps", "false_steps")

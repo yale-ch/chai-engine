@@ -11,9 +11,9 @@ import os
 import ujson as json
 
 from .core import Component
-from .records import Project, WorkflowRun, as_datetime, as_uuid, now
+from .persistence.records import Project, WorkflowRun, as_datetime, as_uuid, now
 from .result import ListResult, Result
-from .schema import column_types
+from .persistence.schema import column_types
 from .usage import UsageLedger
 
 logger = logging.getLogger("chai")
@@ -40,11 +40,11 @@ class Workflow(Component):
       component and per model.
     * **CHAI-TEA rows** -- a workflow is a WORKFLOW row and carries its columns, read from its
       config: ``name``, ``description``, ``project`` (a name or a dict of PROJECT columns; see
-      ``chai.records.Project``), ``previous_id`` (the workflow this is a new version of),
+      ``chai.persistence.records.Project``), ``previous_id`` (the workflow this is a new version of),
       ``is_active`` (default true), and ``created``/``modified`` (ISO-8601; default the time the
       workflow is built). ``uuid`` is its WORKFLOW id -- the config's ``uuid``, else derived from its
       ``id`` -- and ``to_row()`` renders the row, ``to_config()`` the config that keeps all of it.
-    * **Runs** -- each ``run`` is a ``chai.records.WorkflowRun`` (``current_run``), started when the
+    * **Runs** -- each ``run`` is a ``chai.persistence.records.WorkflowRun`` (``current_run``), started when the
       run begins and finished, successful or not, before the final event goes out. ``run_id`` is its
       id: the ``workflow_run_id`` the storages record on every row, so all the rows one run wrote, to
       however many files or databases, belong to the same WORKFLOW_RUN. ``records()`` gives the

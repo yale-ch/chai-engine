@@ -1,6 +1,6 @@
 """Move CHAI-TEA results and annotations out of a local PostgreSQL instance and into a central one.
 
-The command line for ``chai.storage.postgres_to_parquet`` and ``parquet_bundle_to_postgres``: export
+The command line for ``chai.persistence.postgres_to_parquet`` and ``parquet_bundle_to_postgres``: export
 writes one Parquet file per table, plus a ``manifest.json``, into a directory; load puts that
 directory into the central database in one transaction. The rows the exported results and
 annotations reference travel with them, so nothing dangles (see ``postgres_to_parquet``).
@@ -19,7 +19,7 @@ import argparse
 import logging
 import sys
 
-from chai.storage import BUNDLE_MANIFEST, parquet_bundle_to_postgres, postgres_to_parquet
+from chai.persistence.bundle import BUNDLE_MANIFEST, parquet_bundle_to_postgres, postgres_to_parquet
 
 
 def _connection_args(parser):

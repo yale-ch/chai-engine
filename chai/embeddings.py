@@ -6,7 +6,7 @@ and small corpora), or -- through LiteLLM -- ``gemini``, ``ollama``, or any
 OpenAI-compatible endpoint (``openai`` / ``custom`` / ``lmstudio`` / ``vllm``
 with ``api_host``).
 
-``VectorStore`` (defined in ``chai.storage`` -- persistence is Storage's job) is a SQLite-backed store with cosine search. The workflow
+``VectorStore`` (defined in ``chai.persistence.vectors``) is a SQLite-backed store with cosine search. The workflow
 components: ``VectorIndexer`` writes its input texts (or a configured document
 list) into a collection, then passes its input through unchanged;
 ``VectorRetriever`` treats its input as a query and returns the top-k most
@@ -18,7 +18,7 @@ import logging
 import os
 
 from .core import Component
-from .storage import VectorStore  # noqa: F401 -- persistence lives with Storage
+from .persistence.vectors import VectorStore  # noqa: F401
 from .result import ItemResult, ListResult, Result
 from .utils import text_from_input
 
