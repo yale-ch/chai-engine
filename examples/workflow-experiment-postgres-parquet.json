@@ -1,0 +1,67 @@
+{
+  "id": "pg_parquet_wf",
+  "type": "workflow.Workflow",
+  "name": "People: names, stored two ways",
+  "description": "Extract each person's name from the CSV; store it in PostgreSQL and in Parquet",
+  "project": {
+    "name": "chai demo",
+    "description": "examples/experiment-postgres-parquet.py"
+  },
+  "steps": [
+    {
+      "id": "people_csv",
+      "type": "provider.CsvFileProvider",
+      "input": "inputs/people.csv",
+      "settings": {
+        "limit": 100
+      },
+      "steps": [
+        {
+          "id": "people_rows",
+          "type": "iterator.Iterator",
+          "source": true,
+          "settings": {
+            "retain_results": false,
+            "workers": 4
+          },
+          "steps": [
+            {
+              "id": "person_name",
+              "type": "extractor.JsonXpathExtractor",
+              "settings": {
+                "xpath": "/name"
+              },
+              "next_steps": [
+                {
+                  "id": "to_postgres",
+                  "type": "storage.PostgresStorage",
+                  "settings": {
+                    "database": "chai_demo",
+                    "tables": {
+                      "PROJECT": "projects_direct",
+                      "USER": "users_direct",
+                      "ROLE": "roles_direct",
+                      "WORKFLOW": "workflows_direct",
+                      "WORKFLOW_RUN": "workflow_runs_direct",
+                      "WF_PERMISSION": "wf_permissions_direct",
+                      "PJ_PERMISSION": "pj_permissions_direct",
+                      "RESULT": "results_direct",
+                      "ANNOTATION": "annotations_direct"
+                    }
+                  }
+                },
+                {
+                  "id": "to_parquet",
+                  "type": "storage.ParquetStorage",
+                  "settings": {
+                    "file": "results/people-run.parquet"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

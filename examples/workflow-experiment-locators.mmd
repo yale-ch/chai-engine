@@ -1,0 +1,22 @@
+%%{init: {"flowchart": {"wrappingWidth": 1000}}}%%
+flowchart TD
+    n0(["<b>locators_wf</b><br/><i>workflow.Workflow</i>"]):::workflow
+    n1[/"<b>docs</b><br/><i>provider.DirFileProvider</i>"/]:::provider
+    n2{{"<b>each_doc</b><br/><i>iterator.Iterator</i><br/><small>source</small>"}}:::iterator
+    n3["<b>read</b><br/><i>transcriber.TextFileTranscriber</i>"]:::component
+    n4["<b>sentences</b><br/><i>segmenter.TextSegmenter</i>"]:::component
+    n5{{"<b>each_sentence</b><br/><i>iterator.Iterator</i>"}}:::iterator
+    n6["<b>topics</b><br/><i>classifier.KeywordClassifier</i>"]:::component
+    n7[("<b>store</b><br/><i>storage.SqliteStorage</i>")]:::storage
+    n0 --> n1
+    n1 --> n2
+    n2 --> n3
+    n3 ==>|"next"| n4
+    n4 ==>|"next"| n5
+    n5 --> n6
+    n6 ==>|"next"| n7
+    classDef workflow fill:#37474f,stroke:#263238,color:#fff
+    classDef provider fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    classDef iterator fill:#fff3e0,stroke:#ef6c00,color:#e65100
+    classDef storage fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20
+    classDef component fill:#f5f5f5,stroke:#616161,color:#212121

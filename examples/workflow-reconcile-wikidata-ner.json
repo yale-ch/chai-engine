@@ -1,0 +1,19 @@
+{
+  "type": "Workflow",
+  "id": "ner_wf",
+  "steps": [
+    {
+      "type": "extractor.GeminiExtractor",
+      "id": "ner",
+      "name": "Named entities",
+      "settings": {
+        "model": "gemini-3.1-flash-lite",
+        "prompt": "Find every named person, place, organization and work in the text below. Group all mentions that\nrefer to the same real-world entity into ONE entity, copy each mention exactly as it is written, and\ngive a one-phrase gloss of who or what the entity is, using only what the text says.\n\nReturn JSON only, of this shape:\n{\"entities\": [{\"name\": \"<canonical name as written in the text>\", \"type\": \"<person|place|organization|work>\",\n\"mentions\": [\"<exact surface string>\", ...], \"gloss\": \"<one short phrase from the text>\"}]}\n\nTEXT:\n{text_input_0}",
+        "expected_output": "json",
+        "retries": 1,
+        "tools": [],
+        "response_mime_type": "application/json"
+      }
+    }
+  ]
+}

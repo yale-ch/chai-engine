@@ -16,8 +16,11 @@ pip install -r requirements.txt
 cp env.template .env
 # Edit .env to add API keys (GEMINI_API_KEY, GOOGLE_CLOUD_PROJECT)
 
-# Run an experiment
-python experiment.py
+# Run a workflow (--input for the provider's input, --text for text, --set ID.KEY=VALUE for a setting)
+python scripts/run_workflow.py examples/workflow-pii-routing.json --input path/to/images
+
+# Draw a workflow as a Mermaid flowchart (.mmd and .png beside it, or -o)
+python scripts/workflow_diagram.py examples/workflow-m804-lines.json
 ```
 
 ## Architecture
@@ -103,6 +106,8 @@ Workflows are defined as JSON trees with `steps` and `next_steps`:
 - `chai/persistence/`: everything that writes or transforms what the storages record, with no components: `schema.py` (the CHAI-TEA tables), `records.py` (`Project`/`WorkflowRun`), `provenance.py` (where a result came from), `locators.py` (the frames of `input_segment`), `rows.py` (`result_row`, `build_record`, `correction_row`), `jsonl.py` (JSON-Lines files, run records, `token_usage_summary`), `parquet.py` (`ParquetRecordWriter`, `jsonl_to_parquet`), `sql.py` (`write_rows`), `sqlite.py` and `postgres.py` (each database, its viewer/loader helpers), `bundle.py` (PostgreSQL-to-PostgreSQL via Parquet), `legacy.py` (older files), `vectors.py` (`VectorStore`), `values.py` (shared JSON/timestamp helpers). The public functions are re-exported from `chai.persistence`.
 - `chai/uploader.py`: `Uploader`, `S3Uploader`, `FileSystemUploader`.
 - `chai/context.py`: `ContextWindow`, which carries text from one iterator entry into the next.
+- `scripts/`: `run_workflow.py` (run a workflow JSON), `workflow_diagram.py` (Mermaid flowchart of one), `smoke_backend.py` (check a vLLM, sglang or MLX-VLM backend).
+- `examples/`: runnable scripts and workflow JSON, one idea each (the README's Examples table).
 - `viewer/`: a read-only Flask viewer of a stored run -- page images with their text, regions drawn as boxes and spans as highlights from the stored rows.
 - `chai/ai/gemini.py`, `chai/ai/lm_studio.py`, `chai/ai/ollama.py`: AI component implementations.
 - `chai/transcriber.py`: Transcriber components with AI mixins.
@@ -133,8 +138,8 @@ Editing a table's columns in `chai/persistence/schema.py` means editing `chai_te
 # Run the unit tests (the PostgreSQL ones skip unless a server is reachable)
 python -m unittest discover -s tests
 
-# Run experiment.py as a live test case
-python experiment.py
+# Smoke-test a self-hosted model backend
+python scripts/smoke_backend.py vllm path/to/images/
 ```
 
 The PostgreSQL tests need a server (the `PG*` environment variables, default localhost:5432) with an

@@ -1,0 +1,25 @@
+%%{init: {"flowchart": {"wrappingWidth": 1000}}}%%
+flowchart TD
+    n0(["<b>wf2</b><br/><i>Workflow</i><br/>Top level workflow"]):::workflow
+    n1[/"<i>provider.DirFileProvider</i>"/]:::provider
+    n2{{"<b>img_iter</b><br/><i>iterator.Iterator</i><br/>File Iterator"}}:::iterator
+    n3["<b>pii_classifier</b><br/><i>classifier.Classifier</i><br/>Has PII Classifier"]:::component
+    n4{"<i>gate.LabelTestGate</i><br/>Has PII Gate"}:::gate
+    n5["<i>transcriber.GeminiTranscriber</i><br/>Cloud Image Transcriber"]:::ai
+    n6["<i>transcriber.LMStudioTranscriber</i><br/>Local Image Transcriber"]:::ai
+    n7["<b>iter_debug</b><br/><i>utils.DebugStep</i>"]:::component
+    n8["<b>dfp_debug</b><br/><i>utils.DebugStep</i>"]:::component
+    n0 --> n1
+    n1 --> n2
+    n2 --> n3
+    n2 --> n4
+    n4 -->|"true"| n5
+    n4 -->|"false"| n6
+    n1 ==>|"next"| n7
+    n0 --> n8
+    classDef workflow fill:#37474f,stroke:#263238,color:#fff
+    classDef provider fill:#e3f2fd,stroke:#1565c0,color:#0d47a1
+    classDef iterator fill:#fff3e0,stroke:#ef6c00,color:#e65100
+    classDef gate fill:#fce4ec,stroke:#ad1457,color:#880e4f
+    classDef component fill:#f5f5f5,stroke:#616161,color:#212121
+    classDef ai fill:#f3e5f5,stroke:#6a1b9a,color:#4a148c

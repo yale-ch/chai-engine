@@ -1,0 +1,91 @@
+{
+  "id": "pii_routing",
+  "type": "workflow.Workflow",
+  "name": "Keep pages with personal data on this machine; describe the rest in the cloud",
+  "description": "Transcribe each page image with a local model, look for personal data in the text (email addresses, phone numbers, US social security numbers, dates of birth), and send only the pages without any to Gemini for a description. Pages with personal data are recorded locally with their labels and never leave the machine. Run with: python scripts/run_workflow.py examples/workflow-pii-routing.json --input DIRECTORY_OF_IMAGES",
+  "steps": [
+    {
+      "id": "pages",
+      "type": "provider.DirFileProvider",
+      "steps": [
+        {
+          "id": "each_page",
+          "type": "iterator.Iterator",
+          "source": true,
+          "settings": {
+            "workers": 1,
+            "continue_on_error": true
+          },
+          "steps": [
+            {
+              "id": "transcribe",
+              "type": "transcriber.LMStudioTranscriber",
+              "name": "local transcription: the image goes nowhere",
+              "settings": {
+                "model": "qwen/qwen3.5-9b"
+              },
+              "next_steps": [
+                {
+                  "id": "pii_check",
+                  "type": "classifier.KeywordClassifier",
+                  "name": "personal data in the transcription",
+                  "register_on": ["transcribe"],
+                  "settings": {
+                    "regex": true,
+                    "labels": {
+                      "email": ["[\\w.+-]+@[\\w-]+\\.[\\w.]+"],
+                      "phone": ["\\(?\\b\\d{3}\\)?[-. ]\\d{3}[-. ]\\d{4}\\b"],
+                      "ssn": ["\\b\\d{3}-\\d{2}-\\d{4}\\b"],
+                      "date_of_birth": ["\\b(date of birth|born on|d\\.o\\.b\\.?)"]
+                    }
+                  }
+                },
+                {
+                  "id": "has_pii",
+                  "type": "gate.LabelTestGate",
+                  "name": "any personal data found?",
+                  "settings": {
+                    "component": "pii_check",
+                    "label": ["email", "phone", "ssn", "date_of_birth"]
+                  },
+                  "true_steps": [
+                    {
+                      "id": "store_held",
+                      "type": "storage.JsonLinesStorage",
+                      "name": "pages held back: their local transcription only",
+                      "settings": {
+                        "file": "results/pii-routing/held.jsonl",
+                        "mode": "truncate"
+                      }
+                    }
+                  ],
+                  "false_steps": [
+                    {
+                      "id": "describe",
+                      "type": "describer.GeminiDescriber",
+                      "name": "cloud description of a page without personal data",
+                      "settings": {
+                        "model": "gemini-3.1-flash-lite",
+                        "prompt": "Describe in two or three sentences what this transcribed archival page is and what it is about.\n\n{text_input_0}"
+                      },
+                      "next_steps": [
+                        {
+                          "id": "store_described",
+                          "type": "storage.JsonLinesStorage",
+                          "settings": {
+                            "file": "results/pii-routing/described.jsonl",
+                            "mode": "truncate"
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

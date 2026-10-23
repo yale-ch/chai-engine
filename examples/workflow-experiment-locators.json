@@ -1,0 +1,71 @@
+{
+  "id": "locators_wf",
+  "type": "workflow.Workflow",
+  "steps": [
+    {
+      "id": "docs",
+      "type": "provider.DirFileProvider",
+      "input": "results/locator-docs",
+      "steps": [
+        {
+          "id": "each_doc",
+          "type": "iterator.Iterator",
+          "source": true,
+          "steps": [
+            {
+              "id": "read",
+              "type": "transcriber.TextFileTranscriber",
+              "next_steps": [
+                {
+                  "id": "sentences",
+                  "type": "segmenter.TextSegmenter",
+                  "settings": {
+                    "mode": "sentence",
+                    "locate": true
+                  },
+                  "next_steps": [
+                    {
+                      "id": "each_sentence",
+                      "type": "iterator.Iterator",
+                      "steps": [
+                        {
+                          "id": "topics",
+                          "type": "classifier.KeywordClassifier",
+                          "settings": {
+                            "labels": {
+                              "people": [
+                                "ford",
+                                "lovelace",
+                                "babbage",
+                                "hodgkin"
+                              ],
+                              "objects": [
+                                "fossils",
+                                "shells",
+                                "catalogue",
+                                "paper"
+                              ]
+                            }
+                          },
+                          "next_steps": [
+                            {
+                              "id": "store",
+                              "type": "storage.SqliteStorage",
+                              "settings": {
+                                "database": "results/locators.db"
+                              }
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

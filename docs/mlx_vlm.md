@@ -64,14 +64,14 @@ that `MLXVLMComponent` is unavailable, and the rest of chai keeps working.
 ## Run
 
 ```bash
-~/.venv-chai/bin/python experiment_mlx_vlm.py
+~/.venv-chai/bin/python scripts/smoke_backend.py mlx-vlm path/to/images/
 ```
 
-Override the model via env var:
+Override the model with `--model` (or the `MLX_VLM_MODEL` environment variable):
 
 ```bash
-MLX_VLM_MODEL=mlx-community/Qwen3-VL-4B-Instruct-6bit \
-  ~/.venv-chai/bin/python experiment_mlx_vlm.py
+~/.venv-chai/bin/python scripts/smoke_backend.py mlx-vlm path/to/images/ \
+  --model mlx-community/Qwen3-VL-4B-Instruct-6bit
 ```
 
 ## Tested combinations

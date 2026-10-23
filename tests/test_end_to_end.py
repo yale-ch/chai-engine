@@ -159,6 +159,26 @@ class TestBaseTemplateWorkflowRun(unittest.TestCase):
             # the step's own settings win over the template's
             self.assertEqual(seg.settings["mode"], "word")
 
+    def test_base_used_twice_shares_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            library_path = os.path.join(tmp, "library.json")
+            with open(library_path, "w") as f:
+                json.dump({"Splitter": {"type": "segmenter.TextSegmenter", "settings": {"mode": "line"}}}, f)
+            tree = {
+                "type": "workflow.Workflow",
+                "id": "twice_wf",
+                "settings": {"library_path": library_path},
+                "steps": [
+                    {"base": "Splitter", "id": "words", "settings": {"mode": "word"}},
+                    {"base": "Splitter", "id": "lines"},
+                ],
+            }
+            wf = Workflow(tree)
+            # the first step's id and settings must not leak into the template, and so into the second
+            self.assertEqual(wf.get_component_by_id("words").settings["mode"], "word")
+            self.assertEqual(wf.get_component_by_id("lines").settings["mode"], "line")
+            self.assertEqual(wf.library["Splitter"], {"type": "segmenter.TextSegmenter", "settings": {"mode": "line"}})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -253,7 +253,17 @@ Every component accepts an error policy in `settings`:
 ```
 
 Default prompts live in `chai/data/prompts.json`; reusable step templates in
-`chai/data/library.json` (referenced via `base`).
+`chai/data/library.json` (or the file named by the workflow's `library_path` setting).
+
+A step with `base` starts from the library entry of that name: its own keys replace the
+entry's, except `settings`, which are merged key by key with the step's winning. So a workflow
+can name a storage once in the library and reuse it with only what differs:
+
+```json
+{"base": "JsonLinesStorage", "id": "log_pages", "settings": {"file": "results/pages.jsonl"}}
+```
+
+is the library's `storage.JsonLinesStorage` step with its `mode` setting kept and its `file` replaced.
 
 ## The builders
 
@@ -275,6 +285,25 @@ Python), and a System One style selection -- which candidate does this mention r
 -- with every model call priced. `examples/system1_models.py` runs every available System One
 model side by side on the same decisions and reports accuracy, time and cost per model.
 `examples/workflow-system1.json` is the selection step alone as workflow JSON.
+
+The other examples, each showing one thing:
+
+| Example | Shows |
+|---|---|
+| `experiment-locators.py` | Rows that point back into their document (`source`, character-range locators) -- no models needed |
+| `workflow-m804-lines.json` | Layout detection, line transcription with neighbouring lines as context, Parquet, S3 upload |
+| `experiment-m804.py` | Page-to-page context while transcribing and translating a manuscript |
+| `experiment-ppl-jsonl.py` | A CSV streamed to JSON-Lines, error branches, dividing a run between processes |
+| `experiment-postgres-parquet.py` | PostgreSQL directly vs. via Parquet, producing identical rows |
+| `experiment-jsonl-parquet-s3.py` | Handing a finished run to a central database through S3 |
+| `workflow-pii-routing.json` | Classifier and gate: pages with personal data stay local, the rest go to the cloud |
+| `workflow-iiif.json` | Transcribing the images of a IIIF manifest |
+| `kev_finetune.py` | Running a fine-tuned System One model on a decision benchmark |
+
+Workflow JSON runs as it is with `scripts/run_workflow.py` (`--input` for the provider's input,
+`--text` for text, `--set ID.KEY=VALUE` for a setting); `scripts/workflow_diagram.py` draws one as a
+Mermaid flowchart (`.mmd` and `.png`); `scripts/smoke_backend.py` checks a vLLM, sglang or MLX-VLM
+backend.
 
 ## Where chai is going
 
