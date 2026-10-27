@@ -4,6 +4,7 @@ real ``ModelResponse`` objects, usage figures and prices from its own table."""
 
 import base64
 import io
+import logging
 import os
 import tempfile
 import unittest
@@ -232,6 +233,88 @@ class TestProcessWithMockResponses(unittest.TestCase):
         self.assertEqual(res.value[0].value, {"entities": ["Ada"]})
         self.assertEqual(res.value[0].processor.id, "ner")
         self.assertEqual(wf.usage_summary()["by_component"]["ner"]["calls"], 1)
+
+
+
+class TestPromptSlots(unittest.TestCase):
+    """A ``{text_input_<i>}`` slot the input did not fill is refused, never sent literally."""
+
+    MOCK = {"litellm_params": {"mock_response": "an invented description"}}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "pic.jpg")
+        Image.new("RGB", (16, 16), "red").save(self.path, format="JPEG")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def describer(self, prompt, **settings):
+        return build(LLMComponent, {"model": "openai/gpt-4o-mini", "prompt": prompt, "expected_output": "text", **self.MOCK, **settings})[0]
+
+    def test_empty_input_raises_naming_component_slot_and_input(self):
+        c = self.describer("Describe the image. Context: {text_input_0}")
+        with self.assertRaises(ValueError) as cm:
+            c.process(ListResult([]))
+        msg = str(cm.exception)
+        self.assertIn(str(c), msg)
+        self.assertIn("{text_input_0}", msg)
+        self.assertIn("no items", msg)
+
+    def test_filled_slot_is_substituted_and_called(self):
+        c = self.describer("Describe the image. Context: {text_input_0}")
+        msgs = c.build_messages(ListResult([text("folio 3r"), FileItemResult(self.path)]))
+        content = msgs[0]["content"]
+        self.assertEqual(content[0]["type"], "image_url")
+        self.assertEqual(content[-1]["text"], "Describe the image. Context: folio 3r")
+        self.assertEqual(c.process(ListResult([text("folio 3r"), FileItemResult(self.path)])).value, "an invented description")
+
+    def test_empty_text_still_fills_its_slot(self):
+        c = self.describer("Context: {text_input_0}")
+        self.assertEqual(c.build_contents(ListResult([text(""), FileItemResult(self.path)]))[0], "Context: ")
+
+    def test_image_without_text_for_a_named_slot_raises(self):
+        c = self.describer("Previous line: {text_input_0}\nNow this page: {text_input_1}")
+        with self.assertRaises(ValueError) as cm:
+            c.build_contents(ListResult([text("line"), FileItemResult(self.path)]))
+        msg = str(cm.exception)
+        self.assertIn("names {text_input_1} but", msg)  # slot 0 was filled
+        self.assertIn("2 items: TEXT, IMAGE", msg)
+
+    def test_unfilled_slot_takes_the_error_policy(self):
+        c = self.describer("Describe {text_input_0}", on_error="skip")
+        self.assertIsNone(c.process(ListResult([FileItemResult(self.path)])))
+
+
+class TestPromptOrderWarning(unittest.TestCase):
+    RULES = "Follow these rules. " * 20  # 400 characters of fixed text
+
+    def build_logged(self, prompt):
+        with self.assertLogs("chai", level="WARNING") as logs:
+            c, _ = build(LLMComponent, {"model": "openai/gpt-4o-mini", "prompt": prompt})
+            c.build_contents(text("x"))
+            c.build_contents(text("y"))
+            logging.getLogger("chai").warning("sentinel")
+        return [line for line in logs.output if "sentinel" not in line]
+
+    def test_slot_first_long_prompt_warns_once(self):
+        lines = self.build_logged("Text: {text_input_0}\n\n" + self.RULES)
+        self.assertEqual(len(lines), 1)
+        self.assertIn("{text_input_0}", lines[0])
+        self.assertIn("system_instruction", lines[0])
+
+    def test_slot_last_prompt_does_not_warn(self):
+        self.assertEqual(self.build_logged(self.RULES + "\n\nText: {text_input_0}\nReturn JSON only."), [])
+
+    def test_prompt_without_slots_does_not_warn(self):
+        self.assertEqual(self.build_logged(self.RULES), [])
+
+    def test_role_default_prompt_is_checked_when_first_used(self):
+        c, _ = build(LLMComponent, {"model": "openai/gpt-4o-mini", "prompt": "short"})
+        c.prompt_text = "{first_input} " + self.RULES  # as a role's default prompt is set after __init__
+        with self.assertLogs("chai", level="WARNING") as logs:
+            c.build_contents(text("x"))
+        self.assertIn("{first_input}", logs.output[0])
 
 
 if __name__ == "__main__":
