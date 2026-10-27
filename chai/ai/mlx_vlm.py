@@ -28,7 +28,7 @@ from PIL import Image
 from ..core import Component
 from ..image_operations import bytes_from_image, image_from_bytes, scale
 from ..result import FileItemResult, ItemResult, Result
-from .ai_utils import extract_json
+from .ai_utils import check_text_slots, extract_json, warn_prompt_order
 
 logger = logging.getLogger("chai")
 
@@ -79,6 +79,7 @@ class MLXVLMComponent(Component):
 
         self._scratch_dir: Path | None = None
         self._scratch_files: List[Path] = []
+        warn_prompt_order(self)
 
         self.load_model()
 
@@ -178,6 +179,7 @@ class MLXVLMComponent(Component):
     def build_contents(self, input) -> Tuple[str, List[str]]:
         """Resolve the chai inputs into ``(prompt_text, [image_paths])``."""
 
+        warn_prompt_order(self)
         image_paths: List[str] = []
         format_vars: dict[str, Any] = {"step_name": self.name}
         format_vars.update(self.substitutions)
@@ -203,6 +205,8 @@ class MLXVLMComponent(Component):
                 raise NotImplementedError(
                     f"Unsupported result type {typ!r} for {self.ENGINE_NAME}: {item}"
                 )
+
+        check_text_slots(self, prompt_text, format_vars, input)
 
         format_vars["input_length"] = len(image_paths)
         first = input[0] if input else None

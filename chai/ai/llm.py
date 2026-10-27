@@ -37,7 +37,7 @@ from PIL import Image
 from ..core import Component
 from ..image_operations import bytes_from_image, image_from_bytes, scale
 from ..result import FileItemResult, ItemResult, Result
-from .ai_utils import extract_json, extract_yaml
+from .ai_utils import check_text_slots, extract_json, extract_yaml, warn_prompt_order
 
 logger = logging.getLogger("chai")
 
@@ -142,7 +142,11 @@ class LLMComponent(Component):
         - model: LiteLLM model id '<provider>/<model>' (required unless the backend has a default)
         - prompt: prompt template; {step_name}, {text_input_<i>}, {input_length}, {first_input},
           {last_input} and {ADDITIONAL_CONTEXT} are substituted, other braces (JSON examples) are
-          left alone (default '', or the role's default prompt)
+          left alone (default '', or the role's default prompt). A ``{text_input_<i>}`` slot the
+          input does not fill raises ``ValueError`` rather than reaching the model unsubstituted.
+          Put the variable slots at the end: a prompt with more than ``FIXED_TAIL_LIMIT`` (200)
+          characters of fixed text after its first slot is logged as defeating prompt caching
+          (``ai_utils.prompt_order_problem``)
         - system_instruction: standing instructions sent as the system message (default: none)
         - expected_output: 'json' to parse the reply as JSON, 'yaml' for YAML, anything else for raw
           text (default 'json')
@@ -220,6 +224,8 @@ class LLMComponent(Component):
         # misconfiguration fails when the workflow is built, not on the first file.
         self.base_kwargs = self.build_base_kwargs()
         self.validate_model()
+        # A role's default prompt is set after this, so build_contents checks again for it.
+        warn_prompt_order(self)
 
     # ------------------------------------------------------------------ configuration
 
@@ -417,6 +423,7 @@ class LLMComponent(Component):
 
     def build_contents(self, input) -> Tuple[str, List[dict]]:
         """Render the prompt and collect the content parts (attached texts, images, audio)."""
+        warn_prompt_order(self)
         parts: List[dict] = []
         format_vars: dict = {"step_name": self.name}
         format_vars.update(self.substitutions)
@@ -447,6 +454,8 @@ class LLMComponent(Component):
                 attachments += 1
             else:
                 raise NotImplementedError(f"Unsupported result type {typ!r} for {self.ENGINE_NAME}: {item}")
+
+        check_text_slots(self, prompt_text, format_vars, items)
 
         format_vars["input_length"] = attachments
         first, last = (items[0], items[-1]) if items else (None, None)

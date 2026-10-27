@@ -13,7 +13,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..core import Component
 from ..result import ItemResult, Result
-from .ai_utils import extract_json, extract_yaml
+from .ai_utils import check_text_slots, extract_json, extract_yaml, warn_prompt_order
 
 logger = logging.getLogger("chai")
 
@@ -53,6 +53,7 @@ class TransformersComponent(Component):
         self.max_new_tokens = self.settings.get("max_new_tokens", 2048)
         self.expects = self.settings.get("expected_output", "json")
         self.substitutions = {"ADDITIONAL_CONTEXT": ""}
+        warn_prompt_order(self)
 
     def generate_content(self, contents: str):
         messages = [{"role": "user", "content": contents}]
@@ -91,6 +92,7 @@ class TransformersComponent(Component):
 
         ### Process input into the API call
 
+        warn_prompt_order(self)
         format_vars = {"step_name": self.name}
         format_vars.update(self.substitutions)
         prompt_text = self.prompt_text
@@ -113,12 +115,11 @@ class TransformersComponent(Component):
                     raise NotImplementedError(
                         f"Unsupported type {typ} for transformers: {item}"
                     )
+        check_text_slots(self, prompt_text, format_vars, input)
         try:
             p_text = prompt_text.format(**format_vars)
         except KeyError as e:
-            print(
-                f"Missing substitution in prompt for {self}: {e}\n{prompt_text}\n{format_vars}"
-            )
+            raise ValueError(f"Missing substitution in prompt for {self}: {e}") from e
 
         if not p_text:
             raise ValueError(f"Prompt text in {self} is empty")

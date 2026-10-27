@@ -69,6 +69,8 @@ Every component supports an error policy via settings (`retries`, `retry_delay`,
 
 AI components are typically mixed with base components (e.g., `GeminiTranscriber` extends both `Transcriber` and `GeminiComponent`).
 
+A prompt's `{text_input_<i>}` slot takes the TEXT/DATA item at position `i` of the input; a slot the input did not fill raises `ValueError` (so `retries`/`on_error`/`error_steps` apply) instead of reaching the model as literal braces. Variable slots belong at the end of the prompt, after the fixed rules (or with the rules in `system_instruction`), so the provider can cache the fixed prefix: more than 200 characters of fixed text after the first variable slot is logged as a warning once per component (`ai_utils.prompt_order_problem`).
+
 Every AI component records the same metadata on the result of a call: `token_usage` (`total`, `prompt`, `images`, `thinking`, `result` -- a provider that did not break a modality down writes `-1` for it, not 0), `duration` in seconds, `type`, plus `engine` (the component's `ENGINE_NAME`) and `model` (the model actually used). Storage keeps that dict whole, so a run can be totalled by model afterwards without re-reading anything from the API -- see `token_usage_summary`. The LiteLLM-backed components also record the call's `cost` in USD (LiteLLM's figure, or the component's `pricing` setting for a model LiteLLM cannot price; `None` when neither can); a RESULT row's `md_cost` is that recorded cost, in every storage, and nothing is priced afterwards.
 
 ### Workflow Definition
