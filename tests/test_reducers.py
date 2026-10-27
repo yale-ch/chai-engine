@@ -1,6 +1,8 @@
+import os
+import tempfile
 import unittest
 
-from chai.result import ItemResult, LabelListResult, ListResult
+from chai.result import DirectoryListResult, FileItemResult, ItemResult, LabelListResult, ListResult
 from chai.workflow import Workflow
 
 
@@ -48,6 +50,20 @@ class TestReducers(unittest.TestCase):
         r = self.step({"type": "reducer.FlattenReducer"})
         flat = r.process(self._nested())
         self.assertEqual([x.value for x in flat.value], ["one", "two", "three"])
+
+    def test_flatten_keeps_data_lists_and_directory_files(self):
+        """A value that is a list of data (a JsonXpathExtractor hit) is a leaf, and a directory's
+        files come through as files -- an object type and its image, side by side."""
+        with tempfile.TemporaryDirectory() as tmp:
+            image = os.path.join(tmp, "image_0000.jpg")
+            with open(image, "wb") as fh:
+                fh.write(b"\xff\xd8\xff\xe0 not really a jpeg")
+            r = self.step({"type": "reducer.FlattenReducer"})
+            flat = r.process(ListResult([ItemResult(["drawing", "portrait"]), DirectoryListResult([image])]))
+            self.assertEqual(flat.value[0].value, ["drawing", "portrait"])
+            self.assertIsInstance(flat.value[1], FileItemResult)
+            self.assertEqual(str(flat.value[1].file_path), image)
+            self.assertEqual(len(flat.value), 2)
 
     def test_text_join(self):
         r = self.step({"type": "reducer.TextJoinReducer", "settings": {"separator": " | "}})

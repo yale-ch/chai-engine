@@ -21,7 +21,7 @@ import json
 
 from .ai import create_all_components
 from .core import Component
-from .result import FileItemResult, ItemResult, ListResult, Result
+from .result import DirectoryListResult, FileItemResult, ItemResult, ListResult, Result
 
 
 class Reducer(Component):
@@ -59,6 +59,11 @@ def walk_results(result, visit, _seen=None):
     visit(result)
     if isinstance(result, FileItemResult):
         return
+    if isinstance(result, DirectoryListResult):
+        # its value is file paths; iterating wraps each in a FileItemResult
+        for v in result:
+            walk_results(v, visit, seen)
+        return
     value = result.value
     if type(value) is list:
         for v in value:
@@ -85,8 +90,12 @@ class FlattenReducer(Reducer):
         def visit(r):
             if r is input:
                 return
-            if not isinstance(r, FileItemResult) and type(r.value) is list:
-                return  # containers contribute their children, not themselves
+            if isinstance(r, ListResult) or (
+                not isinstance(r, FileItemResult)
+                and type(r.value) is list
+                and any(isinstance(v, Result) for v in r.value)
+            ):
+                return  # containers contribute their children, not themselves; a list of data is a leaf
             leaves.append(r)
 
         walk_results(input, visit)
