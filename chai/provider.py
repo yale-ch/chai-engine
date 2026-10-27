@@ -7,7 +7,9 @@ of the tree can process.
 
 import csv
 import os
+import re
 from io import BytesIO
+from urllib.parse import urljoin, urlparse
 
 import requests
 import ujson as json
@@ -180,15 +182,62 @@ class CsvFileProvider(Provider):
         return super()._process(rows)
 
 
+class UrlJsonProvider(Provider):
+    """Fetch JSON from a URL and provide it as one DATA result.
+
+    Input is a URL, or a Result whose value is one, or a dict such as a ``CsvFileProvider`` row; the
+    ``url`` template is filled from it -- ``{value}`` is a string input, ``{<column>}`` a field of a
+    dict -- and the parsed response is returned as a DATA-typed ``ItemResult``, so
+    ``JsonXpathExtractor`` can pick values out of it. The URL fetched is its ``uri`` metadata, which
+    a stored row records as its input. A response that is not a success, or not JSON, raises, so
+    ``retries``/``on_error`` apply.
+
+    Settings:
+        - url: URL template, e.g. '{url}.json' (default '{value}' for a string input, '{url}' for a dict)
+        - headers: HTTP headers to send, e.g. {"User-Agent": "..."} (default: none)
+        - timeout: seconds to wait for the server (default 60)
+    """
+
+    def _process(self, input):
+        value = input
+        while isinstance(value, Result):
+            value = value.value
+        if isinstance(value, dict):
+            fields = {k: "" if v is None else v for k, v in value.items()}
+            template = self.settings.get("url") or "{url}"
+        elif isinstance(value, str):
+            fields = {"value": value.strip()}
+            template = self.settings.get("url") or "{value}"
+        else:
+            raise ValueError(f"{self} needs a URL or a dict to fill its url template, got {value!r}")
+        try:
+            url = template.format_map(fields)
+        except KeyError as e:
+            raise ValueError(f"{self}: url template {template!r} names {e}, which the input does not have")
+        response = requests.get(
+            url, headers=self.settings.get("headers") or None, timeout=float(self.settings.get("timeout", 60))
+        )
+        response.raise_for_status()
+        res = ItemResult(response.json(), input=input, processor=self, metadata={"type": "DATA", "uri": url})
+        return super()._process(res)
+
+
 class IIIFDirFileProvider(DirFileProvider):
     """Downloads the images of a IIIF Presentation manifest and provides them as files.
 
-    Input is a manifest URL; the manifest and its painting-annotation images are fetched (and cached)
-    into a local directory, then a ``DirectoryListResult`` of the downloaded JPEG files is returned,
-    exactly like ``DirFileProvider`` over that directory.
+    Input is a manifest URL -- a string, or a Result whose value is one (or a one-item list of one,
+    as a ``JsonXpathExtractor`` returns it), so the provider can follow an earlier step; the manifest
+    and its painting-annotation images are fetched (and cached) into a local directory, then a
+    ``DirectoryListResult`` of the downloaded JPEG files is returned, in canvas order.
 
     Settings:
         - directory: where to store the downloaded images (default 'downloads/<component id>')
+        - limit: only the first N canvases of the manifest, e.g. 1 for an object's primary view
+          (default: all of them)
+        - base_url: resolve a relative manifest reference (e.g. 'obj/1000') against this URL
+          (default: none; the input must be a full URL)
+        - per_manifest: keep each manifest in a subdirectory of its own, named after its URL, so one
+          provider can fetch a different manifest per iterator entry (default false)
     """
 
     def __init__(self, tree, workflow, parent):
@@ -202,19 +251,43 @@ class IIIFDirFileProvider(DirFileProvider):
             os.makedirs(dy, exist_ok=True)
         self.images_dir = dy
 
+    def manifest_url(self, input) -> str:
+        """The manifest URL *input* names, resolved against ``base_url``."""
+        value = input.value if isinstance(input, Result) else input
+        if isinstance(value, (list, tuple)):
+            value = value[0] if value else None
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{self} needs a manifest URL, got {value!r}")
+        base = self.settings.get("base_url")
+        return urljoin(base, value.strip()) if base else value.strip()
+
+    def manifest_dir(self, url) -> str:
+        """Where the manifest at *url* and its images are kept."""
+        if not self.settings.get("per_manifest"):
+            return self.images_dir
+        name = re.sub(r"[^A-Za-z0-9._-]+", "_", urlparse(url).path.strip("/")) or "manifest"
+        directory = os.path.join(self.images_dir, name)
+        os.makedirs(directory, exist_ok=True)
+        return directory
+
     def _process(self, input):
-        # input is a URI to a manifest
-        mf = self.get_manifest(input)
+        url = self.manifest_url(input)
+        directory = self.manifest_dir(url)
+        mf = self.get_manifest(url, directory)
         canvases = self.get_images_info(mf)
-        self.download_images(canvases)
-        files = [os.path.join(self.images_dir, x) for x in os.listdir(self.images_dir) if not x.endswith("json")]
-        files = [x for x in files if not os.path.isdir(x)]
+        limit = int(self.settings.get("limit", 0) or 0)
+        if limit:
+            canvases = canvases[:limit]
+        images = self.download_images(canvases, directory)
+        # The images of these canvases, in canvas order -- not whatever else is in the directory
+        files = [os.path.join(directory, x) for x in images]
+        files = [x for x in files if os.path.isfile(x)]
         d = DirectoryListResult(files, input=input, processor=self)
         return Provider._process(self, d)
 
-    def get_manifest(self, manifest_url):
+    def get_manifest(self, manifest_url, directory=None):
         """Fetch manifest data from the manifest URL"""
-        mffn = os.path.join(self.images_dir, "manifest.json")
+        mffn = os.path.join(directory or self.images_dir, "manifest.json")
         if os.path.exists(mffn):
             with open(mffn) as fh:
                 return json.load(fh)
@@ -257,36 +330,36 @@ class IIIFDirFileProvider(DirFileProvider):
         except Exception as e:
             raise Exception(f"Error extracting image information: {e}")
 
-    def download_images(self, image_urls):
+    def download_images(self, image_urls, directory=None):
         """Download images and store as PIL Image objects"""
+        directory = directory or self.images_dir
         images = {}
 
         for i, cvs in enumerate(image_urls):
             url = cvs["images"][0]["id"]
             filename = f"image_{i:04d}.jpg"
-            image_path = os.path.join(self.images_dir, filename)
+            image_path = os.path.join(directory, filename)
             images[filename] = {"url": url, "canvas": cvs}
             if os.path.exists(image_path):
-                image = Image.open(image_path)
-            else:
-                try:
-                    response = requests.get(url)
-                    response.raise_for_status()
-                    # Create PIL Image from response content
-                    image = Image.open(BytesIO(response.content))
-                except Exception as e:
-                    print(f"Warning: Failed to download image {url}: {e}")
-                    continue
-                # Now try to save it
-                try:
-                    if image.mode in ("RGBA", "P"):
-                        image = image.convert("RGB")
-                    image.save(image_path, "JPEG", quality=95)
-                except Exception as e:
-                    print(f"Warning: Failed to save image {url}: {e}")
-                    continue
+                continue  # downloaded already; re-saving would re-compress the JPEG every run
+            try:
+                response = requests.get(url)
+                response.raise_for_status()
+                # Create PIL Image from response content
+                image = Image.open(BytesIO(response.content))
+            except Exception as e:
+                print(f"Warning: Failed to download image {url}: {e}")
+                continue
+            # Now try to save it
+            try:
+                if image.mode in ("RGBA", "P"):
+                    image = image.convert("RGB")
+                image.save(image_path, "JPEG", quality=95)
+            except Exception as e:
+                print(f"Warning: Failed to save image {url}: {e}")
+                continue
 
         # write images hash to disk
-        with open(os.path.join(self.images_dir, "_info.json"), "w") as fh:
+        with open(os.path.join(directory, "_info.json"), "w") as fh:
             json.dump(images, fh)
         return images

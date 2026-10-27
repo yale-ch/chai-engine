@@ -1,0 +1,120 @@
+{
+  "id": "alt_text",
+  "type": "workflow.Workflow",
+  "name": "Alt-text: describe each catalogued object's primary image for people who cannot see it",
+  "description": "For each Yale Center for British Art catalog URL in a CSV, fetch the catalog record, take its object type from the field its collection uses, download the first image of its IIIF manifest and write 4-6 plain sentences of alt-text that open with that object type",
+  "project": "Alt-text",
+  "steps": [
+    {
+      "id": "catalog_urls",
+      "type": "provider.CsvFileProvider",
+      "name": "a CSV with a `url` column of catalog URLs",
+      "input": "inputs/alt_text/urls.csv",
+      "steps": [
+        {
+          "id": "each_object",
+          "type": "iterator.Iterator",
+          "settings": {
+            "workers": 8,
+            "continue_on_error": true,
+            "retain_results": false
+          },
+          "steps": [
+            {
+              "id": "catalog",
+              "type": "provider.UrlJsonProvider",
+              "name": "the catalog record as JSON",
+              "source": true,
+              "settings": {
+                "url": "{url}.json",
+                "headers": {
+                  "Accept": "application/json",
+                  "User-Agent": "curl/8.7.1 (chai-alt-text)"
+                },
+                "retries": 2,
+                "retry_delay": 2
+              },
+              "next_steps": [
+                {
+                  "id": "type_and_image",
+                  "type": "fanout.FanOut",
+                  "settings": {
+                    "workers": 2
+                  },
+                  "steps": [
+                    {
+                      "id": "object_type",
+                      "type": "extractor.JsonXpathExtractor",
+                      "name": "the object type, from the field the record's collection keeps it in",
+                      "settings": {
+                        "xpath": "/response/document/*[(name()='object_name_ss' and (../collection_ss='Paintings and Sculpture' or ../collection_ss='Prints and Drawings')) or (name()='form_genre_ss' and ../collection_ss='Rare Books and Manuscripts') or (name()='genre_ss' and ../collection_ss='Archives')]"
+                      }
+                    },
+                    {
+                      "id": "manifest",
+                      "type": "extractor.JsonXpathExtractor",
+                      "settings": {
+                        "xpath": "/response/document/manifest_ss"
+                      },
+                      "next_steps": [
+                        {
+                          "id": "iiif",
+                          "type": "provider.IIIFDirFileProvider",
+                          "name": "the first image of the object's manifest",
+                          "settings": {
+                            "directory": "downloads/alt_text",
+                            "base_url": "https://manifests.collections.yale.edu/ycba/",
+                            "per_manifest": true,
+                            "limit": 1
+                          }
+                        }
+                      ]
+                    }
+                  ],
+                  "next_steps": [
+                    {
+                      "id": "type_with_image",
+                      "type": "reducer.FlattenReducer",
+                      "name": "the object type (None when the collection has none) and the image, as one list",
+                      "settings": {
+                        "keep_empty": true
+                      },
+                      "next_steps": [
+                        {
+                          "id": "describe",
+                          "type": "describer.GeminiDescriber",
+                          "settings": {
+                            "model": "gemini-3.8-flash",
+                            "thinking_level": "low",
+                            "tools": [],
+                            "expected_output": "text",
+                            "max_output_tokens": 4096,
+                            "retries": 2,
+                            "retry_delay": 2,
+                            "system_instruction": "You are writing alt-text to make an image accessible to people who cannot see it.\n\nYou are given the image and the object type(s) the museum catalogue records for it. Apart from the object type, describe ONLY what is actually visible in the image. Do not use any other outside knowledge about the image, and do not try to identify it.\n\nFollow these rules exactly:\n- Write between 4 and 6 sentences. No more, no fewer.\n- The FIRST sentence must begin by naming the object type, then say what it shows (for example \"A painting of ...\", \"A bronze sculpture of ...\", \"A hand-colored engraved map of ...\", \"A black-and-white photographic negative of ...\"). If several object types are listed, combine them naturally into one opening phrase (for example \"engraving\" + \"map\" becomes \"An engraved map of ...\"). Ignore dates and catalogue punctuation in the object type (\"Engravings -- Hand-colored.\" is a hand-colored engraving). If no object type is given (None or empty), name the kind of object you can see (for example \"A photograph of ...\", \"A page of handwritten text ...\", \"A printed document ...\").\n- Write at an 8th-grade reading level.\n- Use short, plain, direct sentences.\n- Name the objects you can see in the image, then describe each one in a basic way (its shape, color, size, and where it sits in the image).\n- Describe only what is visible. Do not guess.\n- Do not guess at historical context, time period, meaning, or symbolism.\n- Do not name specific real people, artists, places, or events.\n- Do not begin with phrases like \"Image of\", \"Picture of\", \"This image shows\", or \"Alt text:\". Start with the object type itself.\n\nReturn only the alt-text as plain text.",
+                            "prompt": "Write the alt-text for this image. The museum catalogue's object type(s): {text_input_0}"
+                          },
+                          "next_steps": [
+                            {
+                              "id": "log_describe",
+                              "type": "storage.JsonLinesStorage",
+                              "name": "one CHAI-TEA RESULT row per object, with its token usage",
+                              "settings": {
+                                "file": "results/alt_text/run.jsonl",
+                                "mode": "truncate"
+                              }
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

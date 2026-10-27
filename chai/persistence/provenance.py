@@ -132,6 +132,9 @@ def _uri_for(node):
     for last in _provenance(node):
         if isinstance(last, FileItemResult) and last.file_name:
             return last.file_name
+        uri = (last.metadata or {}).get("uri")  # e.g. what a UrlJsonProvider fetched
+        if isinstance(uri, str) and uri:
+            return uri
     # The end of the chain is the raw input a provider was given: a path or a URI, but not text
     raw = last.input if isinstance(last, Result) else node
     if isinstance(raw, str) and (_URI_SCHEME.match(raw) or os.path.exists(raw)):
