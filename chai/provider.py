@@ -189,6 +189,8 @@ class IIIFDirFileProvider(DirFileProvider):
 
     Settings:
         - directory: where to store the downloaded images (default 'downloads/<component id>')
+        - limit: only the first N canvases of the manifest, e.g. 1 for an object's primary view
+          (default: all of them)
     """
 
     def __init__(self, tree, workflow, parent):
@@ -206,9 +208,13 @@ class IIIFDirFileProvider(DirFileProvider):
         # input is a URI to a manifest
         mf = self.get_manifest(input)
         canvases = self.get_images_info(mf)
-        self.download_images(canvases)
-        files = [os.path.join(self.images_dir, x) for x in os.listdir(self.images_dir) if not x.endswith("json")]
-        files = [x for x in files if not os.path.isdir(x)]
+        limit = int(self.settings.get("limit", 0) or 0)
+        if limit:
+            canvases = canvases[:limit]
+        images = self.download_images(canvases)
+        # The images of these canvases, in canvas order -- not whatever else is in the directory
+        files = [os.path.join(self.images_dir, x) for x in images]
+        files = [x for x in files if os.path.isfile(x)]
         d = DirectoryListResult(files, input=input, processor=self)
         return Provider._process(self, d)
 
@@ -267,24 +273,23 @@ class IIIFDirFileProvider(DirFileProvider):
             image_path = os.path.join(self.images_dir, filename)
             images[filename] = {"url": url, "canvas": cvs}
             if os.path.exists(image_path):
-                image = Image.open(image_path)
-            else:
-                try:
-                    response = requests.get(url)
-                    response.raise_for_status()
-                    # Create PIL Image from response content
-                    image = Image.open(BytesIO(response.content))
-                except Exception as e:
-                    print(f"Warning: Failed to download image {url}: {e}")
-                    continue
-                # Now try to save it
-                try:
-                    if image.mode in ("RGBA", "P"):
-                        image = image.convert("RGB")
-                    image.save(image_path, "JPEG", quality=95)
-                except Exception as e:
-                    print(f"Warning: Failed to save image {url}: {e}")
-                    continue
+                continue  # downloaded already; re-saving would re-compress the JPEG every run
+            try:
+                response = requests.get(url)
+                response.raise_for_status()
+                # Create PIL Image from response content
+                image = Image.open(BytesIO(response.content))
+            except Exception as e:
+                print(f"Warning: Failed to download image {url}: {e}")
+                continue
+            # Now try to save it
+            try:
+                if image.mode in ("RGBA", "P"):
+                    image = image.convert("RGB")
+                image.save(image_path, "JPEG", quality=95)
+            except Exception as e:
+                print(f"Warning: Failed to save image {url}: {e}")
+                continue
 
         # write images hash to disk
         with open(os.path.join(self.images_dir, "_info.json"), "w") as fh:

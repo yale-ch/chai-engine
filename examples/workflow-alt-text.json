@@ -1,0 +1,43 @@
+{
+  "id": "alt_text",
+  "type": "workflow.Workflow",
+  "name": "Alt-text: describe an object's primary image for people who cannot see it",
+  "description": "Download the first image of a IIIF manifest and write 4-6 sentences of plain alt-text that open with the object type. examples/alt_text.py runs it once per Yale Center for British Art catalog record, putting the catalogued object type into the prompt's {ADDITIONAL_CONTEXT}",
+  "project": "Alt-text",
+  "steps": [
+    {
+      "id": "iiif",
+      "type": "provider.IIIFDirFileProvider",
+      "settings": {
+        "directory": "downloads/alt_text",
+        "limit": 1
+      },
+      "steps": [
+        {
+          "id": "each_image",
+          "type": "iterator.Iterator",
+          "source": true,
+          "settings": {
+            "continue_on_error": true
+          },
+          "steps": [
+            {
+              "id": "describe",
+              "type": "describer.GeminiDescriber",
+              "settings": {
+                "model": "gemini-3.8-flash",
+                "thinking_level": "low",
+                "tools": [],
+                "expected_output": "text",
+                "max_output_tokens": 4096,
+                "retries": 2,
+                "retry_delay": 2,
+                "prompt": "You are writing alt-text to make an image accessible to people who cannot see it.\n\n{ADDITIONAL_CONTEXT}\n\nApart from the object type, describe ONLY what is actually visible in this image. Do not use any other outside knowledge about the image, and do not try to identify it.\n\nFollow these rules exactly:\n- Write between 4 and 6 sentences. No more, no fewer.\n- The FIRST sentence must begin by naming the object type, then say what it shows (for example \"A painting of ...\", \"A bronze sculpture of ...\", \"A hand-colored engraved map of ...\", \"A black-and-white photographic negative of ...\"). If no object type is given above, name the kind of object you can see.\n- Write at an 8th-grade reading level.\n- Use short, plain, direct sentences.\n- Name the objects you can see in the image, then describe each one in a basic way (its shape, color, size, and where it sits in the image).\n- Describe only what is visible. Do not guess.\n- Do not guess at historical context, time period, meaning, or symbolism.\n- Do not name specific real people, artists, places, or events.\n- Do not begin with phrases like \"Image of\", \"Picture of\", \"This image shows\", or \"Alt text:\". Start with the object type itself.\n\nReturn only the alt-text as plain text."
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
