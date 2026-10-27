@@ -1,0 +1,85 @@
+{
+  "id": "stockbonds",
+  "type": "workflow.Workflow",
+  "name": "Stockbonds: transcribe each certificate and record its company, color and shares",
+  "description": "Transcribe each YUAG stock and bond certificate image and extract the company name, the certificate's color, the number of shares and whether the image is blank, as one schema-checked JSON record per image",
+  "project": "Stockbonds",
+  "steps": [
+    {
+      "id": "stockbond_images",
+      "type": "provider.DirFileProvider",
+      "input": "inputs/stockbonds",
+      "steps": [
+        {
+          "id": "each_certificate",
+          "type": "iterator.Iterator",
+          "source": true,
+          "settings": {
+            "workers": 8,
+            "continue_on_error": true,
+            "retain_results": false
+          },
+          "steps": [
+            {
+              "id": "extract",
+              "type": "extractor.GeminiExtractor",
+              "settings": {
+                "model": "gemini-3.8-flash",
+                "thinking_level": "low",
+                "tools": [],
+                "max_output_tokens": 16384,
+                "retries": 3,
+                "retry_delay": 2,
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "blank_page": {
+                      "type": "boolean",
+                      "description": "true if the image shows no certificate or no text"
+                    },
+                    "transcription": {
+                      "type": "string",
+                      "description": "the transcribed text of the certificate, in reading order"
+                    },
+                    "company_name": {
+                      "type": "string",
+                      "description": "the name of the company that issued the certificate"
+                    },
+                    "color": {
+                      "type": "string",
+                      "description": "the dominant color of the certificate's printing, e.g. green, orange, brown, blue"
+                    },
+                    "number_of_shares": {
+                      "type": "string",
+                      "description": "the number of shares as written on the certificate, or an empty string if none is given"
+                    }
+                  },
+                  "required": [
+                    "blank_page",
+                    "transcription",
+                    "company_name",
+                    "color",
+                    "number_of_shares"
+                  ],
+                  "additionalProperties": false
+                },
+                "prompt": "This image is a historical stock or bond certificate from the Yale University Art Gallery.\n\nTranscribe all of the text on the certificate, in natural reading order, keeping each line of the certificate as its own line. Transcribe the text as it is printed or written, without correcting or modernizing it.\nDetermine the name of the company that issued the certificate, the color of the certificate (the dominant color of its printing and border), and the number of shares it represents, as written on it. You must assign a color.\nIf the number of shares is not given, return an empty string for it. If the image is blank or shows no certificate, set blank_page to true and return empty strings for the other fields.\n\nRespond only with the JSON object."
+              },
+              "next_steps": [
+                {
+                  "id": "log_extract",
+                  "type": "storage.JsonLinesStorage",
+                  "name": "one CHAI-TEA RESULT row per certificate, with its token usage",
+                  "settings": {
+                    "file": "results/stockbonds/run.jsonl",
+                    "mode": "truncate"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
