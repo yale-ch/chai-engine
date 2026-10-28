@@ -4,7 +4,7 @@ AI-backed variants (``GeminiTranscriber``, ``LMStudioTranscriber``, ...) are gen
 backends in ``chai.ai``; ``TextFileTranscriber`` handles plain text files without a model.
 """
 
-from .ai import create_all_components
+from .ai import TransformersComponent, create_ai_component, create_all_components
 from .core import Component
 from .result import ItemResult
 
@@ -29,6 +29,9 @@ class Transcriber(Component):
 
 
 globals().update(create_all_components(Transcriber))
+# in-process HuggingFace models (text, or vision-language such as Chandra OCR 2); made explicitly
+# because the backend loads its weights when the component is built
+TransformersTranscriber = create_ai_component("TransformersTranscriber", Transcriber, TransformersComponent)
 
 
 class TextFileTranscriber(Transcriber):

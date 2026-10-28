@@ -138,7 +138,10 @@ grounding on by default, `tools: []` disables; `thinking_level` on Gemini 3+), `
 `LMStudioDescriber`, `OpenAIClassifier`, `VLLMSegmenter`, `SGLangTranslator` -- as thin subclasses.
 Settings that are not set are not sent (the provider's defaults apply); a setting that is set is
 always sent, so a model that rejects it fails loudly instead of being silently ignored. In-process
-backends: `TransformersComponent` (text) and `MLXVLMComponent` (vision, Apple Silicon).
+backends: `TransformersComponent` (text, or vision-language models such as Chandra OCR 2, on CUDA,
+Apple Silicon or the CPU -- `transcriber.TransformersTranscriber`) and `MLXVLMComponent` (vision,
+Apple Silicon). An AI classifier (`GeminiClassifier`, `LLMClassifier`, ...) returns the model's
+reply as labels matched to its `labels` setting, so a `LabelTestGate` can route on them.
 
 **System One decision models** are a different kind of backend -- they answer typed questions with
 calibrated probabilities instead of text -- and live in their own package, `chai/system_one/`: one
@@ -162,6 +165,13 @@ wf.usage_summary()
 
 The same summary rides on the workflow's final `component_end` event as `usage`, so a harness can
 show what a run cost as it finishes.
+
+A local model's cost is the machine and the time, so every call that ran on this machine (an
+in-process model, or a server at localhost such as Ollama or LM Studio) records `local_compute`:
+the device, the seconds and hours, and the hardware -- OS, CPU model and cores, RAM and GPUs, the
+same on Windows, macOS and Linux (`chai/hardware.py`). The summary adds `local_hours` and a
+`by_hardware` breakdown, so a run that mixes hosted and local models reports dollars for the one
+and machine-hours for the other.
 
 ### Conditions: one test language for all gates
 
@@ -299,6 +309,7 @@ The other examples, each showing one thing:
 | `workflow-pii-routing.json` | Classifier and gate: pages with personal data stay local, the rest go to the cloud |
 | `workflow-iiif.json` | Transcribing the images of a IIIF manifest |
 | `workflow-alt-text.json` | Alt-text from a catalog record and a manifest's first image, all JSON: fetch, XPath, fan-out, describe |
+| `workflow-lux-routing.json`, `lux_routing.py` | Classify each image, then route it: alt-text, Chandra OCR 2 locally, or Gemini 3.8 Flash for hard handwriting; dollars and machine-hours per row |
 | `workflow-alt-text-yuag.json` | The same from IIIF manifests alone (classification and medium from their metadata, images scaled by the image service), with cost per row |
 | `kev_finetune.py` | Running a fine-tuned System One model on a decision benchmark |
 

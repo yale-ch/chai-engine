@@ -109,8 +109,15 @@ def usage_lines(usage):
         totals += f" ({usage['unpriced_calls']} calls unpriced)"
     lines = [f"usage:    {totals}"]
     for model, row in (usage.get("by_model") or {}).items():
-        lines.append(f"  {model}: {row.get('calls', 0)} calls, {row.get('total_tokens', 0)} tokens, "
-                     f"${row.get('cost', 0.0):.4f}")
+        line = (f"  {model}: {row.get('calls', 0)} calls, {row.get('total_tokens', 0)} tokens, "
+                f"${row.get('cost', 0.0):.4f}")
+        if row.get("local_calls"):
+            line += f", {row.get('local_hours', 0.0):.4f} h local"
+        lines.append(line)
+    for machine, row in (usage.get("by_hardware") or {}).items():
+        devices = ", ".join(row.get("devices") or []) or "local server"
+        lines.append(f"local:    {row.get('local_calls', 0)} calls, {row.get('local_hours', 0.0):.4f} h "
+                     f"on {machine} ({devices})")
     return lines
 
 

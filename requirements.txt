@@ -13,6 +13,9 @@ transformers>=5.5.0
 python-dotenv
 accelerate>=1.13.0
 lxml
+# chai.hardware: the RAM and cores, and NVIDIA GPUs, that a local model's calls record
+psutil
+nvidia-ml-py
 # Every hosted/served chat model (Gemini, Vertex, OpenAI, Anthropic, Ollama, LM Studio,
 # vLLM, sglang, ...) and remote embeddings go through LiteLLM
 # pinned: 1.107.0 was a compromised release (BerriAI/litellm#47826)
