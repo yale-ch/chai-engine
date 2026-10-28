@@ -11,8 +11,9 @@ import unittest
 from PIL import Image
 
 from chai.classifier import GeminiClassifier
-from chai.hardware import hardware_info, hardware_label, is_local_url, local_compute
-from chai.result import FileItemResult, ItemResult, LabelListResult
+from chai.hardware import hardware_info, hardware_key, hardware_label, is_local_url, local_compute, profile_key
+from chai.persistence import read_run_records, run_records_file
+from chai.result import FileItemResult, ItemResult, LabelListResult, ListResult
 from chai.usage import UsageLedger
 from chai.workflow import Workflow
 
@@ -123,11 +124,13 @@ class TestLocalCompute(unittest.TestCase):
         self.assertIsInstance(info["gpus"], list)
         self.assertIn(info["cpu"], hardware_label(info))
 
-    def test_local_compute_entry(self):
+    def test_local_compute_entry_names_the_machine_by_key(self):
         entry = local_compute(7200, "cuda:0")
-        self.assertEqual(entry["device"], "cuda:0")
-        self.assertEqual(entry["hours"], 2.0)
-        self.assertEqual(entry["hardware"], hardware_info())
+        self.assertEqual(entry, {"hardware": hardware_key(), "device": "cuda:0", "seconds": 7200.0, "hours": 2.0})
+        self.assertRegex(entry["hardware"], r"^hw_[0-9a-f]{10}$")
+        # the key is the profile's: stable for a machine, different for another
+        self.assertEqual(hardware_key(), profile_key(dict(reversed(list(hardware_info().items())))))
+        self.assertNotEqual(hardware_key(), profile_key({**hardware_info(), "ram_gb": 1.0}))
 
     def test_local_urls(self):
         for url in ("http://localhost:11434", "127.0.0.1:1234/v1", "http://[::1]:8000"):
@@ -144,8 +147,31 @@ class TestLocalCompute(unittest.TestCase):
             "model": "gemini-3.1-flash-lite", "prompt": "Describe {text_input_0}", "expected_output": "text", "tools": [],
             "litellm_params": {"mock_response": "a page"}}}, wf)
         text = ItemResult("x", metadata={"type": "TEXT"})
-        self.assertEqual(local.process(text).metadata["local_compute"]["hardware"], hardware_info())
+        self.assertEqual(local.process(text).metadata["local_compute"]["hardware"], hardware_key())
         self.assertNotIn("local_compute", hosted.process(text).metadata)
+
+    def test_rows_carry_the_key_and_the_run_carries_the_profile_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = pathlib.Path(tmp) / "run.jsonl"
+            wf = Workflow({"id": "keyed_wf", "type": "workflow.Workflow", "steps": [{
+                "id": "each", "type": "iterator.Iterator", "steps": [{
+                    "id": "local", "type": "describer.OllamaDescriber",
+                    "settings": {"model": "gemma3", "prompt": "Describe {text_input_0}", "expected_output": "text",
+                                 "litellm_params": {"mock_response": "a page"}},
+                    "next_steps": [{"id": "log", "type": "storage.JsonLinesStorage", "settings": {"file": str(log)}}]}]}]})
+            wf.run(ListResult([ItemResult(f"page {i}", metadata={"type": "TEXT"}) for i in range(3)]))
+            rows = [json.loads(line) for line in log.read_text().splitlines()]
+            records = read_run_records(run_records_file(str(log)))
+        self.assertEqual(len(rows), 3)
+        for row in rows:
+            compute = row["metadata"]["local_compute"]
+            self.assertEqual(set(compute), {"hardware", "device", "seconds", "hours"})
+            self.assertEqual(compute["hardware"], hardware_key())
+        self.assertEqual(wf.hardware, {hardware_key(): hardware_info()})
+        (run,) = records["WORKFLOW_RUN"]
+        self.assertEqual(run["metadata"]["hardware"], {hardware_key(): hardware_info()})
+        self.assertEqual(run["metadata"]["usage"]["local_calls"], 3)
+        self.assertNotIn("hardware", run["metadata"]["usage"])
 
     def test_ledger_totals_hours_per_machine(self):
         class C:
@@ -161,8 +187,10 @@ class TestLocalCompute(unittest.TestCase):
         self.assertEqual(summary["local_calls"], 2)
         self.assertEqual(summary["local_hours"], 1.0)
         self.assertEqual(summary["calls"], 3)
-        (machine, row), = summary["by_hardware"].items()
-        self.assertEqual(machine, hardware_label(hardware_info()))
+        (key, row), = summary["by_hardware"].items()
+        self.assertEqual(key, hardware_key())
+        self.assertEqual(row["label"], hardware_label(hardware_info()))
+        self.assertEqual(summary["hardware"], {key: hardware_info()})
         self.assertEqual(row["devices"], ["mps"])
         self.assertEqual(row["local_hours"], 1.0)
         self.assertEqual(summary["by_model"]["hosted"]["local_hours"], 0.0)

@@ -5,7 +5,8 @@ Flash-Lite), typed documents, newspapers and easy handwriting are read by Chandr
 machine, and hard handwriting goes to Gemini 3.8 Flash. Every result is a CHAI-TEA RESULT row in
 ``results/lux_routing/run.jsonl``; this script reads the rows back and prints, per image, the label,
 the reader it went to, how long that took, and what it cost -- dollars for a hosted model, hours on
-named hardware for a local one -- then the run's totals.
+named hardware for a local one -- then the run's totals. A row names its machine by a key; the
+machine's description is kept once, on the run (``run.records.json`` beside the rows).
 
     python examples/lux_routing.py                       # inputs/lux_routing
     python examples/lux_routing.py --images path/to/images --expected examples/lux-routing-images.csv
@@ -30,6 +31,7 @@ sys.path.insert(0, str(ROOT))
 from dotenv import load_dotenv  # noqa: E402
 
 from chai.hardware import hardware_label  # noqa: E402
+from chai.persistence import read_run_records, run_records_file  # noqa: E402
 from chai.workflow import Workflow  # noqa: E402
 
 WORKFLOW = ROOT / "examples" / "workflow-lux-routing.json"
@@ -57,6 +59,11 @@ def build(images, log):
 
 def report(log, expected=None):
     rows = [json.loads(line) for line in open(log)]
+    # the machines the run's local calls ran on, {key: profile}, recorded once on its WORKFLOW_RUN row
+    machines = {}
+    for run in read_run_records(run_records_file(log)).get("WORKFLOW_RUN", []):
+        md = run.get("metadata") or {}
+        machines.update((json.loads(md) if isinstance(md, str) else md).get("hardware") or {})
     by_image = {}
     for row in rows:
         by_image.setdefault(os.path.basename(row["input"] or "?"), {})[row["process_id"]] = row
@@ -77,7 +84,8 @@ def report(log, expected=None):
         md = row["metadata"] if isinstance(row["metadata"], dict) else json.loads(row["metadata"] or "{}")
         compute = md.get("local_compute")
         if compute:
-            cost = f"{compute['hours']:.4f} h on {hardware_label(compute['hardware'])} ({compute['device']})"
+            machine = hardware_label(machines.get(compute["hardware"])) if compute["hardware"] in machines else compute["hardware"]
+            cost = f"{compute['hours']:.4f} h on {machine} ({compute['device']})"
         else:
             cost = f"${md.get('cost') or 0:.5f}"
         ok = "" if row["was_successful"] else " FAILED"
@@ -101,8 +109,8 @@ def main():
         wf.run()
         usage = wf.usage.summary()
         print(f"\nhosted: ${usage['cost']:.4f} for {usage['calls'] - usage['local_calls']} calls")
-        for machine, row in usage["by_hardware"].items():
-            print(f"local:  {row['local_hours']:.4f} h for {row['local_calls']} calls on {machine} "
+        for key, row in usage["by_hardware"].items():
+            print(f"local:  {row['local_hours']:.4f} h for {row['local_calls']} calls on {row['label']} [{key}] "
                   f"({', '.join(row['devices']) or 'local server'})")
     expected = None
     if args.expected:

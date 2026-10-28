@@ -114,10 +114,10 @@ def usage_lines(usage):
         if row.get("local_calls"):
             line += f", {row.get('local_hours', 0.0):.4f} h local"
         lines.append(line)
-    for machine, row in (usage.get("by_hardware") or {}).items():
+    for key, row in (usage.get("by_hardware") or {}).items():
         devices = ", ".join(row.get("devices") or []) or "local server"
         lines.append(f"local:    {row.get('local_calls', 0)} calls, {row.get('local_hours', 0.0):.4f} h "
-                     f"on {machine} ({devices})")
+                     f"on {row.get('label') or key} [{key}] ({devices})")
     return lines
 
 

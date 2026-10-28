@@ -168,8 +168,10 @@ show what a run cost as it finishes.
 
 A local model's cost is the machine and the time, so every call that ran on this machine (an
 in-process model, or a server at localhost such as Ollama or LM Studio) records `local_compute`:
-the device, the seconds and hours, and the hardware -- OS, CPU model and cores, RAM and GPUs, the
-same on Windows, macOS and Linux (`chai/hardware.py`). The summary adds `local_hours` and a
+the device, the seconds and hours, and a key for the machine. The machine itself -- OS, CPU model
+and cores, RAM and GPUs, the same on Windows, macOS and Linux (`chai/hardware.py`) -- is described
+once per run, in the WORKFLOW_RUN row's `metadata.hardware` (`{key: profile}`), so a run of
+100,000 images does not repeat it 100,000 times. The summary adds `local_hours` and a
 `by_hardware` breakdown, so a run that mixes hosted and local models reports dollars for the one
 and machine-hours for the other.
 

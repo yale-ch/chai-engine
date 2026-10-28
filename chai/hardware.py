@@ -3,24 +3,33 @@
 A hosted model's cost is its bill; a local model's cost is the machine and the time. So every
 in-process backend (``TransformersComponent``, ``MLXVLMComponent``, System One) and every served
 backend whose server is on this machine (Ollama, LM Studio, a vLLM or sglang at localhost) puts a
-``local_compute`` entry in the metadata of each result it makes::
+small ``local_compute`` entry in the metadata of each result it makes -- the call's timing, its
+device, and a key for the machine::
 
-    {"device": "mps", "seconds": 41.2, "hours": 0.011444,
-     "hardware": {"os": "Darwin", "os_version": "15.6", "machine": "arm64",
-                  "cpu": "Apple M4 Max", "cpu_cores_physical": 16, "cpu_cores_logical": 16,
-                  "ram_gb": 128.0,
-                  "gpus": [{"vendor": "Apple", "name": "Apple M4 Max", "cores": 40, "memory_gb": 128.0}]}}
+    {"hardware": "hw_5c1e0b9a42", "device": "mps", "seconds": 41.2, "hours": 0.011444}
 
-``device`` is where the model's weights were (``cuda:0``, ``mps``, ``cpu``), or ``None`` for a local
-server, which decides that itself. ``hardware`` is read once per process (``hardware_info``) and the
-same on Windows, macOS and Linux: the CPU's model name from the registry, ``sysctl`` or
-``/proc/cpuinfo``; NVIDIA GPUs through NVML (``nvidia-ml-py``) or, failing that, torch; Apple
-Silicon's GPU from ``system_profiler``; other GPUs on Windows from CIM. A probe that cannot run
-leaves its field ``None`` or its list empty rather than failing the call. The storages keep the
-metadata whole, and ``Workflow.usage`` totals the hours (``local_seconds``, ``by_hardware``).
+The machine itself is described once, not on every result: the workflow keeps ``{key: profile}``
+for the machines its run used (``Workflow.hardware``) and records it on the run, in the
+WORKFLOW_RUN row's ``metadata.hardware`` that every storage writes (``run.records.json`` beside a
+JSON-Lines file, a Parquet file's ``chai_tea_records``, the ``workflow_runs`` table)::
+
+    {"hw_5c1e0b9a42": {"os": "Darwin", "os_version": "15.6", "machine": "arm64",
+                       "cpu": "Apple M4 Max", "cpu_cores_physical": 16, "cpu_cores_logical": 16,
+                       "ram_gb": 128.0,
+                       "gpus": [{"vendor": "Apple", "name": "Apple M4 Max", "cores": 40, "memory_gb": 128.0}]}}
+
+The key is a hash of the profile, so the same machine has the same key in every run and rows from
+many runs join to one description. ``device`` is where the model's weights were (``cuda:0``,
+``mps``, ``cpu``), or ``None`` for a local server, which decides that itself. The profile is read
+once per process (``hardware_info``) and the same on Windows, macOS and Linux: the CPU's model name
+from the registry, ``sysctl`` or ``/proc/cpuinfo``; NVIDIA GPUs through NVML (``nvidia-ml-py``) or,
+failing that, torch; Apple Silicon's GPU from ``system_profiler``; other GPUs on Windows from CIM. A
+probe that cannot run leaves its field ``None`` or its list empty rather than failing the call.
+``Workflow.usage`` totals the hours (``local_seconds``, ``by_hardware``).
 """
 
 import functools
+import hashlib
 import json
 import logging
 import os
@@ -233,14 +242,33 @@ def hardware_label(hardware):
     return " · ".join(parts)
 
 
+def profile_key(profile):
+    """A short, stable key for a hardware *profile*: the same machine gets the same key in every run."""
+    canonical = json.dumps(profile, sort_keys=True, separators=(",", ":"), default=str)
+    return "hw_" + hashlib.sha256(canonical.encode()).hexdigest()[:10]
+
+
+@functools.lru_cache(maxsize=1)
+def hardware_key():
+    """This machine's key (see ``profile_key``)."""
+    return profile_key(hardware_info())
+
+
+def hardware_profiles(keys=None):
+    """``{key: profile}`` for the machines named by *keys* that this process knows -- this one."""
+    profiles = {hardware_key(): hardware_info()}
+    return profiles if keys is None else {k: v for k, v in profiles.items() if k in set(keys)}
+
+
 def local_compute(seconds, device=None):
-    """The ``local_compute`` metadata entry for a call that took *seconds* on this machine."""
+    """The ``local_compute`` metadata entry for a call that took *seconds* on this machine: the
+    machine's key (its profile is kept once, on the run), the device and the time."""
     seconds = float(seconds or 0.0)
     return {
+        "hardware": hardware_key(),
         "device": str(device) if device is not None else None,
         "seconds": round(seconds, 3),
         "hours": round(seconds / 3600, 6),
-        "hardware": hardware_info(),
     }
 
 

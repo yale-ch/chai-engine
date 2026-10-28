@@ -10,9 +10,11 @@ as it finishes; ``workflow.usage.summary()`` gives the same numbers afterwards.
 model LiteLLM has no table entry for and no ``pricing`` setting); the ledger counts such calls under
 ``unpriced_calls`` so a total is never mistaken for a complete one.
 
-A local model's call also carries ``local_compute`` (``chai.hardware``): the machine it ran on and
-how long it took. The ledger adds those up as ``local_calls``/``local_seconds``/``local_hours`` and
-per machine in ``by_hardware``, so a run that used both hosted and local models reports dollars for
+A local model's call also carries ``local_compute`` (``chai.hardware``): a key for the machine it
+ran on and how long it took. The ledger adds those up as ``local_calls``/``local_seconds``/
+``local_hours`` and per machine in ``by_hardware`` (keyed like the results, with a readable
+``label``), and keeps each machine's profile once in ``hardware`` -- ``{key: profile}``, which the
+workflow records on its run -- so a run that used both hosted and local models reports dollars for
 the one and machine-hours for the other.
 
 A call is counted once, against the component that made the result. Steps that hand a result on
@@ -23,7 +25,7 @@ skips them.
 
 import threading
 
-from .hardware import hardware_label
+from .hardware import hardware_label, hardware_profiles
 
 
 def _num(value):
@@ -91,6 +93,7 @@ class UsageLedger:
             self.by_component = {}
             self.by_model = {}
             self.by_hardware = {}
+            self.hardware = {}
             self._counted = set()
 
     @staticmethod
@@ -152,9 +155,11 @@ class UsageLedger:
             _add(self.by_model.setdefault(model, _empty()), entry)
             compute = metadata.get("local_compute")
             if isinstance(compute, dict):
-                hardware = compute.get("hardware") or {}
+                key = compute.get("hardware") or "?"
+                if key not in self.hardware:
+                    self.hardware.update(hardware_profiles([key]))
                 row = self.by_hardware.setdefault(
-                    hardware_label(hardware), {"hardware": hardware, "devices": [], **_empty()}
+                    key, {"label": hardware_label(self.hardware.get(key)), "devices": [], **_empty()}
                 )
                 _add(row, entry)
                 device = compute.get("device")
@@ -164,7 +169,8 @@ class UsageLedger:
 
     def summary(self):
         """A JSON-ready snapshot: run totals plus ``by_component``, ``by_model`` and ``by_hardware``
-        breakdowns, with the local seconds also as ``local_hours``."""
+        breakdowns, with the local seconds also as ``local_hours``, and the ``hardware`` profiles the
+        ``by_hardware`` keys name."""
 
         def hours(row):
             return {**row, "local_hours": round(row["local_seconds"] / 3600, 6)}
@@ -175,6 +181,7 @@ class UsageLedger:
                 "by_component": {k: hours(v) for k, v in self.by_component.items()},
                 "by_model": {k: hours(v) for k, v in self.by_model.items()},
                 "by_hardware": {k: hours(dict(v, devices=list(v["devices"]))) for k, v in self.by_hardware.items()},
+                "hardware": {k: dict(v) for k, v in self.hardware.items()},
             }
 
     def __repr__(self):
