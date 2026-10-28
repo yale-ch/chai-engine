@@ -298,6 +298,8 @@ The other examples, each showing one thing:
 | `experiment-jsonl-parquet-s3.py` | Handing a finished run to a central database through S3 |
 | `workflow-pii-routing.json` | Classifier and gate: pages with personal data stay local, the rest go to the cloud |
 | `workflow-iiif.json` | Transcribing the images of a IIIF manifest |
+| `workflow-alt-text.json` | Alt-text from a catalog record and a manifest's first image, all JSON: fetch, XPath, fan-out, describe |
+| `workflow-alt-text-yuag.json` | The same from IIIF manifests alone (classification and medium from their metadata, images scaled by the image service), with cost per row |
 | `kev_finetune.py` | Running a fine-tuned System One model on a decision benchmark |
 
 Workflow JSON runs as it is with `scripts/run_workflow.py` (`--input` for the provider's input,
