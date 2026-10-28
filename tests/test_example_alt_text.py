@@ -159,5 +159,48 @@ class TestAltTextExample(unittest.TestCase):
         self.assertNotIn("{text_input_0}", describe.system_instruction)
 
 
+class TestIIIFProviderManifestAndSize(unittest.TestCase):
+    """The YUAG alt-text workflow hands IIIFDirFileProvider the manifest a UrlJsonProvider fetched,
+    and asks the image service for a scaled copy rather than a full-size museum image."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = Server()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.close()
+
+    def provider(self, tmp, **settings):
+        wf = Workflow({"id": "iiif_wf", "type": "workflow.Workflow"})
+        settings = {"directory": tmp, "per_manifest": True, "limit": 1, **settings}
+        return wf._make_step({"type": "provider.IIIFDirFileProvider", "settings": settings}, wf)
+
+    def test_a_fetched_manifest_is_not_fetched_again(self):
+        base = self.server.base
+        manifest = {"id": f"{base}/manifests/obj/2",
+                    "items": [{"id": "c", "items": [{"items": [{"motivation": "painting",
+                                                                 "body": {"type": "Image", "id": f"{base}/img/2-0.jpg"}}]}]}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            before = len(self.server.requests)
+            out = self.provider(tmp)._process(ItemResult(manifest, metadata={"type": "DATA"}))
+            paths = [p for p, _ in self.server.requests[before:]]
+            self.assertEqual(paths, ["/img/2-0.jpg"])
+            self.assertEqual([os.path.basename(f) for f in out.value], ["image_0000.jpg"])
+            self.assertTrue(out.value[0].endswith(os.path.join("manifests_obj_2", "image_0000.jpg")))
+
+    def test_size_asks_the_image_service(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sized = self.provider(tmp, size="!1600,1600")
+            plain = self.provider(tmp)
+        v3 = {"id": "https://img/x/full/full/0/default.jpg", "service": [{"id": "https://img/x", "type": "ImageService3"}]}
+        v2 = {"id": "https://img/y/full/full/0/default.jpg", "service": [{"@id": "https://img/y/"}]}
+        bare = {"id": "https://img/z.jpg", "service": []}
+        self.assertEqual(sized.image_url(v3), "https://img/x/full/!1600,1600/0/default.jpg")
+        self.assertEqual(sized.image_url(v2), "https://img/y/full/!1600,1600/0/default.jpg")
+        self.assertEqual(sized.image_url(bare), "https://img/z.jpg")
+        self.assertEqual(plain.image_url(v3), v3["id"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,116 @@
+{
+  "id": "alt_text_yuag",
+  "type": "workflow.Workflow",
+  "name": "Alt-text for the Yale University Art Gallery: describe each object's primary image for people who cannot see it",
+  "description": "For each object in a CSV of YUAG IIIF manifests, fetch the manifest, take the object's classification and medium from its metadata, download its first image and write 4-6 plain sentences of alt-text that open with the kind of object it is",
+  "project": "Alt-text",
+  "steps": [
+    {
+      "id": "objects",
+      "type": "provider.CsvFileProvider",
+      "name": "a CSV with a `manifest` column of IIIF manifest URLs",
+      "input": "inputs/alt_text_yuag/objects.csv",
+      "steps": [
+        {
+          "id": "each_object",
+          "type": "iterator.Iterator",
+          "settings": {
+            "workers": 8,
+            "continue_on_error": true,
+            "retain_results": false
+          },
+          "steps": [
+            {
+              "id": "manifest",
+              "type": "provider.UrlJsonProvider",
+              "name": "the object's IIIF manifest",
+              "source": true,
+              "settings": {
+                "url": "{manifest}",
+                "headers": {
+                  "Accept": "application/json"
+                },
+                "retries": 2,
+                "retry_delay": 2
+              },
+              "next_steps": [
+                {
+                  "id": "type_and_image",
+                  "type": "fanout.FanOut",
+                  "settings": {
+                    "workers": 3
+                  },
+                  "steps": [
+                    {
+                      "id": "classification",
+                      "type": "extractor.JsonXpathExtractor",
+                      "settings": {
+                        "xpath": "/metadata[label/en='Classification']/value/en"
+                      }
+                    },
+                    {
+                      "id": "medium",
+                      "type": "extractor.JsonXpathExtractor",
+                      "settings": {
+                        "xpath": "/metadata[label/en='Medium']/value/en"
+                      }
+                    },
+                    {
+                      "id": "iiif",
+                      "type": "provider.IIIFDirFileProvider",
+                      "name": "the first image of the manifest",
+                      "settings": {
+                        "directory": "downloads/alt_text_yuag",
+                        "per_manifest": true,
+                        "limit": 1,
+                        "size": "!1600,1600"
+                      }
+                    }
+                  ],
+                  "next_steps": [
+                    {
+                      "id": "type_with_image",
+                      "type": "reducer.FlattenReducer",
+                      "name": "classification and medium (None when the manifest has none) and the image, as one list",
+                      "settings": {
+                        "keep_empty": true
+                      },
+                      "next_steps": [
+                        {
+                          "id": "describe",
+                          "type": "describer.GeminiDescriber",
+                          "settings": {
+                            "model": "gemini-3.1-flash-lite",
+                            "thinking_level": "low",
+                            "tools": [],
+                            "expected_output": "text",
+                            "max_output_tokens": 4096,
+                            "retries": 2,
+                            "retry_delay": 2,
+                            "system_instruction": "You are writing alt-text to make an image accessible to people who cannot see it.\n\nYou are given the image and what the museum catalogue records about the object: its classification and its medium. Apart from those, describe ONLY what is actually visible in the image. Do not use any other outside knowledge about the image, and do not try to identify it.\n\nFollow these rules exactly:\n- Write between 4 and 6 sentences. No more, no fewer.\n- The FIRST sentence must begin by naming the kind of object, then say what it shows (for example \"A painting of ...\", \"A marble relief of ...\", \"A bronze sculpture of ...\", \"A black-and-white photograph of ...\", \"A silver coin showing ...\"). Build that opening phrase from the classification and the medium together, in plain words: \"Sculpture\" with \"Marble relief\" is \"A marble relief\"; \"Paintings\" with \"Oil on canvas\" is \"A painting\"; \"Prints\" with \"Etching\" is \"An etching\". Use the medium only as far as it names what the object is or is made of; leave out technical detail such as supports, mounts and printing processes a general reader would not know. If neither is given (None or empty), name the kind of object you can see.\n- Write at an 8th-grade reading level.\n- Use short, plain, direct sentences.\n- Name the objects you can see in the image, then describe each one in a basic way (its shape, color, size, and where it sits in the image).\n- Describe only what is visible. Do not guess.\n- Do not guess at historical context, time period, meaning, or symbolism.\n- Do not name specific real people, artists, places, or events.\n- Do not begin with phrases like \"Image of\", \"Picture of\", \"This image shows\", or \"Alt text:\". Start with the kind of object itself.\n\nReturn only the alt-text as plain text.",
+                            "prompt": "Write the alt-text for this image. The museum catalogue's classification: {text_input_0}. Medium: {text_input_1}"
+                          },
+                          "next_steps": [
+                            {
+                              "id": "log_describe",
+                              "type": "storage.JsonLinesStorage",
+                              "name": "one CHAI-TEA RESULT row per object, with its token usage and cost",
+                              "settings": {
+                                "file": "results/alt_text_yuag/run.jsonl",
+                                "mode": "truncate"
+                              }
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

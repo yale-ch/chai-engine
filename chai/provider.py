@@ -226,8 +226,9 @@ class IIIFDirFileProvider(DirFileProvider):
     """Downloads the images of a IIIF Presentation manifest and provides them as files.
 
     Input is a manifest URL -- a string, or a Result whose value is one (or a one-item list of one,
-    as a ``JsonXpathExtractor`` returns it), so the provider can follow an earlier step; the manifest
-    and its painting-annotation images are fetched (and cached) into a local directory, then a
+    as a ``JsonXpathExtractor`` returns it), so the provider can follow an earlier step -- or the
+    manifest itself, a dict a ``UrlJsonProvider`` already fetched, which is used as it is. The
+    manifest and its painting-annotation images are fetched (and cached) into a local directory, then a
     ``DirectoryListResult`` of the downloaded JPEG files is returned, in canvas order.
 
     Settings:
@@ -238,6 +239,9 @@ class IIIFDirFileProvider(DirFileProvider):
           (default: none; the input must be a full URL)
         - per_manifest: keep each manifest in a subdirectory of its own, named after its URL, so one
           provider can fetch a different manifest per iterator entry (default false)
+        - size: ask the image's IIIF Image API service for this size instead of the manifest's image,
+          e.g. '!1600,1600' (fit within 1600x1600) -- full-size museum images can run to 100
+          megapixels; an image with no service is downloaded as it is (default: as listed)
     """
 
     def __init__(self, tree, workflow, parent):
@@ -271,9 +275,15 @@ class IIIFDirFileProvider(DirFileProvider):
         return directory
 
     def _process(self, input):
-        url = self.manifest_url(input)
-        directory = self.manifest_dir(url)
-        mf = self.get_manifest(url, directory)
+        value = input.value if isinstance(input, Result) else input
+        if isinstance(value, dict) and value.get("id"):
+            # a manifest fetched by an earlier step: no need to fetch it again
+            url, mf = value["id"], value
+            directory = self.manifest_dir(url)
+        else:
+            url = self.manifest_url(input)
+            directory = self.manifest_dir(url)
+            mf = self.get_manifest(url, directory)
         canvases = self.get_images_info(mf)
         limit = int(self.settings.get("limit", 0) or 0)
         if limit:
@@ -330,13 +340,24 @@ class IIIFDirFileProvider(DirFileProvider):
         except Exception as e:
             raise Exception(f"Error extracting image information: {e}")
 
+    def image_url(self, image):
+        """The URL to fetch *image* (an entry of ``get_images_info``) from, at the ``size`` setting."""
+        size = self.settings.get("size")
+        services = image.get("service") or []
+        if isinstance(services, dict):
+            services = [services]
+        service = next((x.get("id") or x.get("@id") for x in services if x.get("id") or x.get("@id")), None)
+        if size and service:
+            return f"{service.rstrip('/')}/full/{size}/0/default.jpg"
+        return image["id"]
+
     def download_images(self, image_urls, directory=None):
         """Download images and store as PIL Image objects"""
         directory = directory or self.images_dir
         images = {}
 
         for i, cvs in enumerate(image_urls):
-            url = cvs["images"][0]["id"]
+            url = self.image_url(cvs["images"][0])
             filename = f"image_{i:04d}.jpg"
             image_path = os.path.join(directory, filename)
             images[filename] = {"url": url, "canvas": cvs}
