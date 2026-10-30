@@ -26,6 +26,7 @@ from typing import Any, List, Tuple
 from PIL import Image
 
 from ..core import Component
+from ..hardware import local_compute
 from ..image_operations import bytes_from_image, image_from_bytes, scale
 from ..result import FileItemResult, ItemResult, Result
 from .ai_utils import check_text_slots, extract_json, warn_prompt_order
@@ -312,6 +313,7 @@ class MLXVLMComponent(Component):
                 "type": data_type,
                 "engine": self.ENGINE_NAME,
                 "model": self.model_name,
+                "local_compute": local_compute(duration, "mps"),
             }
             return ItemResult(result, metadata=metadata)
         finally:

@@ -4,9 +4,11 @@ All classifiers return a ``LabelListResult`` of string labels for the input Resu
 ``register_on`` and a gate (``LabelTestGate`` / ``ConditionGate``) they drive conditional branching.
 """
 
+import json
 import re
 from random import randint
 
+from .ai import create_all_components
 from .core import Component
 from .result import FileItemResult, LabelListResult
 from .utils import text_from_input
@@ -17,8 +19,16 @@ class Classifier(Component):
 
     Abstract base for the classifier role: subclasses implement ``_process`` and return a
     ``LabelListResult`` (a list of string labels) for the input Result. AI-backed variants
-    (``GeminiClassifier``, ``OllamaClassifier``, ...) are generated via ``chai.ai`` mixins; when no
-    prompt is configured the workflow's default ``classification`` prompt is used.
+    (``GeminiClassifier``, ``OllamaClassifier``, ``LLMClassifier``, ...) are generated via ``chai.ai``
+    mixins: the model's reply becomes the labels (``labels_from``), so a ``LabelTestGate`` can route
+    on them. When no prompt is configured the workflow's default ``classification`` prompt is used.
+
+    Settings (AI-backed classifiers):
+        - labels: the labels the model may answer with, as a list. The reply -- plain text (one label,
+          or several separated by commas or new lines) or JSON (``{"label": ...}``,
+          ``{"labels": [...]}`` or a list) -- is matched to them ignoring case, spaces, hyphens and
+          punctuation, and a reply that names none of them raises, so ``retries`` can ask again.
+          Without it, the reply's labels are kept as they are.
     """
 
     def __init__(self, tree, workflow, parent=None):
@@ -31,6 +41,57 @@ class Classifier(Component):
         # Will assign one or more labels to the input
         # return LabelListResult([], input=input, processor=self)
         raise NotImplementedError()
+
+    @staticmethod
+    def _norm_label(label):
+        return re.sub(r"[^0-9a-z]+", "_", str(label).lower()).strip("_")
+
+    def labels_from(self, reply):
+        """The labels a model's *reply* names, matched to the ``labels`` setting when there is one."""
+        if isinstance(reply, str):
+            text = reply.strip().strip("`")
+            if text[:1] in "[{":
+                try:
+                    reply = json.loads(text)
+                except ValueError:
+                    pass
+        if isinstance(reply, dict):
+            reply = next((reply[k] for k in ("labels", "label", "class", "category") if k in reply), list(reply.values()))
+        if isinstance(reply, str):
+            found = [x for x in re.split(r"[,\n;]+", reply)]
+        elif isinstance(reply, (list, tuple)):
+            found = [str(x) for x in reply]
+        else:
+            found = [] if reply is None else [str(reply)]
+        found = [x.strip().strip("\"'`*.:- ") for x in found]
+        found = [x for x in found if x]
+
+        allowed = self.settings.get("labels")
+        if isinstance(allowed, str):
+            allowed = [x.strip() for x in allowed.split(",") if x.strip()]
+        if not isinstance(allowed, (list, tuple)) or not allowed:
+            return found
+        by_norm = {self._norm_label(a): a for a in allowed}
+        # the whole reply first: "Typed document, complex layout" is one label, not two
+        whole = by_norm.get(self._norm_label(" ".join(found)))
+        if whole is not None:
+            return [whole]
+        labels = []
+        for x in found:
+            label = by_norm.get(self._norm_label(x))
+            if label is not None and label not in labels:
+                labels.append(label)
+        if not labels:
+            # a sentence around the label: accept it when exactly one allowed label appears in it
+            text = "_" + self._norm_label(" ".join(found)) + "_"
+            hits = [a for n, a in by_norm.items() if f"_{n}_" in text]
+            longest = max(hits, key=lambda a: len(self._norm_label(a)), default=None)
+            hits = [a for a in hits if a == longest or self._norm_label(a) not in self._norm_label(longest)]
+            if len(hits) == 1:
+                labels = hits
+        if not labels:
+            raise ValueError(f"{self}: the reply {reply!r} names none of the labels {list(allowed)}")
+        return labels
 
 
 class KeywordClassifier(Classifier):
@@ -153,3 +214,19 @@ class YoloClassifier(Classifier):
                     labels.append(result.names[idx])
 
         return LabelListResult(labels, input=input, processor=self)
+
+
+def _labelling(cls):
+    """Make an AI-backed classifier return its reply as a ``LabelListResult``."""
+    backend = cls._process
+
+    def _process(self, input):
+        out = backend(self, input)
+        metadata = dict(out.metadata or {}, type="DATA", reply=out.value)
+        return LabelListResult(self.labels_from(out.value), input=input, processor=self, metadata=metadata)
+
+    cls._process = _process
+    return cls
+
+
+globals().update({name: _labelling(cls) for name, cls in create_all_components(Classifier).items()})

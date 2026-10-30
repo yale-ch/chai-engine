@@ -4,7 +4,7 @@ AI-backed variants (``GeminiDescriber``, ``OllamaDescriber``, ...) are generated
 ``chai.ai``; ``FileInfoDescriber`` produces deterministic file statistics without a model.
 """
 
-from .ai import create_all_components
+from .ai import TransformersComponent, create_ai_component, create_all_components
 from .core import Component
 from .result import ItemResult
 
@@ -71,3 +71,6 @@ class FileInfoDescriber(Describer):
 
 
 globals().update(create_all_components(Describer))
+# in-process HuggingFace models (text, or vision-language such as Chandra OCR 2); made explicitly
+# because the backend loads its weights when the component is built
+TransformersDescriber = create_ai_component("TransformersDescriber", Describer, TransformersComponent)

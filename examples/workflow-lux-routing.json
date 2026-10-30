@@ -1,0 +1,161 @@
+{
+  "id": "lux_routing",
+  "type": "workflow.Workflow",
+  "name": "Route each image to the reader it needs: alt-text, local OCR, or a stronger model for hard handwriting",
+  "description": "Gemini 3.1 Flash-Lite sorts each image into photograph, typed document (simple or complex layout), newspaper, or easy or hard handwriting. Photographs get alt-text from Gemini 3.1 Flash-Lite; typed documents, newspapers and easy handwriting are read by Chandra OCR 2 on this machine; hard handwriting goes to Gemini 3.8 Flash. Hosted calls record their cost; local calls record the hardware and the hours.",
+  "project": "LUX routing",
+  "steps": [
+    {
+      "id": "images",
+      "type": "provider.DirFileProvider",
+      "name": "a directory of page and object images",
+      "input": "inputs/lux_routing",
+      "steps": [
+        {
+          "id": "each_image",
+          "type": "iterator.Iterator",
+          "settings": {
+            "workers": 4,
+            "continue_on_error": true
+          },
+          "steps": [
+            {
+              "id": "classify",
+              "type": "classifier.GeminiClassifier",
+              "name": "what kind of image is it",
+              "register_on": [
+                "each_image"
+              ],
+              "settings": {
+                "model": "gemini-3.1-flash-lite",
+                "thinking_level": "low",
+                "tools": [],
+                "max_output_tokens": 1024,
+                "retries": 2,
+                "retry_delay": 2,
+                "labels": [
+                  "photograph",
+                  "typed_document",
+                  "typed_document_complex_layout",
+                  "newspaper",
+                  "handwritten_easy",
+                  "handwritten_hard"
+                ],
+                "system_instruction": "You sort digitized collection images by the kind of reading they need, so each one can go to the right tool.\n\nAnswer with exactly one of these labels and nothing else:\n- photograph: a photograph, or a picture with no text to read (a print, painting or object photographed for its picture)\n- typed_document: typed or printed text in one simple column -- a typescript, a typed letter, a plain printed page\n- typed_document_complex_layout: typed or printed text in a complex layout -- several columns, tables, forms, broadsides, posters, almanacs, text mixed with pictures (but not a newspaper)\n- newspaper: a newspaper page or a newspaper clipping\n- handwritten_easy: handwriting a modern reader can read without training -- a clear 19th- or 20th-century hand, a short letter or note, little abbreviation or damage\n- handwritten_hard: handwriting that needs a specialist -- medieval or early modern scripts, Latin abbreviations, dense or faded diaries, crossed or cramped writing, damaged leaves\n\nWhen a page mixes types, choose by what most of the reading is. When a page is handwritten, decide between easy and hard by how hard the hand is to read, not by the language.",
+                "prompt": "Which label fits this image? Answer with the label only."
+              },
+              "next_steps": [
+                {
+                  "id": "log_classify",
+                  "type": "storage.JsonLinesStorage",
+                  "settings": {
+                    "file": "results/lux_routing/run.jsonl",
+                    "mode": "truncate"
+                  }
+                }
+              ]
+            },
+            {
+              "id": "is_photograph",
+              "type": "gate.LabelTestGate",
+              "settings": {
+                "component": "classify",
+                "label": "photograph"
+              },
+              "true_steps": [
+                {
+                  "id": "alt_text",
+                  "type": "describer.GeminiDescriber",
+                  "name": "alt-text for a photograph",
+                  "settings": {
+                    "model": "gemini-3.1-flash-lite",
+                    "thinking_level": "low",
+                    "tools": [],
+                    "expected_output": "text",
+                    "max_output_tokens": 4096,
+                    "retries": 2,
+                    "retry_delay": 2,
+                    "system_instruction": "You are writing alt-text to make an image accessible to people who cannot see it.\n\nThe image is a photograph from a library or museum collection. Describe ONLY what is actually visible in the image. Do not use any outside knowledge about the image, and do not try to identify it.\n\nFollow these rules exactly:\n- Write between 4 and 6 sentences. No more, no fewer.\n- The FIRST sentence must begin by naming the kind of photograph, then say what it shows (for example \"A black-and-white photograph of ...\", \"A color photograph of ...\", \"A sepia photograph of ...\"). If it is not a photograph after all, name the kind of object you can see instead.\n- Write at an 8th-grade reading level.\n- Use short, plain, direct sentences.\n- Name the objects you can see in the image, then describe each one in a basic way (its shape, color, size, and where it sits in the image).\n- Describe only what is visible. Do not guess.\n- Do not guess at historical context, time period, meaning, or symbolism.\n- Do not name specific real people, artists, places, or events.\n- Do not begin with phrases like \"Image of\", \"Picture of\", \"This image shows\", or \"Alt text:\". Start with the kind of photograph itself.\n\nReturn only the alt-text as plain text.",
+                    "prompt": "Write the alt-text for this photograph."
+                  },
+                  "next_steps": [
+                    {
+                      "id": "log_alt_text",
+                      "type": "storage.JsonLinesStorage",
+                      "settings": {
+                        "file": "results/lux_routing/run.jsonl",
+                        "mode": "truncate"
+                      }
+                    }
+                  ]
+                }
+              ],
+              "false_steps": [
+                {
+                  "id": "is_hard_handwriting",
+                  "type": "gate.LabelTestGate",
+                  "settings": {
+                    "component": "classify",
+                    "label": "handwritten_hard"
+                  },
+                  "true_steps": [
+                    {
+                      "id": "gemini_htr",
+                      "type": "transcriber.GeminiTranscriber",
+                      "name": "hard handwriting: Gemini 3.8 Flash",
+                      "settings": {
+                        "model": "gemini-3.8-flash",
+                        "thinking_level": "low",
+                        "tools": [],
+                        "expected_output": "text",
+                        "max_output_tokens": 16384,
+                        "retries": 2,
+                        "retry_delay": 2,
+                        "system_instruction": "You are an expert paleographer transcribing a handwritten page from a library collection.\n\nTranscribe the handwriting exactly as written:\n- Keep the original spelling, punctuation, capitalization and language. Do not translate or modernize.\n- Keep the line breaks of the page: one line of the transcription per line of writing.\n- Expand nothing: keep abbreviations as written, except that a suspension or contraction mark may be shown with an apostrophe.\n- Mark text you cannot read as [illegible], and text you are unsure of with a following [?].\n- Note insertions as ^inserted text^ and struck-through text as [struck: text].\n- Leave out page furniture you cannot read (stamps, shelf marks) unless it is part of the writing.\n\nReturn only the transcription as plain text.",
+                        "prompt": "Transcribe this page."
+                      },
+                      "next_steps": [
+                        {
+                          "id": "log_gemini_htr",
+                          "type": "storage.JsonLinesStorage",
+                          "settings": {
+                            "file": "results/lux_routing/run.jsonl",
+                            "mode": "truncate"
+                          }
+                        }
+                      ]
+                    }
+                  ],
+                  "false_steps": [
+                    {
+                      "id": "chandra",
+                      "type": "transcriber.TransformersTranscriber",
+                      "name": "typed, newspaper and easy handwriting: Chandra OCR 2 on this machine",
+                      "settings": {
+                        "model": "datalab-to/chandra-ocr-2",
+                        "expected_output": "text",
+                        "max_new_tokens": 12288,
+                        "max_image_pixels": 6291456,
+                        "prompt": "OCR this image to HTML.\n\nOnly use these tags ['math', 'br', 'i', 'b', 'u', 'del', 'sup', 'sub', 'table', 'tr', 'td', 'p', 'th', 'div', 'pre', 'h1', 'h2', 'h3', 'h4', 'h5', 'ul', 'ol', 'li', 'input', 'a', 'span', 'img', 'hr', 'tbody', 'small', 'caption', 'strong', 'thead', 'big', 'code', 'chem'], and these attributes ['class', 'colspan', 'rowspan', 'display', 'checked', 'type', 'border', 'value', 'style', 'href', 'alt', 'align', 'data-bbox', 'data-label'].\n\nGuidelines:\n* Inline math: Surround math with <math>...</math> tags. Math expressions should be rendered in KaTeX-compatible LaTeX. Use display for block math.\n* Tables: Use colspan and rowspan attributes to match table structure.\n* Formatting: Maintain consistent formatting with the image, including spacing, indentation, subscripts/superscripts, and special characters.\n* Images: Include a description of any images in the alt attribute of an <img> tag. Do not fill out the src property. Describe in detail inside the div tag. Also convert charts to high fidelity data, and convert diagrams to mermaid.\n* Forms: Mark checkboxes and radio buttons properly.\n* Text: join lines together properly into paragraphs using <p>...</p> tags.  Use <br> tags for line breaks within paragraphs, but only when absolutely necessary to maintain meaning.\n* Chemistry: Use <chem>...</chem> tags for chemical formulas with reactive SMILES.\n* Lists: Preserve indents and proper list markers.\n* Use the simplest possible HTML structure that accurately represents the content of the block.\n* Make sure the text is accurate and easy for a human to read and interpret.  Reading order should be correct and natural."
+                      },
+                      "next_steps": [
+                        {
+                          "id": "log_chandra",
+                          "type": "storage.JsonLinesStorage",
+                          "settings": {
+                            "file": "results/lux_routing/run.jsonl",
+                            "mode": "truncate"
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
