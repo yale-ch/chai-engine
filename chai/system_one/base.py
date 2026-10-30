@@ -81,6 +81,7 @@ class DecisionProvider:
 
     name = ""
     model = ""
+    local = True  # runs on this machine; a provider that calls a service says otherwise
 
     def decide(self, state: str, questions: Dict[str, dict]) -> Tuple[Dict[str, dict], dict]:
         raise NotImplementedError
@@ -307,6 +308,10 @@ class System1Model:
         meta = dict(meta)
         meta.setdefault("model", self.model)
         meta.update({"provider": self.provider.name, "duration": duration, "layout": layout, "state": laid_state})
+        if getattr(self.provider, "local", True):
+            from ..hardware import local_compute
+
+            meta["local_compute"] = local_compute(duration, meta.get("device") or getattr(self.provider, "device", None))
         return answers, meta
 
     def __repr__(self):

@@ -37,7 +37,9 @@ class Workflow(Component):
       ``token_usage``/``cost`` metadata is recorded as results are produced (``record_usage``), the
       ledger is reset at the start of each ``run``, and ``usage.summary()`` (also attached to the
       workflow's ``component_end`` event as ``usage``) totals calls, tokens and cost per run, per
-      component and per model.
+      component and per model, and a local model's hours per machine. A local call's result names
+      its machine by a key; ``hardware`` maps the keys to the machines' profiles, and the run
+      records that map once, in the WORKFLOW_RUN row's ``metadata.hardware``.
     * **CHAI-TEA rows** -- a workflow is a WORKFLOW row and carries its columns, read from its
       config: ``name``, ``description``, ``project`` (a name or a dict of PROJECT columns; see
       ``chai.persistence.records.Project``), ``previous_id`` (the workflow this is a new version of),
@@ -193,6 +195,20 @@ class Workflow(Component):
         key = getattr(result, "id", None) if result is not None else None
         return self.usage.record(component, metadata, key=key)
 
+    @property
+    def hardware(self):
+        """``{key: profile}`` for the machines this run's local models ran on (see ``chai.hardware``);
+        a result's ``local_compute.hardware`` is one of these keys."""
+        return dict(self.usage.hardware)
+
+    @staticmethod
+    def run_metadata(usage):
+        """The WORKFLOW_RUN row's ``metadata`` for a run with this *usage* summary: the usage, and the
+        hardware profiles its results' keys name, kept once here rather than on every result."""
+        usage = dict(usage)
+        hardware = usage.pop("hardware", None)
+        return {"usage": usage, "hardware": hardware} if hardware else {"usage": usage}
+
     def usage_summary(self):
         """Calls, tokens and cost of the last (or current) run; see ``chai.usage.UsageLedger``."""
         return self.usage.summary()
@@ -241,13 +257,13 @@ class Workflow(Component):
         try:
             res = self._run(input)
         except Exception as e:
-            self.current_run.finish(False, {"usage": self.usage.summary()}, error=e)
+            self.current_run.finish(False, self.run_metadata(self.usage.summary()), error=e)
             self.emit("component_error", self, error=str(e))
             raise
         from .core import result_preview
 
         usage = self.usage.summary()
-        self.current_run.finish(True, {"usage": usage})
+        self.current_run.finish(True, self.run_metadata(usage))
         self.emit("component_end", self, preview=result_preview(res), result=res, usage=usage)
         return res
 

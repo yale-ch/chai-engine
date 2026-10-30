@@ -54,6 +54,8 @@ class GenerativeProvider(DecisionProvider):
         else:
             cls = LLMComponent
         self.llm = cls({"type": "system1", "id": f"system1:{model}", "name": f"System One ({model})", "settings": llm_settings}, None)
+        # a hosted model is a service, not this machine; a server at localhost is this machine
+        self.local = self.llm.is_local
 
     @staticmethod
     def render_questions(questions: Dict[str, dict]) -> str:

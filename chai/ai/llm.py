@@ -35,6 +35,7 @@ from typing import Any, List, Optional, Tuple
 from PIL import Image
 
 from ..core import Component
+from ..hardware import is_local_url, local_compute
 from ..image_operations import bytes_from_image, image_from_bytes, scale
 from ..result import FileItemResult, ItemResult, Result
 from .ai_utils import check_text_slots, extract_json, extract_yaml, warn_prompt_order
@@ -213,6 +214,8 @@ class LLMComponent(Component):
             raise ValueError(f"{self} needs the `model` setting (a LiteLLM model id such as 'gemini/gemini-3.1-flash-lite')")
         self.provider = self.model.split("/", 1)[0] if "/" in self.model else ""
         self.api_base = self.resolve_api_base()
+        # a server on this machine (Ollama, LM Studio, a local vLLM/sglang) runs on this hardware
+        self.is_local = is_local_url(self.api_base)
         self.api_key = self.settings.get("api_key") or self.DEFAULT_API_KEY
         self.timeout = float(self.settings.get("timeout", 600))
         self.temperature = self.settings.get("temperature", self.DEFAULT_TEMPERATURE)
@@ -573,6 +576,8 @@ class LLMComponent(Component):
             "provider": self.provider,
             "model": self.model,
         }
+        if self.is_local:
+            metadata["local_compute"] = local_compute(duration)
         return vectors, metadata
 
     # ------------------------------------------------------------------ processing
@@ -594,4 +599,6 @@ class LLMComponent(Component):
             "provider": self.provider,
             "model": self.model,
         }
+        if self.is_local:
+            metadata["local_compute"] = local_compute(duration)
         return ItemResult(value, metadata=metadata)
