@@ -1,0 +1,73 @@
+{
+  "id": "shadow_puppets",
+  "type": "workflow.Workflow",
+  "name": "Find each shadow puppet, its rods and shoulders, and size them in centimetres from the rulers photographed beside it",
+  "description": "Each photograph shows a Javanese shadow puppet laid on grey card with a 92 cm yardstick standing up one side, a 61 cm ruler along the bottom and a whiteboard label. A YOLO11 detector trained on the collection (yale-cultural-heritage/shadow-puppets-yolov11, run on this machine) finds the puppet with and without its rods, its shoulders and the two rulers; ScaleMeasurer reads the rulers as references of known size and gives every other region its width and height in cm. No hosted model is called. Every region is a CHAI-TEA RESULT row: its box in input_segment, its size in its value.",
+  "project": "Yale shadow puppets",
+  "steps": [
+    {
+      "id": "photographs",
+      "type": "provider.DirFileProvider",
+      "name": "photographs of the puppets",
+      "input": "inputs/shadow_puppets",
+      "steps": [
+        {
+          "id": "each_photograph",
+          "type": "iterator.Iterator",
+          "source": true,
+          "settings": {
+            "continue_on_error": true
+          },
+          "steps": [
+            {
+              "id": "detect",
+              "type": "segmenter.YoloSegmenter",
+              "name": "find the puppet, its parts and the rulers",
+              "settings": {
+                "model": "hf://yale-cultural-heritage/shadow-puppets-yolov11/shadow-puppets-yolo11s.pt",
+                "confidence": 0.25,
+                "crop": false,
+                "order": "detected"
+              },
+              "next_steps": [
+                {
+                  "id": "measure",
+                  "type": "measurer.ScaleMeasurer",
+                  "name": "size each region from the rulers",
+                  "settings": {
+                    "references": {
+                      "vertical-ruler": {
+                        "height": 92
+                      },
+                      "horizontal-ruler": {
+                        "width": 61
+                      }
+                    },
+                    "unit": "cm",
+                    "precision": 1
+                  },
+                  "next_steps": [
+                    {
+                      "id": "each_region",
+                      "type": "iterator.Iterator",
+                      "steps": [
+                        {
+                          "id": "log_region",
+                          "type": "storage.JsonLinesStorage",
+                          "settings": {
+                            "file": "results/shadow_puppets/run.jsonl",
+                            "mode": "truncate"
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

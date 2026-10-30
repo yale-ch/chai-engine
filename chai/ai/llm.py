@@ -36,7 +36,7 @@ from PIL import Image
 
 from ..core import Component
 from ..hardware import is_local_url, local_compute
-from ..image_operations import bytes_from_image, image_from_bytes, scale
+from ..image_operations import bytes_from_image, exif_rotate, image_from_bytes, scale
 from ..result import FileItemResult, ItemResult, Result
 from .ai_utils import check_text_slots, extract_json, extract_yaml, warn_prompt_order
 
@@ -172,7 +172,8 @@ class LLMComponent(Component):
           api_host (host:port) is accepted as a synonym
         - api_key: credential for the provider (default: the provider's environment variable)
         - timeout: request timeout in seconds (default 600)
-        - max_image_size: long-edge pixels; images are downscaled before upload when set (default 0 = off)
+        - max_image_size: long-edge pixels; images are turned upright (EXIF) and downscaled before upload
+          when set (default 0 = off)
         - image_mime_type: mime type declared for image bytes that have no file name (default: detected
           from the bytes' signature, else 'image/png'); a file's own extension always wins
         - image_detail: OpenAI-style detail hint 'low' | 'high' | 'auto' (default: not sent)
@@ -407,7 +408,8 @@ class LLMComponent(Component):
             mime = mime or self.image_mime_type or sniff_image_mime(img_bytes) or "image/png"
             max_size = int(self.settings.get("max_image_size", 0) or 0)
             if max_size:
-                img_bytes = bytes_from_image(scale(image_from_bytes(img_bytes), max_size))
+                # Upright first: re-encoding drops the EXIF tag that would have turned a camera JPEG upright
+                img_bytes = bytes_from_image(scale(exif_rotate(image_from_bytes(img_bytes)), max_size))
                 mime = "image/png"
             url = f"data:{mime};base64,{base64.b64encode(img_bytes).decode('ascii')}"
         part: dict = {"type": "image_url", "image_url": {"url": url}}

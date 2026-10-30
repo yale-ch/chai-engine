@@ -127,6 +127,16 @@ class TestMediaParts(unittest.TestCase):
         img = Image.open(io.BytesIO(base64.b64decode(b64)))
         self.assertLessEqual(max(img.size), 16)
 
+    def test_downscaling_turns_a_camera_jpeg_upright(self):
+        # stored 64x32 on its side (EXIF orientation 6): shown, and sent, 32 wide and 64 tall
+        img = Image.new("RGB", (64, 32), "red")
+        exif = img.getexif()
+        exif[0x0112] = 6
+        img.save(self.path, format="JPEG", exif=exif)
+        c, _ = build(LLMComponent, {"model": "openai/gpt-4o-mini", "prompt": "p", "max_image_size": 32})
+        _, b64 = c.image_part(FileItemResult(self.path))["image_url"]["url"].split(",", 1)
+        self.assertEqual(Image.open(io.BytesIO(base64.b64decode(b64))).size, (16, 32))
+
     def test_remote_and_gs_references_pass_through(self):
         c, _ = build(LLMComponent, {"model": "gemini/gemini-3.1-flash-lite", "prompt": "p"})
         part = c.image_part(ItemResult("gs://bucket/scan.png", metadata={"type": "IMAGE"}))

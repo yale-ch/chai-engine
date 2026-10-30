@@ -103,10 +103,11 @@ Two consequences worth internalizing:
 | **Classifier** | Assign labels | `KeywordClassifier`, `FileTypeClassifier`, `YoloClassifier`, `GeminiClassifier`, ... |
 | **Gate** | Conditional branch (`true_steps`/`false_steps`) | `ConditionGate`, `ValueTestGate`, `MetadataTestGate`, `ThresholdGate`, `FileTypeGate`, `LabelTestGate` |
 | **SwitchGate** | Per-label branch (`case_steps`), for-each over lists | `SwitchGate` |
-| **Segmenter** | Break content into parts | `TextSegmenter`, `WordSegmenter`, `TextSpanLocator` (where extracted values are in their text), `YoloSegmenter` (detection crops), `GeminiSegmenter`, ... |
+| **Segmenter** | Break content into parts | `TextSegmenter`, `WordSegmenter`, `TextSpanLocator` (where extracted values are in their text), `YoloSegmenter` (detection crops), `BoxLocator` (a model's boxes in the image's pixels), `GeminiSegmenter`, ... |
 | **Transcriber** | Image/audio → text | `TextFileTranscriber`, `GeminiTranscriber` and other vision backends |
 | **Describer** | Content → descriptive text | `FileInfoDescriber`, `GeminiDescriber`, ... |
 | **Extractor** | Content → structured data | `KeywordExtractor`, `WordCountExtractor`, `JsonXpathExtractor`, `GeminiExtractor`, ... |
+| **Measurer** | Real-world sizes from objects of known size in the image | `ScaleMeasurer` (rulers, scale bars, colour charts as references) |
 | **Translator** | Language transforms | `GlossaryTranslator`, `GeminiTranslator`, ... |
 | **Reducer** | Merge branched runs into one result | `FlattenReducer`, `CollectReducer`, `MergeDictReducer`, `TextJoinReducer`, `GeminiReducer`, ... |
 | **Embedder** | Vectors + similarity | `VectorIndexer`, `VectorRetriever` (SQLite store; local hash, or `GeminiVectorIndexer`, `OllamaVectorRetriever`, ... per AI backend) |
@@ -314,6 +315,7 @@ The other examples, each showing one thing:
 | `workflow-lux-routing.json`, `lux_routing.py` | Classify each image, then route it: alt-text, Chandra OCR 2 locally, or Gemini 3.8 Flash for hard handwriting; dollars and machine-hours per row |
 | `workflow-alt-text-yuag.json` | The same from IIIF manifests alone (classification and medium from their metadata, images scaled by the image service), with cost per row |
 | `kev_finetune.py` | Running a fine-tuned System One model on a decision benchmark |
+| `shadow_puppets.py` + `workflow-shadow-puppets.json` | Sizing objects from the rulers photographed with them: a YOLO11 model from Hugging Face finds puppet and rulers, `ScaleMeasurer` converts the boxes to cm -- no hosted model |
 
 Workflow JSON runs as it is with `scripts/run_workflow.py` (`--input` for the provider's input,
 `--text` for text, `--set ID.KEY=VALUE` for a setting); `scripts/workflow_diagram.py` draws one as a

@@ -1,12 +1,14 @@
 """Segmenters: components that break content into smaller pieces.
 
 Covers text splitting (``TextSegmenter``/``WordSegmenter``), finding extracted values in their text
-(``TextSpanLocator``), image region detection (``YoloSegmenter``) and AI-generated segmentations
+(``TextSpanLocator``), image region detection (``YoloSegmenter``), mapping the boxes a vision model
+reported onto the image's pixels (``BoxLocator``) and AI-generated segmentations
 (``GeminiSegmenter`` etc., generated from ``chai.ai``). Output is a list-shaped Result of segments, usually consumed by an ``Iterator``.
 """
 
 import io
 import json
+import logging
 import re
 
 from .ai import create_all_components
@@ -14,6 +16,8 @@ from .core import Component
 from .persistence.locators import bbox_frame, text_frame
 from .result import FileItemResult, ItemResult, ListResult, Result
 from .utils import text_from_input
+
+logger = logging.getLogger("chai")
 
 
 class Segmenter(Component):
@@ -279,6 +283,190 @@ class TextSpanLocator(Segmenter):
             for label, value in labels[key]:
                 spans.append((match.start(), match.end(), label, value))
         return spans
+
+
+#: How ``BoxLocator`` reads the four numbers of a box: the corner order a model reports them in.
+BOX_FORMATS = ("yxyx", "xyxy", "xywh")
+
+
+class BoxLocator(Segmenter):
+    """Turns the boxes a vision model reported into regions of the image, in its pixels -- no model.
+
+    Wire this as a ``next_step`` of a model asked to detect things (a ``GeminiSegmenter`` returning
+    ``[{"label": "ruler", "box_2d": [ymin, xmin, ymax, xmax]}, ...]``): it reads the detections, walks
+    up the input chain to the image they were found in, and emits one result per box whose value is
+    the detection with its box in pixels (``{"label", "bbox": [x1, y1, x2, y2], ...}``, any other keys
+    the model gave kept) and whose locator is the ``bbox`` frame with the image's size (see
+    ``chai.persistence.locators``) -- what ``YoloSegmenter`` writes for its own detections, so the
+    two are interchangeable downstream (``measurer.ScaleMeasurer``, a storage). Nothing is drawn.
+
+    The image's size is taken upright -- with its EXIF orientation applied -- since that is the image
+    a viewer shows and the one a model is sent when the image is re-encoded (``max_image_size``). A
+    camera JPEG stored on its side and sent as raw bytes may be seen on its side by the model; give
+    the model a ``max_image_size`` so it sees the upright image the boxes are mapped onto.
+
+    The regions are emitted in reading order (``order``, as for ``YoloSegmenter``) and each records
+    its position as its ``sequence``. A box that is not four numbers, or has no area, raises: a reply
+    the component cannot read is an error of the call, for ``retries``/``on_error`` to deal with.
+
+    Settings:
+        - box_field:   key holding each box (default: auto-detect box_2d/bbox/box/bounding_box)
+        - label_field: key holding each label (default: auto-detect label/class/name/type/category)
+        - box_format:  'yxyx' (default -- Gemini's ``box_2d``), 'xyxy', or 'xywh' (left, top, width,
+                       height)
+        - normalized:  what the coordinates are out of: 1000 (default, Gemini), 1 for fractions, or
+                       0 for coordinates already in the image's pixels
+        - list_field:  key of the detection list when the reply is an object rather than a list
+                       (default: the only list in it)
+        - labels:      labels to keep, a list (default: all)
+        - order:       'reading' (default), 'top_to_bottom' or 'detected'
+        - image_from:  id of the component whose result is the image (default: the nearest image up
+                       the input chain)
+    """
+
+    _BOX_KEYS = ("box_2d", "bbox", "box", "bounding_box")
+    _LABEL_KEYS = ("label", "class", "name", "type", "category")
+
+    def __init__(self, tree, workflow, parent=None):
+        super().__init__(tree, workflow, parent)
+        self.box_format = self.settings.get("box_format", "yxyx")
+        if self.box_format not in BOX_FORMATS:
+            raise ValueError(f"{self!r}: box_format must be one of {', '.join(BOX_FORMATS)}, not {self.box_format!r}")
+        self.normalized = float(self.settings.get("normalized", 1000))
+        if self.normalized < 0:
+            raise ValueError(f"{self!r}: normalized must be 1000, 1, or 0 for pixels, not {self.normalized}")
+        self.order = self.settings.get("order", "reading")
+        if self.order not in ORDERS:
+            raise ValueError(f"{self!r}: unknown order {self.order!r}; use one of {', '.join(ORDERS)}")
+        keep = self.settings.get("labels") or []
+        self.keep = {keep} if isinstance(keep, str) else set(keep)
+
+    def _process(self, input):
+        detections = self.detections(input)
+        image = self.source_image(input)
+        if image is None:
+            raise ValueError(f"{self} could not find the image in the input chain of {input}")
+        width, height = image_size(image)
+        regions, dropped = [], []
+        for detection in detections:
+            label = self.label_of(detection)
+            if self.keep and label is None:
+                # a reply that lost its labels (a model writing its label under the box's key) would
+                # otherwise be filtered away to nothing without a word
+                raise ValueError(f"{self}: a detection has no label to keep or drop: {detection!r}")
+            if self.keep and label not in self.keep:
+                dropped.append(label)
+                continue
+            x1, y1, x2, y2 = self.pixels(self.box_of(detection), width, height)
+            value = {k: v for k, v in detection.items() if k != self.box_key(detection)}
+            value["label"] = label
+            value["bbox"] = [x1, y1, x2, y2]
+            region = ItemResult(value, input=input, processor=self, metadata={"type": "DATA", "label": label})
+            region.locator = bbox_frame(x1, y1, x2, y2, size=(width, height))
+            regions.append(region)
+        ordered = [regions[i] for i in reading_order([r.value["bbox"] for r in regions], self.order)]
+        for position, region in enumerate(ordered):
+            region.sequence = position
+        out = ListResult(ordered, input=input, processor=self)
+        if dropped:
+            logger.warning(f"{self}: dropped detections labelled {sorted(set(dropped))}, not in labels")
+            out.metadata["dropped"] = dropped
+        return out
+
+    def detections(self, input):
+        """The list of detection dicts in *input*'s value (a list, an object holding one, or JSON text)."""
+        value = input.value if isinstance(input, Result) else input
+        if isinstance(value, (bytes, bytearray)):
+            value = value.decode("utf-8", "replace")
+        if isinstance(value, str):
+            # A model's reply as text (a segmenter's is), fenced or not
+            from .ai.ai_utils import extract_json
+
+            parsed = extract_json(value)
+            if parsed is None:
+                raise ValueError(f"{self}: the reply is not JSON: {value[:200]!r}")
+            value = parsed
+        if isinstance(value, dict):
+            field = self.settings.get("list_field")
+            if field:
+                value = value[field]
+            elif any(k in value for k in self._BOX_KEYS):
+                value = [value]  # a single detection
+            else:
+                lists = [v for v in value.values() if isinstance(v, list)]
+                if len(lists) != 1:
+                    raise ValueError(f"{self}: say which list holds the detections (list_field) in {value!r}")
+                value = lists[0]
+        if not isinstance(value, list) or not all(isinstance(d, dict) for d in value):
+            raise ValueError(f"{self}: expected a list of detections, got {value!r}")
+        return value
+
+    def box_key(self, detection):
+        return self.settings.get("box_field") or next((k for k in self._BOX_KEYS if k in detection), None)
+
+    def box_of(self, detection):
+        key = self.box_key(detection)
+        box = detection.get(key) if key else None
+        if not isinstance(box, (list, tuple)) or len(box) != 4 or not all(isinstance(v, (int, float)) for v in box):
+            raise ValueError(f"{self}: a detection's box must be four numbers, got {detection!r}")
+        return [float(v) for v in box]
+
+    def label_of(self, detection):
+        field = self.settings.get("label_field") or next((k for k in self._LABEL_KEYS if k in detection), None)
+        return str(detection[field]) if field and detection.get(field) is not None else None
+
+    def pixels(self, box, width, height):
+        """*box* in the model's format and scale as ``[x1, y1, x2, y2]`` pixels, clamped to the image."""
+        a, b, c, d = box
+        if self.box_format == "yxyx":
+            x1, y1, x2, y2 = b, a, d, c
+        elif self.box_format == "xyxy":
+            x1, y1, x2, y2 = a, b, c, d
+        else:  # xywh
+            x1, y1, x2, y2 = a, b, a + c, b + d
+        if self.normalized:
+            x1, x2 = x1 / self.normalized * width, x2 / self.normalized * width
+            y1, y2 = y1 / self.normalized * height, y2 / self.normalized * height
+        x1, x2 = sorted((min(max(x1, 0.0), width), min(max(x2, 0.0), width)))
+        y1, y2 = sorted((min(max(y1, 0.0), height), min(max(y2, 0.0), height)))
+        if x2 <= x1 or y2 <= y1:
+            raise ValueError(f"{self}: box {box} has no area in a {width}x{height} image")
+        return [round(x1, 1), round(y1, 1), round(x2, 1), round(y2, 1)]
+
+    def source_image(self, input):
+        """The result holding the image the boxes were found in, or ``None``."""
+        from .persistence.provenance import _source_result
+
+        image_from = self.settings.get("image_from")
+        if image_from:
+            node = _source_result(input, image_from)
+            return node.value if node is not None and isinstance(node.value, FileItemResult) else node
+        node = input.input if isinstance(input, Result) else None
+        while isinstance(node, Result):
+            if isinstance(node, FileItemResult) and node.metadata.get("type") == "IMAGE":
+                return node
+            if isinstance(node.value, FileItemResult) and node.value.metadata.get("type") == "IMAGE":
+                return node.value  # an iterator's entry wrapping the file
+            if node.metadata.get("type") == "IMAGE" and isinstance(node.value, (bytes, bytearray)):
+                return node
+            node = node.input
+        return None
+
+
+def image_size(image):
+    """``(width, height)`` of an image result as it is shown: upright, its EXIF orientation applied."""
+    from PIL import Image
+
+    if isinstance(image, FileItemResult) and not image.file_bytes:
+        img = Image.open(image.file_name)
+    else:
+        img = Image.open(io.BytesIO(image.value))
+    with img:
+        width, height = img.size
+        # EXIF orientations 5-8 turn the picture a quarter turn: the shown image is the stored one on its side
+        if img.getexif().get(0x0112, 1) in (5, 6, 7, 8):
+            width, height = height, width
+    return width, height
 
 
 def yolo_model(name):
