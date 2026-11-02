@@ -1,7 +1,7 @@
 """Sizing what is in a photograph from the objects of known size beside it -- no models.
 
 ``BoxLocator`` maps the boxes a vision model reports (Gemini's ``box_2d``, normalised to 0-1000) onto
-the image's pixels as ``bbox`` locators; ``ScaleMeasurer`` reads the rulers, scale bars or charts
+the image's pixels as ``bbox`` locators; ``SizeExtractor`` reads the rulers, scale bars or charts
 among the regions as references and gives every other region a width and height in their unit. A
 ``StaticProvider`` stands in for the model, so the stored rows are what a real run would write.
 """
@@ -62,7 +62,7 @@ class Steps(unittest.TestCase):
 
     def measured(self, regions, **settings):
         settings.setdefault("references", RULERS)
-        return self.step("measurer.ScaleMeasurer", **settings).process(ListResult(regions))
+        return self.step("extractor.SizeExtractor", **settings).process(ListResult(regions))
 
 
 class TestBoxLocator(Steps):
@@ -138,7 +138,7 @@ class TestBoxLocator(Steps):
             self.step("segmenter.BoxLocator", order="random")
 
 
-class TestScaleMeasurer(Steps):
+class TestSizeExtractor(Steps):
     def test_two_rulers_size_each_axis(self):
         regions = [
             self.region("vertical-ruler", [0, 0, 20, 920]),  # 10 px/cm down
@@ -240,9 +240,9 @@ class TestScaleMeasurer(Steps):
         for bad in ({}, {"ruler": 92}, {"ruler": {"depth": 3}}, {"ruler": {"height": -1}},
                     {"ruler": {"length": 5, "width": 5}}, {"ruler": {"height": True}}):
             with self.assertRaises(ValueError):
-                self.step("measurer.ScaleMeasurer", references=bad)
+                self.step("extractor.SizeExtractor", references=bad)
         with self.assertRaises(ValueError):
-            self.step("measurer.ScaleMeasurer", references=RULERS, duplicates="median")
+            self.step("extractor.SizeExtractor", references=RULERS, duplicates="median")
 
 
 class TestStoredMeasurements(unittest.TestCase):
@@ -288,7 +288,7 @@ class TestStoredMeasurements(unittest.TestCase):
                                                 "next_steps": [
                                                     {
                                                         "id": "measure",
-                                                        "type": "measurer.ScaleMeasurer",
+                                                        "type": "extractor.SizeExtractor",
                                                         "settings": {"references": {"vertical-ruler": {"height": 92}}},
                                                         "next_steps": [
                                                             {"id": "each_region", "type": "iterator.Iterator", "steps": [store]}

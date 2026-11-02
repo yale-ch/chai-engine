@@ -3,7 +3,7 @@
 Each photograph shows a puppet on grey card with a 92 cm yardstick standing up one side and a 61 cm
 ruler along the bottom. A YOLO11 detector trained on the collection
 (``yale-cultural-heritage/shadow-puppets-yolov11`` on Hugging Face, five sizes, run on this machine)
-finds the puppet with and without its rods, its shoulders and the two rulers; ``ScaleMeasurer``
+finds the puppet with and without its rods, its shoulders and the two rulers; ``SizeExtractor``
 reads the rulers as references of known size, so every other box gets a width and height in cm.
 This is the shadow-puppets project's Roboflow detector and ``MeasurementCalculator`` as chai
 components, with no hosted model.

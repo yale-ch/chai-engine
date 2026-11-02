@@ -298,7 +298,7 @@ class BoxLocator(Segmenter):
     the detection with its box in pixels (``{"label", "bbox": [x1, y1, x2, y2], ...}``, any other keys
     the model gave kept) and whose locator is the ``bbox`` frame with the image's size (see
     ``chai.persistence.locators``) -- what ``YoloSegmenter`` writes for its own detections, so the
-    two are interchangeable downstream (``measurer.ScaleMeasurer``, a storage). Nothing is drawn.
+    two are interchangeable downstream (``extractor.SizeExtractor``, a storage). Nothing is drawn.
 
     The image's size is taken upright -- with its EXIF orientation applied -- since that is the image
     a viewer shows and the one a model is sent when the image is re-encoded (``max_image_size``). A
