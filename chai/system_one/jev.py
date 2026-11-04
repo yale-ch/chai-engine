@@ -20,6 +20,7 @@ class JevProvider(DecisionProvider):
     """
 
     name = "jev"
+    local = False  # a hosted service: its calls are not this machine's compute
 
     def __init__(self, model: str, settings: dict):
         self.model = model or "jev-latest"
