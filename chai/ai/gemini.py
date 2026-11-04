@@ -29,7 +29,7 @@ class GeminiComponent(LLMComponent):
     ``temperature``/``top_p`` is always honored -- verified live on Vertex, which accepts them.
 
     Settings:
-        - model: Gemini model id (default 'gemini-3.1-flash-lite-preview';
+        - model: Gemini model id (default 'gemini-3.1-flash-lite';
           'gemini-embedding-001' in an embedding role)
         - location: Vertex AI location when using a GCP project (default 'global')
         - thinking_level: reasoning effort for Gemini 3+ models (default 'low')
@@ -43,7 +43,7 @@ class GeminiComponent(LLMComponent):
         - plus every LLMComponent setting (prompt, system_instruction, schema, api_key, timeout, pricing, ...)
     """
 
-    DEFAULT_MODEL = "gemini-3.1-flash-lite-preview"
+    DEFAULT_MODEL = "gemini-3.1-flash-lite"
     DEFAULT_MAX_OUTPUT_TOKENS = 8192
     DEFAULT_TOOLS = ["search"]
     DEFAULT_SAFETY = "OFF"
