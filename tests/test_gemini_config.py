@@ -124,7 +124,7 @@ class TestSystemInstructionAndMime(unittest.TestCase):
 class TestCredentialsAndProvider(unittest.TestCase):
     def test_api_key_selects_gemini_api(self):
         c = build_gemini({})
-        self.assertEqual(c.model, "gemini/gemini-3.1-flash-lite-preview")
+        self.assertEqual(c.model, "gemini/gemini-3.1-flash-lite")
         self.assertEqual(c.base_kwargs["api_key"], "test-key")
         self.assertNotIn("vertex_project", c.base_kwargs)
 
