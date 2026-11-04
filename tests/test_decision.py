@@ -336,6 +336,18 @@ class TestDecisionClassifier(unittest.TestCase):
         comp, _ = classifier({"question_type": "noul", "question": "The text is about art.", "threshold": 0.7, "litellm_params": {"mock_response": answers(q={"truth": True, "probability": 0.65})}})
         self.assertEqual(comp.process(ItemResult("text")).value, ["false"])
 
+    def test_generative_answer_keyed_by_type_or_bare(self):
+        """A chat model now and then keys its one answer by the question's type, or gives it bare."""
+        for reply in (
+            json.dumps({"answers": {"noul": {"truth": True, "probability": 0.8}}}),
+            json.dumps({"truth": True, "probability": 0.8}),
+            json.dumps({"answers": {"statement": {"truth": True, "probability": 0.8}}}),
+        ):
+            comp, _ = classifier({"question_type": "noul", "question": "The text is about art.", "litellm_params": {"mock_response": reply}})
+            out = comp.process(ItemResult("text"))
+            self.assertEqual(out.value, ["true"], reply)
+            self.assertAlmostEqual(out.metadata["probability"], 0.8)
+
     def test_missing_settings_fail_at_build(self):
         with self.assertRaises(ValueError):
             classifier({"options": {"a": "A"}})  # no question

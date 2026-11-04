@@ -73,6 +73,31 @@ class GenerativeProvider(DecisionProvider):
     def prompt(self, state: str, questions: Dict[str, dict]) -> str:
         return SYSTEM1_PROMPT.replace("<<state>>", state).replace("<<questions>>", self.render_questions(questions))
 
+    ANSWER_FIELDS = {"truth", "probability", "choice", "score", "probabilities", "confidence"}
+
+    @classmethod
+    def answer_for(cls, name: str, question: dict, answers: dict, single: bool = False) -> dict:
+        """The answer the model gave question *name*, found even when the model keyed it differently.
+
+        A chat model keys its answers by the question names it was shown most of the time, but now
+        and then by the question's type ("noul", "choice") or, with a single question, not at all --
+        the answer object bare, or under some name of its own. Those replies carry the answer all
+        the same, so they are read rather than failed.
+        """
+        answer = answers.get(name)
+        if isinstance(answer, dict) and answer:
+            return answer
+        by_type = answers.get(question.get("type", ""))
+        if isinstance(by_type, dict) and by_type:
+            return by_type
+        if single:
+            if cls.ANSWER_FIELDS & set(answers):  # the one answer, bare
+                return answers
+            others = [v for v in answers.values() if isinstance(v, dict) and cls.ANSWER_FIELDS & set(v)]
+            if len(others) == 1:  # the one answer, under a name of the model's own
+                return others[0]
+        return {}
+
     def decide(self, state, questions):
         from ..ai.ai_utils import extract_json
 
@@ -83,7 +108,7 @@ class GenerativeProvider(DecisionProvider):
         if not isinstance(answers, dict):
             answers = {}
         usage = self.llm.get_usage(response)
-        return {n: answers.get(n, {}) for n in questions}, {
+        return {n: self.answer_for(n, q, answers, single=len(questions) == 1) for n, q in questions.items()}, {
             "model": self.llm.model,  # the resolved LiteLLM id, so the ledger's by_model rows line up
             "token_usage": usage,
             "cost": self.llm.get_cost(response, usage),
