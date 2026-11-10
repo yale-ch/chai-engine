@@ -12,7 +12,7 @@ from unittest import mock
 
 from PIL import Image
 
-from chai.ai.llm import LLMComponent
+from chai.ai.llm import IncompleteReply, LLMComponent
 from chai.ai.lm_studio import LMStudioComponent
 from chai.ai.ollama import OllamaComponent
 from chai.ai.openai import OpenAIComponent
@@ -244,6 +244,71 @@ class TestProcessWithMockResponses(unittest.TestCase):
         self.assertEqual(res.value[0].processor.id, "ner")
         self.assertEqual(wf.usage_summary()["by_component"]["ner"]["calls"], 1)
 
+
+
+def reply(content, finish_reason, completion_tokens=4, reasoning_tokens=None):
+    """A real LiteLLM ``ModelResponse`` that ended for *finish_reason*, to hand to ``mock_response``."""
+    import litellm
+
+    usage = {"prompt_tokens": 9, "completion_tokens": completion_tokens, "total_tokens": 9 + completion_tokens}
+    if reasoning_tokens is not None:
+        usage["completion_tokens_details"] = {"reasoning_tokens": reasoning_tokens}
+    message = {"role": "assistant", "content": content}
+    return litellm.ModelResponse(choices=[{"finish_reason": finish_reason, "index": 0, "message": message}], usage=usage)
+
+
+class TestIncompleteReplies(unittest.TestCase):
+    """A reply the provider ended early -- at the token cap, or by its content filter -- is an
+    error, not a result holding half a page."""
+
+    def transcriber(self, mocked, **settings):
+        settings = {"model": "openai/gpt-4o-mini", "prompt": "Transcribe {text_input_0}", "expected_output": "text", **settings}
+        settings["litellm_params"] = {"mock_response": mocked}
+        return build(LLMComponent, settings)
+
+    def test_a_whole_reply_records_why_it_ended(self):
+        c, _ = self.transcriber("In the name of God, amen.")
+        out = c.process(text("page 1"))
+        self.assertEqual(out.metadata["finish_reason"], "stop")
+        self.assertNotIn("truncated", out.metadata)
+
+    def test_a_reply_cut_off_at_the_cap_raises(self):
+        c, wf = self.transcriber(reply("In the name of", "length", completion_tokens=64), max_output_tokens=64)
+        with self.assertRaises(IncompleteReply) as cm:
+            c.process(text("page 1"))
+        self.assertEqual((cm.exception.finish_reason, cm.exception.text), ("length", "In the name of"))
+        self.assertIn("max_output_tokens=64 (64 tokens)", str(cm.exception))
+        # the call was made and paid for, so the run's usage has it
+        usage = wf.usage_summary()
+        self.assertEqual((usage["calls"], usage["completion_tokens"]), (1, 64))
+
+    def test_a_cap_spent_on_thinking_says_so(self):
+        c, _ = self.transcriber(reply("", "length", completion_tokens=400, reasoning_tokens=400), max_output_tokens=400)
+        with self.assertRaises(IncompleteReply) as cm:
+            c.process(text("page 1"))
+        self.assertIn("400 tokens, 400 of them thinking", str(cm.exception))
+
+    def test_on_truncated_keep_stores_what_there_is_and_marks_it(self):
+        c, _ = self.transcriber(reply("In the name of", "length"), on_truncated="keep")
+        out = c.process(text("page 1"))
+        self.assertEqual(out.value, "In the name of")
+        self.assertEqual((out.metadata["finish_reason"], out.metadata["truncated"]), ("length", True))
+
+    def test_a_filtered_reply_raises_whatever_on_truncated_says(self):
+        for settings in ({}, {"on_truncated": "keep"}):
+            c, _ = self.transcriber(reply("", "content_filter", completion_tokens=0), **settings)
+            with self.assertRaises(IncompleteReply) as cm:
+                c.process(text("page 1"))
+            self.assertEqual(cm.exception.finish_reason, "content_filter")
+            self.assertIn("content filter", str(cm.exception))
+
+    def test_the_error_policy_applies(self):
+        c, _ = self.transcriber(reply("In the name of", "length"), on_error="skip")
+        self.assertIsNone(c.process(text("page 1")))
+
+    def test_an_unknown_on_truncated_fails_at_build(self):
+        with self.assertRaises(ValueError):
+            self.transcriber("x", on_truncated="ignore")
 
 
 class TestPromptSlots(unittest.TestCase):
