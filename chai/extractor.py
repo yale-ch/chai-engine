@@ -118,9 +118,15 @@ class KeywordExtractor(Extractor):
 class JsonXpathExtractor(Extractor):
     """Extracts a sub-value from a JSON-shaped Result value using an XPath expression.
 
-    Input is a Result whose value is a dict (e.g. an AI extractor's parsed JSON); the dict is rendered
-    as XML internally (see ``chai.data_utils``) so the configured XPath can be applied, and the matched
-    value is returned as an ``ItemResult``.
+    Input is a Result whose value is a JSON object: a dict (e.g. an AI extractor's parsed JSON, a
+    ``CsvFileProvider`` row, what a ``UrlJsonProvider`` fetched), or JSON text or bytes (a ``.json``
+    file), which is parsed. The dict is rendered as XML internally (see ``chai.data_utils``) so the
+    configured XPath can be applied, and the matched value is returned as an ``ItemResult`` --
+    ``None`` when the XPath matches nothing.
+
+    Anything else raises ``ValueError``, so ``retries``/``on_error``/``error_steps`` apply: a value
+    that is not a JSON object (an XML file, a list, plain text), a key that cannot be an XPath step,
+    or an XPath that does not compile. This component does not read XML documents.
 
     Settings:
         - xpath: XPath expression evaluated against the JSON, e.g. '/people/name' (required)
@@ -129,14 +135,34 @@ class JsonXpathExtractor(Extractor):
     def _process(self, input):
         """Take JSON from input and use an XPath in settings to get a sub-value"""
 
-        js = input.value
         xp = self.settings.get("xpath", None)
         if not xp:
             raise ValueError(f"Missing 'xpath' setting in {self}")
-        val = extract_xpath(js, xp)
+        js = self.json_object(input)
+        try:
+            val = extract_xpath(js, xp)
+        except ValueError as e:
+            raise ValueError(f"{self}: {e}") from e
         # Type the output so the extracted value can be fed to a downstream AI component
         typ = "TEXT" if isinstance(val, str) else "DATA"
         return ItemResult(val, input=input, processor=self, metadata={"type": typ})
+
+    def json_object(self, input):
+        """The JSON object *input* holds: its dict, or the dict its JSON text or bytes parse to."""
+        value = input
+        while isinstance(value, Result):
+            value = value.value
+        if isinstance(value, (bytes, bytearray, str)):
+            raw = value
+            try:
+                text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw
+                value = json.loads(text)
+            except ValueError:  # not UTF-8, or not JSON
+                start = bytes(raw[:60]) if isinstance(raw, (bytes, bytearray)) else raw[:60]
+                raise ValueError(f"{self} needs a JSON object, but its input is not JSON (it starts {start!r})")
+        if not isinstance(value, dict):
+            raise ValueError(f"{self} needs a JSON object, got {type(value).__name__}: {str(value)[:60]!r}")
+        return value
 
 
 #: The dimensions a reference may give: its width, its height, or the length of its long side.
