@@ -137,6 +137,24 @@ class TestMediaParts(unittest.TestCase):
         _, b64 = c.image_part(FileItemResult(self.path))["image_url"]["url"].split(",", 1)
         self.assertEqual(Image.open(io.BytesIO(base64.b64decode(b64))).size, (16, 32))
 
+    def test_every_media_file_the_backend_can_send_is_typed(self):
+        # a file the backend has a mime type for must not be typed None and refused before it gets there
+        from chai.ai.llm import AUDIO_MIME_TYPES, IMAGE_MIME_TYPES
+
+        for kind, extensions in (("IMAGE", IMAGE_MIME_TYPES), ("AUDIO", AUDIO_MIME_TYPES)):
+            for extension in extensions:
+                self.assertEqual(FileItemResult(f"recording{extension}").metadata.get("type"), kind, extension)
+        self.assertEqual(FileItemResult("Recording.FLAC").metadata.get("type"), "AUDIO")
+
+    def test_flac_file_becomes_an_audio_part(self):
+        path = os.path.join(self.tmp.name, "interview.flac")
+        with open(path, "wb") as fh:
+            fh.write(b"fLaC\x00\x00\x00\x22")
+        c, _ = build(LLMComponent, {"model": "gemini/gemini-3.1-flash-lite", "prompt": "Transcribe"})
+        parts = c.request_kwargs(FileItemResult(path))["messages"][0]["content"]
+        self.assertEqual(parts[0]["type"], "file")
+        self.assertTrue(parts[0]["file"]["file_data"].startswith("data:audio/flac;base64,"))
+
     def test_remote_and_gs_references_pass_through(self):
         c, _ = build(LLMComponent, {"model": "gemini/gemini-3.1-flash-lite", "prompt": "p"})
         part = c.image_part(ItemResult("gs://bucket/scan.png", metadata={"type": "IMAGE"}))
