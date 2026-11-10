@@ -239,8 +239,10 @@ Every component accepts an error policy in `settings`:
   whose `input_segment` is its bounding box; `TextSpanLocator` turns an
   extractor's values into one row per occurrence, `{"label", "text"}` with the
   character range it occupies in the text row it names
-  (`chai.persistence.locators` defines the frames). `viewer/` draws them: boxes
-  over the page image, highlights in the text, a colour per label.
+  (`chai.persistence.locators` defines the frames). A viewer needs nothing but
+  those rows to draw boxes over the page image and highlights in the text, a
+  colour per label. None is tracked in this repository: `viewer/` is
+  git-ignored, the place for a local one.
 
 ## Workflow JSON reference
 
