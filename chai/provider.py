@@ -6,6 +6,7 @@ of the tree can process.
 """
 
 import csv
+import fnmatch
 import os
 import re
 from io import BytesIO
@@ -76,25 +77,57 @@ class IntListProvider(Provider):
         return super()._process(ListResult([1, 2, 3]))
 
 
+#: Files an operating system leaves in a folder that are never part of what was put there.
+SYSTEM_FILES = ("Thumbs.db", "desktop.ini")
+
+
 class DirFileProvider(Provider):
     """Take a directory name and return one Result entry per file inside it.
 
     Input is a directory path (string); output is a ``DirectoryListResult`` whose entries wrap each
-    file in the directory as a lazily-read ``FileItemResult``. Raises ``ValueError`` when the path does
-    not exist. Usually followed by an ``Iterator`` that processes each file.
+    file in the directory as a lazily-read ``FileItemResult``, in sorted path order. Only files are
+    listed: a subfolder is not an entry, and neither are hidden files (``.DS_Store``) or the files
+    Windows leaves behind (``Thumbs.db``, ``desktop.ini``). Raises ``ValueError`` when the path does
+    not exist or is not a directory. Usually followed by an ``Iterator`` that processes each file.
+
+    Settings:
+        - recursive: also list the files of every subfolder, however deep -- a collection kept as
+                     box/folder/item (default false: the directory's own files only)
+        - pattern:   keep only the files whose name matches this glob, or any of a list of them,
+                     e.g. '*.tif' or ['*.jpg', '*.tif']; case is ignored (default: every file)
+        - hidden:    list hidden files and folders too (default false)
     """
 
     def _process(self, input):
-        if os.path.exists(input):
-            files = os.listdir(input)
-            d = DirectoryListResult(
-                [os.path.join(input, x) for x in files],
-                input=input,
-                processor=self,
-            )
-            return super()._process(d)
-        else:
+        if not os.path.exists(input):
             raise ValueError("input file path does not exist")
+        if not os.path.isdir(input):
+            raise ValueError(f"input file path is not a directory: {input}")
+        d = DirectoryListResult(self.files(input), input=input, processor=self)
+        return super()._process(d)
+
+    def files(self, directory):
+        """The paths of the files of *directory* that the settings keep."""
+        hidden = bool(self.settings.get("hidden", False))
+        patterns = self.settings.get("pattern") or []
+        patterns = [patterns] if isinstance(patterns, str) else list(patterns)
+        patterns = [p.lower() for p in patterns]
+
+        def kept(name):
+            if not hidden and (name.startswith(".") or name in SYSTEM_FILES):
+                return False
+            return not patterns or any(fnmatch.fnmatchcase(name.lower(), p) for p in patterns)
+
+        if not self.settings.get("recursive", False):
+            paths = (os.path.join(directory, name) for name in os.listdir(directory) if kept(name))
+            return [path for path in paths if os.path.isfile(path)]
+        found = []
+        for folder, subfolders, names in os.walk(directory):
+            if not hidden:
+                # pruned in place, so a hidden folder is not walked into
+                subfolders[:] = [name for name in subfolders if not name.startswith(".")]
+            found.extend(os.path.join(folder, name) for name in names if kept(name))
+        return found
 
 
 class FileListProvider(Provider):
