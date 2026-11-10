@@ -10,11 +10,12 @@ something, or leave the engine for a script. Items are roughly in priority order
 
 ## 1. Project-local components without monkeypatching
 
-`importClass` only resolves `type` strings under the `chai.` package. chai-reconciler
-(`reconciler/__init__.py`) and chai-workflow-builder (`builder/custom_loader.py`) both patch
-`chai.core.importClass` to load their own components. The engine should resolve any importable
-dotted path (`reconciler.components.selector.LayaSelector`) and take a `component_paths` list in
-the Workflow settings for a project's `custom_components/` folder.
+`importClass` now resolves any importable dotted path: chai's own types first, then the type as
+written (`reconciler.components.selector.LayaSelector`), which must be a `Component`. The shims in
+chai-reconciler (`reconciler/__init__.py`) and chai-workflow-builder (`builder/custom_loader.py`)
+that patch `chai.core.importClass` are no longer needed. Still to do: a `component_paths` list in
+the Workflow settings, so a project's `custom_components/` folder is put on the path by the
+workflow rather than by whatever starts it.
 
 ## 2. Decisions as training data (the fine-tuning loop)
 
