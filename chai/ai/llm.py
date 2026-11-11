@@ -90,6 +90,14 @@ GEMINI_TOOLS = {
     "code": {"codeExecution": {}},
 }
 
+# LiteLLM sends every completion call that has ``tools`` through its MCP handler, and importing that
+# handler needs the optional ``mcp`` package -- whether or not any of the tools is an MCP tool. A
+# default Gemini call (search grounding is a tool) then fails with "No module named 'mcp'" before
+# anything is sent. This keyword makes ``litellm.completion`` leave the handler alone. It is private
+# to LiteLLM (``litellm.main.completion`` pops it), so ``tests/test_gemini_config.py`` checks that
+# the pinned LiteLLM still reads it.
+SKIP_MCP_HANDLER = "_skip_mcp_handler"
+
 HARM_CATEGORIES = {
     "hate_speech_safety": "HARM_CATEGORY_HATE_SPEECH",
     "dangerous_content_safety": "HARM_CATEGORY_DANGEROUS_CONTENT",
@@ -164,7 +172,9 @@ class LLMComponent(Component):
         - thinking_budget: thinking-token budget for models that take one (Gemini 2.5, Anthropic);
           0 turns thinking off (default: not sent)
         - tools: Gemini server-side tools by name: 'search' (Google Search grounding), 'url', 'code';
-          a dict is passed through as a tool definition (default [])
+          a dict is passed through as a tool definition (default []). Only an MCP tool definition
+          (``{"type": "mcp", ...}``) goes through LiteLLM's MCP handler, which needs the optional
+          ``mcp`` package (``pip install 'litellm[mcp]'``); any other tool works without it
         - safety: Gemini safety threshold for all four harm categories, e.g. 'OFF' or
           'BLOCK_ONLY_HIGH' (default: not sent); hate_speech_safety, dangerous_content_safety,
           sexually_explicit_safety and harassment_safety override it per category
@@ -291,6 +301,12 @@ class LLMComponent(Component):
                 raise ValueError(f"{self}: unknown tool {name!r}; choose from {sorted(GEMINI_TOOLS)} or pass a tool dict")
         return tools
 
+    @staticmethod
+    def is_mcp_tool(tool) -> bool:
+        """True for a tool definition that names an MCP server (``{"type": "mcp", ...}``), which is
+        LiteLLM's to route and needs the ``mcp`` package."""
+        return isinstance(tool, dict) and tool.get("type") == "mcp"
+
     def safety_settings(self) -> Optional[list]:
         default = self.settings.get("safety", self.DEFAULT_SAFETY)
         per_category = {k: self.settings[k] for k in HARM_CATEGORIES if k in self.settings}
@@ -327,6 +343,8 @@ class LLMComponent(Component):
         tools = self.build_tools()
         if tools:
             kw["tools"] = tools
+            if not any(self.is_mcp_tool(tool) for tool in tools):
+                kw[SKIP_MCP_HANDLER] = True  # none of them is LiteLLM's to route; see SKIP_MCP_HANDLER
         safety = self.safety_settings()
         if safety:
             kw["safety_settings"] = safety
