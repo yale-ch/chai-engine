@@ -125,6 +125,19 @@ def known_provider(name: str) -> bool:
     return name in {str(getattr(p, "value", p)) for p in providers}
 
 
+class IncompleteReply(ValueError):
+    """The provider ended the reply before the model finished it.
+
+    ``finish_reason`` is what the provider gave -- ``length`` (the reply reached the token cap) or
+    ``content_filter`` (the provider's filter stopped it) -- and ``text`` what there was of the reply.
+    """
+
+    def __init__(self, message, finish_reason=None, text=""):
+        super().__init__(message)
+        self.finish_reason = finish_reason
+        self.text = text
+
+
 class LLMComponent(Component):
     """Send the input to a chat model through LiteLLM and return its reply.
 
@@ -136,8 +149,14 @@ class LLMComponent(Component):
     ``ItemResult`` whose value is parsed JSON (``expected_output`` 'json'), parsed YAML ('yaml') or raw
     text, with ``token_usage`` (``prompt``/``result``/``thinking``/``images``/``total``, ``None`` when
     the provider does not report a figure), ``cost`` (USD, ``None`` when unpriceable), ``duration``,
-    ``type``, ``engine`` (the provider) and ``model`` metadata. A leading ``</think>`` block from a
-    reasoning model is stripped.
+    ``type``, ``engine`` (the provider), ``model`` and ``finish_reason`` metadata. A leading
+    ``</think>`` block from a reasoning model is stripped.
+
+    A reply the provider ended early is not a result: ``finish_reason`` ``length`` (it reached
+    ``max_output_tokens``, so the text stops mid-way -- or is empty, when a thinking model spent the
+    cap reasoning) and ``content_filter`` (the provider's filter stopped it) raise ``IncompleteReply``,
+    so ``retries``/``on_error``/``error_steps`` apply and nothing half-finished is stored as a
+    success. The call is still counted in the run's usage. See ``on_truncated``.
 
     Mixed into an embedding role (``MODEL_KIND`` 'embedding', see ``chai.embedder``) the backend is
     used through ``embed`` instead, and ``model`` is the embedding model (default
@@ -166,6 +185,9 @@ class LLMComponent(Component):
         - temperature: sampling temperature (default: the provider's)
         - top_p: nucleus sampling threshold (default: the provider's)
         - max_output_tokens: reply token cap, sent as max_tokens (default 4096)
+        - on_truncated: what to do with a reply that reached the cap: 'error' (default) raises;
+          'keep' returns what there is, with ``truncated: true`` in its metadata. A reply stopped by
+          a content filter always raises
         - reasoning_effort: 'minimal' | 'low' | 'medium' | 'high' | 'disable'; LiteLLM maps it to the
           provider's knob -- Gemini 3 thinking_level, OpenAI reasoning_effort, Anthropic thinking
           (default: not sent)
@@ -232,6 +254,9 @@ class LLMComponent(Component):
         self.temperature = self.settings.get("temperature", self.DEFAULT_TEMPERATURE)
         self.top_p = self.settings.get("top_p", self.DEFAULT_TOP_P)
         self.max_output_tokens = self.settings.get("max_output_tokens", self.DEFAULT_MAX_OUTPUT_TOKENS)
+        self.on_truncated = str(self.settings.get("on_truncated", "error")).lower()
+        if self.on_truncated not in ("error", "keep"):
+            raise ValueError(f"{self}: on_truncated must be 'error' or 'keep', not {self.settings['on_truncated']!r}")
         self.image_mime_type = self.settings.get("image_mime_type") or None
 
         # Everything about the request except the messages, computed once so a
@@ -525,6 +550,33 @@ class LLMComponent(Component):
         return text.strip()
 
     @staticmethod
+    def finish_reason(response) -> Optional[str]:
+        """Why the provider ended the reply, in LiteLLM's (OpenAI's) words: ``stop``, ``length``,
+        ``content_filter``, ``tool_calls``; ``None`` when the provider did not say."""
+        try:
+            return response.choices[0].finish_reason
+        except (AttributeError, IndexError):
+            return None
+
+    def incomplete_reply(self, reason, usage: dict, text: str) -> Optional[IncompleteReply]:
+        """The error for a reply the provider ended early, or ``None`` for one that is whole."""
+        if reason == "length":
+            spent = usage.get("result")
+            thinking = usage.get("thinking") or 0
+            detail = f"{spent} tokens" if spent is not None else "the cap"
+            if thinking:
+                detail += f", {thinking} of them thinking"
+            message = (
+                f"{self}: the reply was cut off at max_output_tokens={self.max_output_tokens} ({detail}); "
+                "raise the cap, or set on_truncated: keep to store what there is"
+            )
+        elif reason == "content_filter":
+            message = f"{self}: the provider's content filter stopped the reply (see the `safety` setting)"
+        else:
+            return None
+        return IncompleteReply(message, finish_reason=reason, text=text)
+
+    @staticmethod
     def get_usage(response) -> dict:
         """Token counts in chai's shape; ``None`` where the provider reported nothing."""
         usage = getattr(response, "usage", None)
@@ -608,17 +660,31 @@ class LLMComponent(Component):
         response = self.generate_content(messages)
         duration = time.time() - start
 
-        value, data_type = self.parse_output(self.extract_text(response))
+        text = self.extract_text(response)
         usage = self.get_usage(response)
+        reason = self.finish_reason(response)
         metadata = {
             "token_usage": usage,
             "cost": self.get_cost(response, usage),
             "duration": duration,
-            "type": data_type,
             "engine": self.ENGINE_NAME,
             "provider": self.provider,
             "model": self.model,
+            "finish_reason": reason,
         }
         if self.is_local:
             metadata["local_compute"] = local_compute(duration)
+
+        incomplete = self.incomplete_reply(reason, usage, text)
+        if incomplete is not None:
+            if reason == "length" and self.on_truncated == "keep":
+                metadata["truncated"] = True
+            else:
+                # the call was made and paid for: it counts in the run's usage though no result comes of it
+                if self.workflow is not None and self.workflow is not self:
+                    self.workflow.record_usage(self, metadata)
+                raise incomplete
+
+        value, data_type = self.parse_output(text)
+        metadata["type"] = data_type
         return ItemResult(value, metadata=metadata)
