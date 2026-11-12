@@ -5,7 +5,12 @@ matched element paths are translated back into dict/list lookups on the original
 not preserved in the XML because the operation is never reversed.
 """
 
+import re
+
 from lxml import etree
+
+# what a dict key has to look like to be an element name (after '@' has become '__')
+_ELEMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 
 
 def _escape_xml(s):
@@ -18,7 +23,9 @@ def _escape_xml(s):
 def _convert(what, output):
     if type(what) is dict:
         for k, v in what.items():
-            tag = k.replace("@", "__")
+            tag = str(k).replace("@", "__")
+            if not _ELEMENT_NAME.match(tag):
+                raise ValueError(f"the key {k!r} cannot be an XPath step (it is not a usable element name)")
             if type(v) is not list:
                 v = [v]
             for item in v:
@@ -27,12 +34,17 @@ def _convert(what, output):
                 output.append(f"</{tag}>")
     elif isinstance(what, str):
         output.append(_escape_xml(what))
-    elif type(what) in [int, float]:
-        output.append(str(what))
+    elif isinstance(what, bool):
+        output.append("true" if what else "false")
     elif what is None:
         output.append("")
+    elif type(what) is list:
+        # a list inside a list has no key of its own: its items are text of the enclosing element
+        for item in what:
+            _convert(item, output)
     else:
-        print(f"Unknown (to model) type: {type(what)} from {what}")
+        # numbers, and anything else a record may hold: only its text is needed, for predicates
+        output.append(_escape_xml(str(what)))
 
 
 def dicttoxml(what):
@@ -45,19 +57,21 @@ def dicttoxml(what):
 
 
 def xpath_on_record(what, xpath):
-    """Evaluate *xpath* against dict *what*; return matched element paths (without '/record')."""
+    """Evaluate *xpath* against dict *what*; return matched element paths (without '/record').
+
+    A record that cannot be rendered (a key that is not a usable element name) and an XPath that
+    does not compile both raise ``ValueError``; an XPath that matches nothing returns ``[]``.
+    """
     xml = dicttoxml(what)
     try:
         dom = etree.XML(xml)
-    except Exception:
-        print(f"failed to parse XML:\n{xml}")
-        return []
+    except etree.XMLSyntaxError as e:
+        raise ValueError(f"the record cannot be addressed by an XPath: {e}") from e
     tree = dom.getroottree()
     try:
         matches = dom.xpath("/record" + xpath, namespaces={})
-    except Exception:
-        print(f"Failed to compile xpath: {xpath}")
-        return []
+    except etree.XPathError as e:
+        raise ValueError(f"the XPath {xpath!r} is not valid: {e}") from e
     paths = []
     for m in matches:
         paths.append(tree.getpath(m).replace("/record", ""))
@@ -65,7 +79,7 @@ def xpath_on_record(what, xpath):
 
 
 def extract_xpath(what, xpath):
-    """Return the value in dict *what* addressed by *xpath* (first match only)."""
+    """Return the value in dict *what* addressed by *xpath* (first match only), ``None`` for no match."""
     paths = xpath_on_record(what, xpath)
     for p in paths:
         bits = p[1:].split("/")
