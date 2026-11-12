@@ -42,6 +42,11 @@ options in one pass (the letters styles: 16, 10 or 24; slots: 16) score a longer
 two-round knockout. Local models load once per process and share one device lock (Apple's MPS
 backend aborts the process when two threads submit work at once).
 
+A local model loads its weights the first time it is called, before that call's clock starts: the
+result's `duration` is the time the model took to answer, and the call that loaded the model
+records what that took as `load_seconds` beside it (the run's usage totals it). `System1Model.load()`
+loads a model ahead of its first call.
+
 ### Naming a model
 
 The `model` setting takes three forms:

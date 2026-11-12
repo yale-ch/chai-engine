@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import math
 import threading
+import time
 from typing import Dict, List, Optional, Tuple
 
 from .questions import QUESTION_TYPES, apply_layout, normalize_answer, question_keys
@@ -82,6 +83,11 @@ class DecisionProvider:
     name = ""
     model = ""
     local = True  # runs on this machine; a provider that calls a service says otherwise
+
+    def load(self):
+        """Bring the model into memory (once per process). ``System1Model`` calls this before it
+        starts a call's clock, so a provider that loads weights must do it here and not only inside
+        ``decide``; a provider with nothing to load -- a hosted service -- leaves this as it is."""
 
     def decide(self, state: str, questions: Dict[str, dict]) -> Tuple[Dict[str, dict], dict]:
         raise NotImplementedError
@@ -287,20 +293,43 @@ class System1Model:
     answer with ``normalize_answer`` and returns ``(answers, meta)`` where *meta* carries ``model``,
     ``provider``, ``token_usage``, ``cost`` and ``duration`` -- the fields a chai result's metadata
     records so the workflow's usage ledger counts the call.
+
+    ``duration`` is the time the model took to answer, and nothing else. A local model's weights
+    are loaded on the first call, before the clock starts (``load``); that call's *meta* carries the
+    time loading took as ``load_seconds``, beside its ``duration`` rather than inside it. Call
+    ``load()`` yourself to have the model in memory before the first decision.
     """
 
     def __init__(self, settings: dict):
         self.settings = dict(settings or {})
         self.model = str(self.settings.get("model", "") or "")
         self.provider = make_provider(self.model, self.settings)
+        #: seconds the provider took to load, ``None`` until it has been asked to
+        self.load_seconds: Optional[float] = None
+        self._load_lock = threading.Lock()
+
+    def load(self) -> float:
+        """Bring the model into memory if this is the first time it is needed.
+
+        Returns the seconds that took, which is 0.0 on every later call, for a provider with
+        nothing to load, and for weights another component had already loaded in this process.
+        Calls arriving while the model loads wait here, outside their own clocks.
+        """
+        with self._load_lock:
+            if self.load_seconds is not None:
+                return 0.0
+            start = time.time()
+            self.provider.load()
+            self.load_seconds = round(time.time() - start, 3)
+            return self.load_seconds
 
     def decide(self, state: str, questions: Dict[str, dict], layout: str = "described", heading: str = "Options:") -> Tuple[Dict[str, dict], dict]:
-        import time
-
         for name, q in questions.items():
             if q.get("type") not in QUESTION_TYPES:
                 raise ValueError(f"question {name!r}: type must be one of {QUESTION_TYPES}")
         laid_state, laid = apply_layout(state, questions, layout, heading)
+        # loading the weights is not part of answering: it happens once, before the clock starts
+        loaded = self.load()
         start = time.time()
         raw, meta = self.provider.decide(laid_state, laid)
         duration = time.time() - start
@@ -308,6 +337,8 @@ class System1Model:
         meta = dict(meta)
         meta.setdefault("model", self.model)
         meta.update({"provider": self.provider.name, "duration": duration, "layout": layout, "state": laid_state})
+        if loaded:
+            meta["load_seconds"] = loaded
         if getattr(self.provider, "local", True):
             from ..hardware import local_compute
 

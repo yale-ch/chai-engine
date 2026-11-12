@@ -154,13 +154,17 @@ class DecisionBase:
         return make_question(qtype, instructions, options)
 
     def usage_metadata(self, meta: dict) -> dict:
-        return {
+        usage = {
             "model": meta.get("model"),
             "provider": meta.get("provider"),
             "token_usage": meta.get("token_usage"),
             "cost": meta.get("cost"),
             "duration": meta.get("duration"),
         }
+        if meta.get("load_seconds"):
+            # the call that loaded the model says how long that took, beside its own duration
+            usage["load_seconds"] = meta["load_seconds"]
+        return usage
 
 
 class DecisionClassifier(DecisionBase, Classifier):
