@@ -175,6 +175,12 @@ once per run, in the WORKFLOW_RUN row's `metadata.hardware` (`{key: profile}`), 
 `by_hardware` breakdown, so a run that mixes hosted and local models reports dollars for the one
 and machine-hours for the other.
 
+`duration` is the time the model took to answer. An in-process System One model loads its weights
+the first time it is called, before that call's clock starts; the result records what loading took
+as `load_seconds`, beside its `duration`, and the summary totals it under the same name. So the
+first result of a run is timed like every other, and `System1Model.load()` brings a model into
+memory ahead of the first call.
+
 ### Conditions: one test language for all gates
 
 Gates evaluate JSON conditions (defined alongside the gates in `chai/gate.py`) against any Result:

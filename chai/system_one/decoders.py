@@ -873,6 +873,9 @@ class JevOmniProvider(DecisionProvider):
                 _JEV_OMNI_RUNTIMES[key] = JevOmniRuntime(self.model, self.device)
             return _JEV_OMNI_RUNTIMES[key]
 
+    def load(self):
+        self.runtime()
+
     def decide(self, state, questions):
         runtime = self.runtime()
         answers = {}

@@ -6,6 +6,11 @@ workflow, whose ``UsageLedger`` keeps the running totals. ``Workflow.run`` reset
 start and attaches ``summary()`` to its ``component_end`` event, so a harness can show what a run cost
 as it finishes; ``workflow.usage.summary()`` gives the same numbers afterwards.
 
+``seconds`` is the time the models spent answering. A model that loads its weights on its first
+call (an in-process System One model) does that before the call's clock starts and reports it on
+that result as ``load_seconds``; the ledger totals those separately, under the same name, so a
+run's first call is not slower on paper than the rest and the time spent loading is still counted.
+
 ``cost`` is in US dollars. It is ``None`` on a result when nobody could price the call (a self-hosted
 model LiteLLM has no table entry for and no ``pricing`` setting); the ledger counts such calls under
 ``unpriced_calls`` so a total is never mistaken for a complete one.
@@ -49,6 +54,7 @@ def _empty():
         "cost": 0.0,
         "unpriced_calls": 0,
         "seconds": 0.0,
+        "load_seconds": 0.0,
         "local_calls": 0,
         "local_seconds": 0.0,
     }
@@ -76,8 +82,8 @@ class UsageLedger:
     """Thread-safe tally of model usage for one workflow run.
 
     ``record(component, metadata)`` reads a result's ``token_usage`` dict (``prompt``, ``result``,
-    ``thinking``, ``total`` -- the shape every chai AI backend emits), its ``cost`` and ``duration``,
-    and adds them to the run totals, to the producing component's row (``by_component``, keyed by
+    ``thinking``, ``total`` -- the shape every chai AI backend emits), its ``cost``, ``duration``
+    and ``load_seconds``, and adds them to the run totals, to the producing component's row (``by_component``, keyed by
     component id) and to the model's row (``by_model``). Safe to call from ``Iterator``/``FanOut``
     worker threads.
     """
@@ -113,6 +119,10 @@ class UsageLedger:
             seconds = float(metadata.get("duration") or 0.0)
         except (TypeError, ValueError):
             seconds = 0.0
+        try:
+            load_seconds = float(metadata.get("load_seconds") or 0.0)
+        except (TypeError, ValueError):
+            load_seconds = 0.0
         return {
             "calls": 1,
             "prompt_tokens": prompt,
@@ -122,6 +132,7 @@ class UsageLedger:
             "cost": float(cost) if cost is not None else 0.0,
             "unpriced_calls": 0 if cost is not None else 1,
             "seconds": seconds,
+            "load_seconds": load_seconds,
             **_local(metadata),
         }
 

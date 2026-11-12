@@ -80,6 +80,9 @@ class LayaProvider(DecisionProvider):
                 _LAYA_AGENTS[key] = laya.load(self.model, subfolder=self.subfolder, device=self.device)
             return _LAYA_AGENTS[key]
 
+    def load(self):
+        self.agent()
+
     def decide(self, state, questions):
         agent = self.agent()
         wire = {n: wire_question(q) for n, q in questions.items()}

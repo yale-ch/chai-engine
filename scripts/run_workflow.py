@@ -118,6 +118,8 @@ def usage_lines(usage):
         devices = ", ".join(row.get("devices") or []) or "local server"
         lines.append(f"local:    {row.get('local_calls', 0)} calls, {row.get('local_hours', 0.0):.4f} h "
                      f"on {row.get('label') or key} [{key}] ({devices})")
+    if usage.get("load_seconds"):
+        lines.append(f"loading:  {usage['load_seconds']:.1f} s loading models, apart from the calls' own time")
     return lines
 
 
