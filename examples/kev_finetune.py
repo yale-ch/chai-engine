@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 
@@ -116,13 +117,15 @@ def main(argv=None) -> int:
     ap.add_argument("--model", default=DEFAULT_MODEL, help=f"kev model id (default {DEFAULT_MODEL})")
     ap.add_argument("--limit", type=int, default=0, help="only the first N decisions (default all)")
     ap.add_argument("--compare", default=None, help="the bench's predictions JSONL for the same checkpoint")
-    ap.add_argument("--device", default=None, help="cuda, mps or cpu (default: the first available)")
+    ap.add_argument("--device", default=None,
+                    help="cuda, mps or cpu: sets CHAI_DEVICE for this run (default: CHAI_DEVICE, else the first available)")
     args = ap.parse_args(argv)
 
     rows = read_jsonl(args.data, args.limit)
-    settings = {"device": args.device} if args.device else {}
+    if args.device:
+        os.environ["CHAI_DEVICE"] = args.device  # the device is the machine's, not a workflow setting
     t = time.time()
-    decisions, usage = run(rows, args.model, **settings)
+    decisions, usage = run(rows, args.model)
     seconds = time.time() - t
 
     agree = sum(d["choice"] == d["answer"] for d in decisions)

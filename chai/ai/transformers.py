@@ -19,7 +19,7 @@ import time
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from ..core import Component
-from ..hardware import local_compute, torch_device
+from ..hardware import local_compute, requested_device, torch_device
 from ..image_operations import image_from_bytes
 from ..result import ItemResult, Result
 from .ai_utils import check_text_slots, extract_json, extract_yaml, warn_prompt_order
@@ -46,13 +46,15 @@ class TransformersComponent(Component):
         - prompt: prompt template; supports {step_name} and {text_input_<i>} substitutions (default '')
         - expected_output: 'json', 'yaml' or anything else for raw text (default 'json')
         - max_new_tokens: generation token cap (default 2048)
-        - device: 'cuda', 'cuda:1', 'mps' or 'cpu' (default: CUDA if present, then MPS, then CPU)
         - dtype: torch dtype for the weights, e.g. 'bfloat16' or 'float32' (default 'auto'; 'float32'
           on CPU, where half precision is slow or unsupported)
         - max_image_pixels: scale an image down to at most this many pixels before the processor
           sees it (default: leave it to the processor)
         - vision: force the vision-language path on or off (default: from the model's config)
         - tie_word_embeddings: passed to from_pretrained for text models (default true)
+
+    The device is not a setting: it is the machine's, read from ``CHAI_DEVICE`` ('cuda', 'cuda:1',
+    'mps' or 'cpu'; unset: CUDA if present, then MPS, then the CPU). A ``device`` setting is refused.
     """
 
     ENGINE_NAME: str = "transformers"
@@ -64,7 +66,7 @@ class TransformersComponent(Component):
             raise ValueError(f"model setting not found for {self}")
         # self.model is the loaded model object, so the name it was loaded from is kept separately
         self.model_name = model
-        self.device = torch_device(self.settings.get("device"))
+        self.device = torch_device(requested_device(self.settings, self))
         vision = self.settings.get("vision")
         if vision is None:
             vision = getattr(AutoConfig.from_pretrained(model), "vision_config", None) is not None

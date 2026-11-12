@@ -238,7 +238,6 @@ class TestLaya(LiveProviderChecks, unittest.TestCase):
 @unittest.skipUnless(GLINER_READY, "GLiNER2 not installed (pip install 'gliner2[local]') or GLiNER2.5-Decide is not cached")
 class TestGliner(LiveProviderChecks, unittest.TestCase):
     MODEL = "gliner/fastino/GLiNER2.5-Decide"
-    SETTINGS = {"device": "cpu"} if os.getenv("CHAI_TEST_DEVICE") == "cpu" else {}
     STATE = "Mention: Van Gogh\nEntity type: person\nText: {text}"
     KNOWS_VAN_GOGH = False  # the base model answers "none" here; the reconciliation fine-tunes do not
     ORDERS_SCORE = False

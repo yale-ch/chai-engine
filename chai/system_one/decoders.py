@@ -38,6 +38,7 @@ import threading
 from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
 
+from ..hardware import requested_device
 from .base import DEVICE_LOCK, DecisionProvider, LogitProvider, load_once, pick_device, register, temperatures
 from .questions import FALSE_KEY, NOUL_OPTIONS, TRUE_KEY
 
@@ -192,8 +193,8 @@ class DecoderProvider(LogitProvider):
 
     Settings common to the decoder families: ``revision``, ``subfolder``, ``adapter`` (``{repo,
     subfolder, revision, attach}`` or a repo name), ``head`` (``{repo, file, subfolder, revision}``),
-    ``dtype`` (default 'bfloat16'), ``device`` (default: CUDA, else MPS, else CPU),
-    ``max_state_tokens`` (default 3072), ``temperature`` (default: what the checkpoint ships).
+    ``dtype`` (default 'bfloat16'), ``max_state_tokens`` (default 3072), ``temperature`` (default:
+    what the checkpoint ships). The device is ``CHAI_DEVICE``, else CUDA, else MPS, else the CPU.
     """
 
     FAMILY = ""
@@ -233,8 +234,8 @@ class DecoderProvider(LogitProvider):
         return None
 
     def cache_key(self):
-        keys = ("revision", "subfolder", "adapter", "head", "dtype", "device", "style", "head_dim")
-        return (type(self).__name__, self.checkpoint, json.dumps({k: self.cfg.get(k) for k in keys}, sort_keys=True, default=str))
+        keys = ("revision", "subfolder", "adapter", "head", "dtype", "style", "head_dim")
+        return (type(self).__name__, self.checkpoint, self.device or "", json.dumps({k: self.cfg.get(k) for k in keys}, sort_keys=True, default=str))
 
     def load(self):
         if self.rt is None:
@@ -661,7 +662,7 @@ class NLIProvider(LogitProvider):
     <label>: <description>`` against the state as premise, and its logit is log P(entailment), so the
     softmax across options is the normalised entailment the model serves. Settings: ``revision``,
     ``subfolder``, ``adapter``, ``max_length`` (default 4096), ``max_state_tokens`` (default 3072),
-    ``dtype``, ``device``, ``temperature``.
+    ``dtype``, ``temperature``.
     """
 
     name = "nli"
@@ -677,7 +678,7 @@ class NLIProvider(LogitProvider):
 
     def load(self):
         if self.rt is None:
-            key = ("nli", self.model, json.dumps({k: self.cfg.get(k) for k in ("revision", "subfolder", "adapter", "dtype", "device")}, sort_keys=True, default=str))
+            key = ("nli", self.model, self.device or "", json.dumps({k: self.cfg.get(k) for k in ("revision", "subfolder", "adapter", "dtype")}, sort_keys=True, default=str))
             self.rt = load_once(key, self._load_runtime)
             self.device = self.rt.device
 
@@ -856,14 +857,14 @@ class JevOmniProvider(DecisionProvider):
     question is one forward pass over "state + question + numbered option texts": a choice's options
     are its descriptions (or keys when bare), a score is a choice over the levels, a noul is a
     choice over true/false with the statement as the question. The model card recommends at most 20
-    options. Setting: ``device`` ('cuda', 'mps' or 'cpu'; default: first available).
+    options. It has no settings; the device is ``CHAI_DEVICE``, else the first available.
     """
 
     name = "jev-omni"
 
     def __init__(self, model: str, settings: dict):
         self.model = model or "akhilaaa3/Jev-Omni"
-        self.device = settings.get("device") or None
+        self.device = requested_device(settings, self.name)  # CHAI_DEVICE, or None
 
     def runtime(self) -> JevOmniRuntime:
         key = (self.model, self.device or "")

@@ -140,7 +140,10 @@ Settings that are not set are not sent (the provider's defaults apply); a settin
 always sent, so a model that rejects it fails loudly instead of being silently ignored. In-process
 backends: `TransformersComponent` (text, or vision-language models such as Chandra OCR 2, on CUDA,
 Apple Silicon or the CPU -- `transcriber.TransformersTranscriber`) and `MLXVLMComponent` (vision,
-Apple Silicon). An AI classifier (`GeminiClassifier`, `LLMClassifier`, ...) returns the model's
+Apple Silicon). The device an in-process model loads on belongs to the machine, not to the
+workflow: set `CHAI_DEVICE` (`cuda`, `cuda:1`, `mps`, `cpu`) in the environment or `.env`; unset, it
+is CUDA if present, then MPS, then the CPU. A `device` setting in a workflow is refused, so the same
+workflow file runs unchanged on a laptop and on a cluster. An AI classifier (`GeminiClassifier`, `LLMClassifier`, ...) returns the model's
 reply as labels matched to its `labels` setting, so a `LabelTestGate` can route on them.
 
 **System One decision models** are a different kind of backend -- they answer typed questions with

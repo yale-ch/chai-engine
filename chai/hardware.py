@@ -20,7 +20,9 @@ JSON-Lines file, a Parquet file's ``chai_tea_records``, the ``workflow_runs`` ta
 
 The key is a hash of the profile, so the same machine has the same key in every run and rows from
 many runs join to one description. ``device`` is where the model's weights were (``cuda:0``,
-``mps``, ``cpu``), or ``None`` for a local server, which decides that itself. The profile is read
+``mps``, ``cpu``), or ``None`` for a local server, which decides that itself. Which device that is
+comes from the environment, never from a workflow: ``CHAI_DEVICE`` (``requested_device``), else the
+first of CUDA, MPS and the CPU (``torch_device``). The profile is read
 once per process (``hardware_info``) and the same on Windows, macOS and Linux: the CPU's model name
 from the registry, ``sysctl`` or ``/proc/cpuinfo``; NVIDIA GPUs through NVML (``nvidia-ml-py``) or,
 failing that, torch; Apple Silicon's GPU from ``system_profiler``; other GPUs on Windows from CIM. A
@@ -280,12 +282,44 @@ def is_local_url(url):
     return host.lower() in LOCAL_HOSTS
 
 
-def torch_device(preferred=None):
-    """The device to load a torch model on: *preferred* when given, else CUDA, then MPS, then CPU."""
-    if preferred:
-        return preferred
+#: The environment variable that names the device this machine's in-process models load on.
+DEVICE_ENV = "CHAI_DEVICE"
+
+
+def requested_device(settings=None, owner=None):
+    """The device ``CHAI_DEVICE`` names -- ``cuda``, ``cuda:1``, ``mps``, ``cpu`` -- or ``None``
+    when it is unset or empty, which leaves the choice to ``torch_device``.
+
+    Which device a model runs on is a fact about the machine, not about the workflow: the same
+    workflow file runs on a laptop's MPS and on a cluster's CUDA. So it comes from the environment
+    (``.env`` included), and a ``device`` in a component's *settings* is refused, with what to set
+    instead, rather than ignored. *owner* names the component or model in that message.
+    """
+    if settings and "device" in settings:
+        value = settings["device"]
+        example = value if isinstance(value, str) and value else "mps"
+        raise ValueError(
+            f"{f'{owner}: ' if owner else ''}`device` is not a setting. The device belongs to the machine a "
+            f"workflow runs on, not to the workflow: remove it from the settings and set {DEVICE_ENV}={example} "
+            f"in the environment or in .env (unset, a model loads on CUDA if present, then MPS, then the CPU)."
+        )
+    return os.environ.get(DEVICE_ENV, "").strip() or None
+
+
+def torch_device(requested=None):
+    """The device to load a torch model on: ``CHAI_DEVICE`` (*requested*, when a caller has read it
+    already) if it is set, else CUDA, then MPS, then the CPU."""
     import torch
 
+    requested = requested or requested_device()
+    if requested:
+        try:
+            torch.device(requested)
+        except (RuntimeError, TypeError) as e:
+            raise ValueError(
+                f"{DEVICE_ENV}={requested!r} does not name a torch device (such as cuda, cuda:1, mps or cpu): {e}"
+            ) from e
+        return requested
     if torch.cuda.is_available():
         return "cuda"
     if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():

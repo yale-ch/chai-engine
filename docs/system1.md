@@ -40,7 +40,9 @@ Models that only classify (GLiNER, Jev-Omni) answer `score` as a choice over the
 as a choice over true/false, as the bench's `as_choice` approaches do. Models that read at most N
 options in one pass (the letters styles: 16, 10 or 24; slots: 16) score a longer choice by a
 two-round knockout. Local models load once per process and share one device lock (Apple's MPS
-backend aborts the process when two threads submit work at once).
+backend aborts the process when two threads submit work at once). The device they load on is the
+machine's, not the workflow's: `CHAI_DEVICE` (`cuda`, `cuda:1`, `mps`, `cpu`) in the environment or
+`.env`, else CUDA if present, then MPS, then the CPU. A `device` setting is refused.
 
 A local model loads its weights the first time it is called, before that call's clock starts: the
 result's `duration` is the time the model took to answer, and the call that loaded the model
@@ -58,7 +60,7 @@ The `model` setting takes three forms:
   (the typed-decisions checkpoint, as the bench runs it), `von`, `bekko-400m`, `gliner-decide`,
   `jev-omni`, and the Yale fine-tunes `kev-4b-europeana-persons`, `gliner-decide-europeana-persons`,
   `gliner-decide-linkedart-recon`. Any key may be overridden in the settings (`temperature`,
-  `device`, ...).
+  `max_state_tokens`, ...).
 - **`<family>/<checkpoint>`** -- a Hub repo or a local folder: `laya/convaiinnovations/laya` (the
   English root checkpoint), `gliner//path/to/checkpoint`, `pointer/yale-cultural-heritage/kev-4b-europeana-persons`,
   `letters/crh225/plumb-4b` with `style: jevk5`. Families that need a released adapter or head take

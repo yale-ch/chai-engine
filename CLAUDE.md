@@ -66,7 +66,7 @@ Every component supports an error policy via settings (`retries`, `retry_delay`,
 - **`GeminiComponent`**: Uses Google's Gemini API (supports Vertex AI via `GOOGLE_CLOUD_PROJECT`).
 - **`LMStudioComponent`**: Uses LM Studio local server (`localhost:1234` by default).
 - **`OllamaComponent`**: Uses Ollama local server (`localhost:11434` by default).
-- **`TransformersComponent`**: A HuggingFace model in-process on CUDA, MPS or the CPU (`device`, `dtype`); a vision-language model (config with a `vision_config`, e.g. `datalab-to/chandra-ocr-2`) takes IMAGE results too. Its weights load once per process and device, and one generation runs at a time per model. Its roles are made explicitly: `TransformersTranscriber`, `TransformersDescriber`.
+- **`TransformersComponent`**: A HuggingFace model in-process on CUDA, MPS or the CPU (`dtype`); a vision-language model (config with a `vision_config`, e.g. `datalab-to/chandra-ocr-2`) takes IMAGE results too. Its weights load once per process and device, and one generation runs at a time per model. Its roles are made explicitly: `TransformersTranscriber`, `TransformersDescriber`. The device an in-process model (this or a System One model) loads on is the machine's, not the workflow's: `CHAI_DEVICE` (`cuda`, `cuda:1`, `mps`, `cpu`) in the environment or `.env`, else CUDA if present, then MPS, then the CPU (`hardware.requested_device`, `torch_device`); a `device` setting is refused at build with that advice.
 
 AI components are typically mixed with base components (e.g., `GeminiTranscriber` extends both `Transcriber` and `GeminiComponent`).
 

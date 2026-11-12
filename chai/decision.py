@@ -105,8 +105,10 @@ class DecisionBase:
         - options_heading: heading over the options listed in the state for layout in_state; {field}
           placeholders are filled from a dict input (default 'Options:')
         - max_options: cap on options sent to the model, before any none option (default 0 = all)
-        - the model's own settings pass through: api_key, api_base, timeout, device, subfolder,
+        - the model's own settings pass through: api_key, api_base, timeout, subfolder,
           use_instruction, temperature, pricing, litellm_params, ... (see chai.system_one)
+        - not a setting: the device a local model loads on. That is the machine's -- CHAI_DEVICE in
+          the environment, else the first available -- and a `device` setting is refused
     """
 
     def _init_decision(self):

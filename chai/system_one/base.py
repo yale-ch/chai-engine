@@ -22,6 +22,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 from .questions import QUESTION_TYPES, apply_layout, normalize_answer, question_keys
+from ..hardware import requested_device, torch_device
 
 logger = logging.getLogger("chai")
 
@@ -43,16 +44,9 @@ def load_once(key, loader):
 
 
 def pick_device(requested=None) -> str:
-    """The torch device to load a local model on: *requested*, else CUDA, else Apple MPS, else CPU."""
-    if requested:
-        return requested
-    import torch
-
-    if torch.cuda.is_available():
-        return "cuda"
-    if torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
+    """The torch device to load a local model on: ``CHAI_DEVICE`` (*requested* is a provider's
+    reading of it), else CUDA, else Apple MPS, else CPU. See ``chai.hardware.torch_device``."""
+    return torch_device(requested)
 
 
 def temperatures(value, default=1.0) -> Dict[str, float]:
@@ -113,7 +107,7 @@ class LogitProvider(DecisionProvider):
         self.model = model
         self.settings = dict(settings or {})
         self.temperature = temperatures(self.settings.get("temperature"))
-        self.device = self.settings.get("device") or None
+        self.device = requested_device(self.settings, self.name or type(self).__name__)  # CHAI_DEVICE, or None
         self.last_tokens: Optional[int] = None
 
     def load(self):
@@ -275,6 +269,7 @@ def make_provider(model: str, settings: dict) -> DecisionProvider:
             f"id with a family in {sorted(FAMILIES)}, or a LiteLLM chat model id"
         )
     settings = dict(settings or {})
+    requested_device(settings, f"System One model {model!r}")  # the device is the machine's: no `device` setting
     if model in PRESETS:
         cfg = {**PRESETS[model], **{k: v for k, v in settings.items() if k != "model"}}
         family = cfg.pop("family")

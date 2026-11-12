@@ -131,11 +131,11 @@ class TestAnswers(unittest.TestCase):
 class TestProviders(unittest.TestCase):
     def test_prefix_resolution(self):
         self.assertIsInstance(System1Model({"model": "laya/convaiinnovations/laya"}).provider, LayaProvider)
-        self.assertIsInstance(System1Model({"model": "gliner/fastino/GLiNER2.5-Decide", "device": "cpu"}).provider, GlinerProvider)
+        self.assertIsInstance(System1Model({"model": "gliner/fastino/GLiNER2.5-Decide"}).provider, GlinerProvider)
         self.assertIsInstance(System1Model({"model": "typesafe/jev-latest", "api_key": "k"}).provider, JevProvider)
-        omni = System1Model({"model": "jev-omni/akhilaaa3/Jev-Omni", "device": "cpu"}).provider
+        omni = System1Model({"model": "jev-omni/akhilaaa3/Jev-Omni"}).provider
         self.assertIsInstance(omni, JevOmniProvider)  # nothing is loaded until the first decision
-        self.assertEqual((omni.model, omni.device), ("akhilaaa3/Jev-Omni", "cpu"))
+        self.assertEqual(omni.model, "akhilaaa3/Jev-Omni")
         self.assertEqual(System1Model({"model": "jev-omni/"}).provider.model, "akhilaaa3/Jev-Omni")
         kev = System1Model({"model": "kev/yale-cultural-heritage/kev-4b-europeana-persons", "dtype": "float32"}).provider
         self.assertEqual((kev.name, kev.checkpoint, kev.cfg["dtype"]), ("pointer", "yale-cultural-heritage/kev-4b-europeana-persons", "float32"))
@@ -149,7 +149,7 @@ class TestProviders(unittest.TestCase):
                 System1Model({"model": "jev/jev-latest"})
 
     def test_gliner_labels(self):
-        p = GlinerProvider("fastino/GLiNER2.5-Decide", {"device": "cpu"})
+        p = GlinerProvider("fastino/GLiNER2.5-Decide", {})
         self.assertEqual(p.labels_for(make_question("choice", "?", {"a": "Alpha (1)", "b": ""})), {"a": "Alpha [1]", "b": "b"})
         self.assertEqual(p.labels_for(make_question("choice", "?", ["a", "b"])), ["a", "b"])
         self.assertEqual(set(p.labels_for(make_question("noul", "so"))), {"true", "false"})
