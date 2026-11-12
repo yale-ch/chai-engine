@@ -7,11 +7,14 @@ verified live against gemini-3.7-flash on Vertex, which accepts them. These test
 ``litellm.completion`` call the component builds for each generation without talking to the API.
 """
 
+import inspect
 import os
+import sys
 import unittest
 from unittest import mock
 
 from chai.ai.gemini import GeminiComponent
+from chai.ai.llm import SKIP_MCP_HANDLER
 from chai.result import ItemResult
 from chai.workflow import Workflow
 
@@ -167,6 +170,49 @@ class TestGeminiDefaults(unittest.TestCase):
     def test_output_cap(self):
         c = build_gemini({"model": "gemini-3.7-flash"})
         self.assertEqual(c.base_kwargs["max_tokens"], 8192)
+
+
+class TestToolsWithoutTheMcpPackage(unittest.TestCase):
+    """LiteLLM imports its MCP handler for every call that has tools, and the handler needs the
+    optional ``mcp`` package. Search grounding is a tool, so a default Gemini call failed with
+    "No module named 'mcp'" wherever that package was not installed."""
+
+    FUNCTION = {"type": "function", "function": {"name": "lookup", "parameters": {"type": "object", "properties": {}}}}
+    MCP = {"type": "mcp", "server_label": "catalogue", "server_url": "litellm_proxy/mcp/catalogue"}
+
+    def test_the_handler_is_skipped_for_tools_that_are_not_mcp_tools(self):
+        self.assertIs(build_gemini({"model": "gemini-3.7-flash"}).base_kwargs[SKIP_MCP_HANDLER], True)
+        self.assertIs(build_gemini({"model": "gemini-3.7-flash", "tools": [self.FUNCTION]}).base_kwargs[SKIP_MCP_HANDLER], True)
+
+    def test_nothing_is_added_without_tools(self):
+        self.assertNotIn(SKIP_MCP_HANDLER, build_gemini({"model": "gemini-3.7-flash", "tools": []}).base_kwargs)
+
+    def test_an_mcp_tool_is_left_to_litellm(self):
+        c = build_gemini({"model": "gemini-3.7-flash", "tools": ["search", self.MCP]})
+        self.assertNotIn(SKIP_MCP_HANDLER, c.base_kwargs)
+
+    def test_a_grounded_call_goes_out_without_the_mcp_package(self):
+        # as on a machine where `mcp` is not installed, whether or not it is on this one: the
+        # package cannot be imported, and LiteLLM's handler is forgotten so it would be imported afresh
+        blocked = {name: None for name in sys.modules if name == "mcp" or name.startswith("mcp.")}
+        blocked["mcp"] = None
+        handler = ("litellm.responses.mcp", "litellm.proxy._experimental.mcp_server")
+        c = build_gemini({"model": "gemini-3.7-flash", "expected_output": "text", "litellm_params": {"mock_response": "A view of the Forum."}})
+        self.assertEqual(c.base_kwargs["tools"], [{"googleSearch": {}}])
+        with mock.patch.dict(sys.modules, blocked):  # restores sys.modules as it was on the way out
+            for name in [name for name in sys.modules if name.startswith(handler)]:
+                del sys.modules[name]
+            out = c.process(ItemResult("the photograph", metadata={"type": "TEXT"}))
+        self.assertEqual(out.value, "A view of the Forum.")
+
+    def test_litellm_still_reads_the_private_flag(self):
+        # The keyword is not part of LiteLLM's public API. If an upgrade drops it, chai would be
+        # sending a provider a parameter it does not know: fail here, and look again at whether
+        # chai.ai.llm.SKIP_MCP_HANDLER is still needed and still spelled this way.
+        import litellm
+
+        source = inspect.getsource(inspect.unwrap(litellm.completion))
+        self.assertIn(f'kwargs.pop("{SKIP_MCP_HANDLER}"', source)
 
 
 if __name__ == "__main__":
