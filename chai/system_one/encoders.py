@@ -23,6 +23,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, List, Tuple
 
+from ..hardware import requested_device
 from .base import DEVICE_LOCK, DecisionProvider, LogitProvider, load_once, pick_device, register, temperatures, usage_from
 from .questions import wire_question
 
@@ -58,8 +59,9 @@ _LAYA_LOCK = threading.Lock()
 @register("laya")
 class LayaProvider(DecisionProvider):
     """Laya (``convaiinnovations/laya``), in process. Loaded once per process (about 850 MB on
-    first use); answers every question about a state in one forward pass. Settings: ``subfolder``
-    (checkpoint variant such as 'multilingual' or 'typed-decisions') and ``device`` (torch device)."""
+    first use); answers every question about a state in one forward pass. Setting: ``subfolder``
+    (checkpoint variant such as 'multilingual' or 'typed-decisions'). The device is ``CHAI_DEVICE``,
+    else the ``laya`` package's own choice."""
 
     name = "laya"
 
@@ -67,7 +69,7 @@ class LayaProvider(DecisionProvider):
         self.model = model or "convaiinnovations/laya"
         self.settings = dict(settings or {})
         self.subfolder = self.settings.get("subfolder") or None
-        self.device = self.settings.get("device") or None
+        self.device = requested_device(self.settings, self.name)  # CHAI_DEVICE, or None
         self.lengths = {k: int(self.settings[k]) for k in ("max_len", "head_max_len") if self.settings.get(k)}
 
     def agent(self):
@@ -106,7 +108,7 @@ class VonProvider(LogitProvider):
 
     Settings: ``revision``, ``independent_options`` (default true: each option attends only to the
     prefix and itself, so the result is option-order invariant), ``digit_split`` (default false, as
-    the SDK serves it), ``max_len`` (default 4096), ``max_state_tokens`` (default 2048), ``device``,
+    the SDK serves it), ``max_len`` (default 4096), ``max_state_tokens`` (default 2048),
     ``temperature`` (default: the checkpoint's ``calibration.json``).
     """
 
@@ -182,7 +184,7 @@ class BekkoProvider(LogitProvider):
 
     Runs the model repo's own ``inference_v0.py`` (downloaded and imported). Settings: ``revision``,
     ``prefix_layout`` (default 'instruction_state'), ``query_length`` (default 4096),
-    ``document_length`` (default 512), ``device``, ``temperature`` (default 1).
+    ``document_length`` (default 512), ``temperature`` (default 1).
     """
 
     name = "bekko"

@@ -72,8 +72,8 @@ class TestRegistry(unittest.TestCase):
         self.assertEqual(make_provider("gliner-decide-europeana-persons", {}).model, "yale-cultural-heritage/GLiNER2.5-Decide-europeana-persons")
 
     def test_settings_override_a_preset(self):
-        p = make_provider("plumb-4b", {"temperature": 1.0, "device": "cpu", "max_options": 4})
-        self.assertEqual((p.temperature["choice"], p.device, p.max_options), (1.0, "cpu", 4))
+        p = make_provider("plumb-4b", {"temperature": 1.0, "max_state_tokens": 512, "max_options": 4})
+        self.assertEqual((p.temperature["choice"], p.max_state, p.max_options), (1.0, 512, 4))
 
     def test_prefix_ids_and_fallback(self):
         self.assertIsInstance(make_provider("letters/crh225/plumb-4b", {"style": "jevk5"}), LetterProvider)

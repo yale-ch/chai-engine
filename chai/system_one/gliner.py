@@ -17,6 +17,7 @@ import re
 from types import SimpleNamespace
 from typing import Dict
 
+from ..hardware import requested_device
 from .base import DEVICE_LOCK, DecisionProvider, load_once, pick_device, register
 from .questions import NOUL_OPTIONS
 
@@ -45,10 +46,10 @@ def gliner_sanitize(value) -> str:
 class GlinerProvider(DecisionProvider):
     """GLiNER2.5-Decide, in process on CUDA, Apple MPS or CPU; ``gliner/<hub repo or folder>``.
 
-    Settings: ``device`` (default: first available of CUDA, MPS, CPU), ``text_template`` (a string,
-    or ``{type: template}`` overriding ``TEXT_TEMPLATES``), ``use_instruction`` (also pass the
-    question as gliner2's task instruction; default false -- measured worse on reconciliation), and
-    ``temperature`` is not applied: the model's own softmax is the answer.
+    Settings: ``text_template`` (a string, or ``{type: template}`` overriding ``TEXT_TEMPLATES``),
+    ``use_instruction`` (also pass the question as gliner2's task instruction; default false --
+    measured worse on reconciliation), and ``temperature`` is not applied: the model's own softmax
+    is the answer. The device is ``CHAI_DEVICE``, else the first available of CUDA, MPS and the CPU.
     """
 
     name = "gliner"
@@ -57,7 +58,7 @@ class GlinerProvider(DecisionProvider):
     def __init__(self, model: str, settings: dict):
         self.model = model or "fastino/GLiNER2.5-Decide"
         self.settings = dict(settings or {})
-        self.device = self.settings.get("device") or None
+        self.device = requested_device(self.settings, self.name)  # CHAI_DEVICE, or None
         self.use_instruction = bool(self.settings.get("use_instruction", False))
         template = self.settings.get("text_template")
         self.templates = dict(TEXT_TEMPLATES)
