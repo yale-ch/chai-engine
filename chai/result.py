@@ -320,6 +320,9 @@ class FileItemResult(ItemResult):
             ".html": "TEXT",
             ".mp3": "AUDIO",
             ".wav": "AUDIO",
+            ".m4a": "AUDIO",
+            ".ogg": "AUDIO",
+            ".flac": "AUDIO",
             ".json": "DATA",
             ".xml": "DATA",
         }
