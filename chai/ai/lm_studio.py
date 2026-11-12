@@ -19,6 +19,12 @@ class LMStudioComponent(LLMComponent):
         - temperature: sampling temperature (default 0.4)
         - max_output_tokens: response token cap (default 32000)
         - max_image_size: long-edge pixel limit; images are downscaled before upload if set (default 0 = off)
+        - reasoning_effort: how much a thinking model reasons before it answers, in LM Studio's own
+          values: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' (default: not sent, so the
+          model decides). Set 'none' for transcription, translation and extraction with a thinking
+          model such as Qwen 3.x: left to itself it reasons first, and can spend the whole of
+          max_output_tokens doing so and return an empty reply. The server rejects any other value
+          ('disable', which other providers take, is not one of LM Studio's)
         - plus every LLMComponent setting (prompt, expected_output, system_instruction, timeout, pricing, ...)
     """
 
@@ -31,3 +37,5 @@ class LMStudioComponent(LLMComponent):
     DEFAULT_API_KEY = "EMPTY"
     DEFAULT_EMBEDDING_MODEL = "text-embedding-nomic-embed-text-v1.5"
     ENGINE_NAME = "lm-studio"  # as stored on main before the LiteLLM backend; the provider is "lm_studio"
+    # LM Studio takes reasoning_effort; LiteLLM's lm_studio provider would refuse to send it
+    SERVER_PARAMS = ("reasoning_effort",)

@@ -232,6 +232,9 @@ class LLMComponent(Component):
     DEFAULT_EMBEDDING_MODEL: str = ""
     EMBEDDING_PROVIDER: str = ""  # prefix for bare embedding model ids when not PROVIDER ('ollama')
     MODEL_KIND: str = "chat"  # 'embedding' when mixed into an embedding role (chai.embedder.Embedder)
+    # request parameters this backend's server takes although LiteLLM's table for the provider does
+    # not list them: when one is set it is let through (allowed_openai_params) rather than refused
+    SERVER_PARAMS: tuple = ()
 
     def __init__(self, tree, workflow, parent=None):
         super().__init__(tree, workflow, parent)
@@ -376,6 +379,10 @@ class LLMComponent(Component):
         if self.settings.get("extra_body"):
             kw["extra_body"] = dict(self.settings["extra_body"])
         kw.update(self.settings.get("litellm_params") or {})
+        passed = [name for name in self.SERVER_PARAMS if name in kw]
+        if passed:
+            allowed = list(kw.get("allowed_openai_params") or [])
+            kw["allowed_openai_params"] = allowed + [name for name in passed if name not in allowed]
         return kw
 
     # ------------------------------------------------------------------ building the request

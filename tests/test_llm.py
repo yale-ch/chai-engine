@@ -172,6 +172,24 @@ class TestBackendDefaults(unittest.TestCase):
         self.assertEqual(c.base_kwargs["api_base"], "http://localhost:1234/v1")
         self.assertEqual(c.base_kwargs["api_key"], "EMPTY")
         self.assertEqual(c.base_kwargs["max_tokens"], 32000)
+        self.assertNotIn("allowed_openai_params", c.base_kwargs)  # nothing set, nothing let through
+
+    def test_lm_studio_takes_reasoning_effort(self):
+        # LM Studio honours reasoning_effort ('none' switches a thinking model's reasoning off), but
+        # LiteLLM's lm_studio provider refuses to send it unless it is explicitly allowed
+        c, _ = build(LMStudioComponent, {"prompt": "p", "reasoning_effort": "none"})
+        self.assertEqual(c.base_kwargs["reasoning_effort"], "none")
+        self.assertEqual(c.base_kwargs["allowed_openai_params"], ["reasoning_effort"])
+        # a list the workflow already gives is kept, and not repeated
+        mine = {"allowed_openai_params": ["logit_bias", "reasoning_effort"]}
+        c, _ = build(LMStudioComponent, {"prompt": "p", "reasoning_effort": "none", "litellm_params": mine})
+        self.assertEqual(c.base_kwargs["allowed_openai_params"], ["logit_bias", "reasoning_effort"])
+        # the request goes out: before, LiteLLM raised UnsupportedParamsError here
+        c, _ = build(LMStudioComponent, {"prompt": "p", "reasoning_effort": "none", "expected_output": "text", "litellm_params": {"mock_response": "All Gaul is divided"}})
+        self.assertEqual(c.process(text("Gallia est omnis divisa")).value, "All Gaul is divided")
+        # only for a backend whose server takes it
+        c, _ = build(OpenAIComponent, {"prompt": "p", "model": "o3-mini", "reasoning_effort": "low"})
+        self.assertNotIn("allowed_openai_params", c.base_kwargs)
 
     def test_openai_and_compatible_servers(self):
         c, _ = build(OpenAIComponent, {"prompt": "p", "model": "gpt-4o-mini"})
