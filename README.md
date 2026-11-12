@@ -353,4 +353,7 @@ class SentimentClassifier(Classifier):
 ```
 
 Drop the file in the workflow-builder's `custom_components/` to use it
-visually, or reference it by dotted path in workflow JSON.
+visually, or reference it by dotted path in workflow JSON
+(`"type": "my_project.components.SentimentClassifier"`). chai's own types are
+looked up first; a type chai does not have is imported as written, so the
+package it lives in only has to be importable.

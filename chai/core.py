@@ -25,34 +25,64 @@ if fn:
     load_dotenv(fn)
 
 
+def _module_is_missing(error, module_name):
+    """True when *error* says *module_name* itself (or a package above it) does not exist -- not
+    that the module is there and something it imports is not."""
+    missing = error.name or ""
+    return bool(missing) and (module_name == missing or module_name.startswith(missing + "."))
+
+
 def importClass(objectType):
     """Resolve a workflow-config ``type`` string (e.g. ``"provider.DirFileProvider"``) to a class.
 
-    The string is split into module and class name; the module is looked up inside the ``chai`` package
-    (a bare class name defaults to ``chai.core``). Import or attribute failures are logged and re-raised.
+    The string is split into module and class name, and the module is looked up inside the ``chai``
+    package first (a bare class name is looked up in ``chai.core``), so chai's own components are
+    named without the prefix and always win. A type chai does not have is then imported as the
+    dotted path it is -- ``reconciler.components.selector.LayaSelector``,
+    ``custom_components.shout.ShoutTranscriber`` -- so a project can keep its components in its
+    own package, as long as that package is importable. A class from outside ``chai`` must be a
+    ``Component``.
+
+    Raises ``ModuleNotFoundError`` when no module by that name exists either way and
+    ``AttributeError`` when a module does but has no such class, naming each place that was
+    tried; ``TypeError`` for a class outside chai that is not a ``Component``. An import that fails
+    inside a module that exists (a missing dependency) is logged and re-raised as it is.
     """
     if not objectType:
         return None
-    try:
-        (modName, className) = objectType.rsplit(".", 1)
-    except Exception:
-        (modName, className) = ("core", objectType)
-    if not modName.startswith("chai."):
-        modName = f"chai.{modName}"
+    modName, _, className = objectType.rpartition(".")
+    if not modName:
+        candidates = ["chai.core"]
+    elif modName.startswith("chai."):
+        candidates = [modName]
+    else:
+        candidates = [f"chai.{modName}", modName]
 
-    try:
-        m = importlib.import_module(modName)
-    except ModuleNotFoundError as mnfe:
-        logger.critical(f"Could not find module {modName}: {mnfe}")
-        raise
-    except Exception as e:
-        logger.critical(f"Failed to import {modName}: {e}")
-        raise
-    try:
-        parentClass = getattr(m, className)
-    except AttributeError:
-        raise
-    return parentClass
+    tried, found_module = [], False
+    for name in candidates:
+        try:
+            m = importlib.import_module(name)
+        except ModuleNotFoundError as mnfe:
+            if not _module_is_missing(mnfe, name):
+                logger.critical(f"Failed to import {name}: {mnfe}")
+                raise
+            tried.append(f"there is no module {name}")
+            continue
+        except Exception as e:
+            logger.critical(f"Failed to import {name}: {e}")
+            raise
+        found_module = True
+        cls = getattr(m, className, None)
+        if cls is None:
+            tried.append(f"{name} has no {className}")
+            continue
+        if not name.startswith("chai.") and not (isinstance(cls, type) and issubclass(cls, Component)):
+            raise TypeError(f"Component type {objectType!r} is not a chai Component: {cls!r}")
+        return cls
+
+    message = f"Cannot resolve component type {objectType!r}: {'; '.join(tried)}"
+    logger.critical(message)
+    raise (AttributeError if found_module else ModuleNotFoundError)(message)
 
 
 def result_preview(result, limit=160, depth=0):
